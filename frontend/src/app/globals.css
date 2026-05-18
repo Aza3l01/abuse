@@ -1,0 +1,33 @@
+@import "tailwindcss";
+
+/* ── Clew Design System ─────────────────────────────────────── */
+:root {
+  --color-bg:         #F5F5F5;
+  --color-surface:    #EBEBEB;
+  --color-border:     #D0D0D0;
+  --color-text:       #0D0D0D;
+  --color-text-muted: #5A5A5A;
+}
+
+.dark {
+  --color-bg:         #0D0D0D;
+  --color-surface:    #1A1A1A;
+  --color-border:     #2A2A2A;
+  --color-text:       #F5F5F5;
+  --color-text-muted: #888888;
+}
+
+@theme inline {
+  --color-background: var(--color-bg);
+  --color-foreground: var(--color-text);
+  --font-brand: var(--font-courier), 'Courier New', monospace;
+  --font-sans:  var(--font-geist-sans), system-ui, sans-serif;
+  --font-mono:  var(--font-geist-mono), 'Courier New', monospace;
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  transition: background 0.1s, color 0.1s;
+}

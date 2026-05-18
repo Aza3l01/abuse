@@ -1,6 +1,18 @@
+# Python
 __pycache__/
 *.pyc
-venv/
-datasets/
+*.pyo
+*.pyd
 .env
-.venv/
+engine/.venv/
+engine/venv/
+engine/datasets/
+
+# Node / Next.js
+frontend/node_modules/
+frontend/.next/
+frontend/.env*
+frontend/out/
+
+# OS
+.DS_Store
