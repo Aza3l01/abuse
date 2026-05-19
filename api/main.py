@@ -23,13 +23,25 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # ------------------------------------------------------------------
-# CORS — only the frontend origin is allowed
+# CORS — allow the frontend origin (and its www variant)
 # ------------------------------------------------------------------
-FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000").rstrip("/")
+
+_cors_origins = [FRONTEND_URL]
+# Nginx serves both clewsec.com and www.clewsec.com; include both so that
+# a browser on either subdomain can send credentialed requests to the API.
+if "://www." in FRONTEND_URL:
+    _cors_origins.append(FRONTEND_URL.replace("://www.", "://", 1))
+else:
+    scheme_sep = FRONTEND_URL.find("://")
+    if scheme_sep != -1:
+        _cors_origins.append(
+            FRONTEND_URL[: scheme_sep + 3] + "www." + FRONTEND_URL[scheme_sep + 3 :]
+        )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_URL],
+    allow_origins=_cors_origins,
     allow_credentials=True,   # required for cookies to be sent cross-origin
     allow_methods=["*"],
     allow_headers=["*"],
