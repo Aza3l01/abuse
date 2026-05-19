@@ -3,13 +3,14 @@
 import { useTheme } from "next-themes";
 import { useEffect, useState } from "react";
 import Image from "next/image";
+import { API_URL } from "@/lib/api";
 
 function useIsLoggedIn() {
   const [loggedIn, setLoggedIn] = useState(false);
   useEffect(() => {
-    // Wire this to your real auth check once JWT auth is built.
-    // For now checks for a "clew_session" cookie set at login.
-    setLoggedIn(document.cookie.includes("clew_session="));
+    fetch(`${API_URL}/auth/me`, { credentials: "include" })
+      .then((r) => setLoggedIn(r.ok))
+      .catch(() => setLoggedIn(false));
   }, []);
   return loggedIn;
 }
@@ -17,15 +18,10 @@ function useIsLoggedIn() {
 export function Navbar() {
   const { theme, setTheme } = useTheme();
   const [mounted, setMounted] = useState(false);
-  const [hash, setHash] = useState("");
   const loggedIn = useIsLoggedIn();
 
   useEffect(() => {
     setMounted(true);
-    setHash(window.location.hash);
-    const onHashChange = () => setHash(window.location.hash);
-    window.addEventListener("hashchange", onHashChange);
-    return () => window.removeEventListener("hashchange", onHashChange);
   }, []);
 
   // SVG is filled #f5f5f5 (light). Invert in light mode so it reads dark on light bg.
@@ -55,10 +51,12 @@ export function Navbar() {
 
         <div className="flex items-center gap-6">
           <a
-            href="#pricing"
+            href="/#pricing"
             onClick={(e) => {
-              const el = document.getElementById("pricing");
-              if (el) { e.preventDefault(); el.scrollIntoView({ behavior: "smooth" }); }
+              if (window.location.pathname === "/") {
+                const el = document.getElementById("pricing");
+                if (el) { e.preventDefault(); el.scrollIntoView({ behavior: "smooth" }); }
+              }
             }}
             className="text-sm transition-colors"
             style={{ color: "var(--color-text-muted)" }}
@@ -85,7 +83,7 @@ export function Navbar() {
             {loggedIn ? "Dashboard" : "Sign in"}
           </a>
 
-          {mounted && hash !== "#cost" && (
+          {mounted && (
             <button
               onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
               aria-label="Toggle theme"

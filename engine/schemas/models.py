@@ -52,6 +52,9 @@ class LogRecord:
     # ISO-3166-1 alpha-2 code embedded from dataset (e.g. 'CZ' for CTU13).
     # GeoIPAgent reads this to determine what counts as "foreign" traffic.
     tenant_home_country:  str                    = ""
+    # Product field — identifies which Clew client this record belongs to.
+    # Empty string in research/evaluation context; always set in production.
+    client_id:            str                    = ""
 
 
 @dataclass

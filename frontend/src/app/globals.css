@@ -7,6 +7,14 @@
   --color-border:     #D0D0D0;
   --color-text:       #0D0D0D;
   --color-text-muted: #5A5A5A;
+  /* Logo SVG fill is #F5F5F5 (light); invert in light mode so it reads dark. */
+  --logo-filter:      invert(1);
+
+  /* Functional severity colours — product only, never brand */
+  --color-critical: #E53E3E;
+  --color-high:     #DD6B20;
+  --color-medium:   #D69E2E;
+  --color-low:      #38A169;
 }
 
 .dark {
@@ -15,6 +23,12 @@
   --color-border:     #2A2A2A;
   --color-text:       #F5F5F5;
   --color-text-muted: #888888;
+  --logo-filter:      none;
+
+  --color-critical: #E53E3E;
+  --color-high:     #DD6B20;
+  --color-medium:   #D69E2E;
+  --color-low:      #38A169;
 }
 
 @theme inline {

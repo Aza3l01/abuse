@@ -293,7 +293,7 @@ export function CostCalculator() {
               </div>
 
               <a
-                href="/login"
+                href="/register"
                 className="text-sm font-medium transition-opacity hover:opacity-80 whitespace-nowrap"
                 style={{
                   padding: "12px 24px",

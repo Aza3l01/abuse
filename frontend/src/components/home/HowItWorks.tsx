@@ -6,8 +6,8 @@ const STEPS = [
   },
   {
     number: "02",
-    heading: "Engine detects threats",
-    body: "Our multi-agent detection engine runs every 15 to 30 minutes against your logs. Bots, credential stuffing, endpoint scanning, scrapers, and data exfiltration all detected without you doing anything.",
+    heading: "Agents detect. Orchestrator decides.",
+    body: "Seven specialised AI agents run in parallel against every log batch, each trained on a different threat class. A meta-agent orchestrator fuses their confidence signals into a single verdict, independently validated on real-world attack datasets.",
   },
   {
     number: "03",

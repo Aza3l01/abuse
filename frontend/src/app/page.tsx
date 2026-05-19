@@ -4,10 +4,13 @@ import { Footer } from "@/components/layout/Footer";
 import { Hero } from "@/components/home/Hero";
 import { CostCalculator } from "@/components/home/CostCalculator";
 import { HowItWorks } from "@/components/home/HowItWorks";
+import { AgentsSection } from "@/components/home/AgentsSection";
 import { Pricing } from "@/components/home/Pricing";
 
 export const metadata: Metadata = {
-  title: "API Security for Growing SaaS",
+  title: { absolute: "Clew" },
+  description:
+    "Seven specialised AI agents monitor your AWS API Gateway logs for bots, credential stuffing, scrapers, and data exfiltration. No code changes. No proxy. Just connect your S3 logs.",
 };
 
 export default function Home() {
@@ -21,6 +24,7 @@ export default function Home() {
         <Hero />
         <CostCalculator />
         <HowItWorks />
+        <AgentsSection />
         <Pricing />
       </main>
       <Footer />

@@ -1,349 +1,380 @@
 # Product Context — Clew
 
-> **Product name:** Clew  
-> **Development codename:** abuse
-
-## What This Is
-
-A B2B SaaS product that monitors API gateway logs for abuse and attack patterns,
-detects threats using a multi-agent AI engine, blocks malicious traffic via AWS WAF
-or Cloudflare, and surfaces findings through a web dashboard. Target clients are
-Series A/B SaaS companies and SMBs with APIs and no dedicated security team.
-Zero-integration positioning: client gives read-only S3 access to their logs, no
-code changes, no proxy, no SDK required.
+> **Product name:** Clew
+> **Codename (repo):** abuse
 
 ---
 
-## What Already Exists
+## What Clew Is
 
-A research prototype (`engine`, separate repo, do not touch) validated on four
-datasets. It is a Python multi-agent detection system that reads CSV files via CLI
-and outputs JSON. The detection logic is proven and will be adapted, not rewritten.
+B2B SaaS API abuse detection and blocking. Customers give Clew read-only S3 access
+to their existing AWS API Gateway or ALB logs — no code changes, no proxy, no SDK.
+Clew polls S3 every 15 minutes, runs a multi-agent AI detection engine, and surfaces
+findings through a web dashboard. High-confidence threats can be automatically blocked
+via AWS WAF or Cloudflare on paid tiers.
 
-Agents in the research prototype:
-- VolumeAgent (IsolationForest, detects DoS/DDoS)
-- TemporalAgent (FFT + CUSUM, detects bot periodicity and off-hours patterns)
-- AuthAgent (detects brute force and credential stuffing)
-- PayloadAgent (detects SQL injection, XSS, path traversal)
-- SequenceAgent (detects endpoint enumeration and multi-step abuse)
-- GeoIPAgent (graph-based, detects geo anomalies)
-- KnowledgeAgent (cross-session pattern memory)
-- MetaAgentOrchestrator (weighted fusion, XGBoost stacking, conflict resolution)
-- SharedMemory (STM + LTM + EvidenceBoard)
-- ToolRegistry (4 tools)
-- Optional LLM integration via Ollama (qwen2.5:7b, OpenAI-compatible API)
+**Target customers:** Series A/B SaaS companies and SMBs with public APIs and no
+dedicated security team. Decision maker is a CTO or VP Engineering.
+
+**Key differentiators:**
+- Zero integration burden (S3 access only, nothing touches the request path)
+- AI detection validated on published academic datasets (CICIDS2017, CTU-13, CSIC)
+- Cost-justified ROI metric shown in the dashboard ("$X prevented this month")
 
 ---
 
-## What Needs To Be Built (everything below is new)
+## Current Build Status
 
-1. S3 log ingestion layer (read real AWS API Gateway/ALB logs instead of CSVs)
-2. PostgreSQL persistence (verdicts, client configs, LTM storage)
-3. Redis (STM layer replacement + Celery broker)
-4. Celery task scheduler (run engine per client on a schedule)
-5. FastAPI backend (REST API the dashboard consumes)
-6. AWS WAF v2 + Cloudflare blocking integrations
-7. Next.js frontend (marketing site + authenticated client dashboard, same app)
-8. JWT authentication (per client)
-9. Email alerts via AWS SES
-10. Nginx + PM2 deployment on a single EC2 instance
+Everything listed below is **complete and working**. The only item that is code-complete
+but not yet active is Stripe billing, which is waiting on company registration for
+production API keys (approximately one week).
+
+---
+
+## Tiers
+
+| Tier | Price | Blocking | History |
+|---|---|---|---|
+| Free | $0 | No | 7 days |
+| Starter | $99 / ₹6,999 per month | No | 90 days |
+| Growth | $249 / ₹14,999 per month | WAF + Cloudflare | 1 year |
+| Pro | $449 / ₹29,999 per month | WAF + Cloudflare (lower threshold) | Unlimited |
+
+Currency auto-detected from browser timezone. Manual toggle available.
 
 ---
 
 ## Tech Stack
 
-| Layer | Choice |
+| Layer | Technology |
 |---|---|
-| Engine | Python 3.11 (adapted from research) |
-| API | FastAPI + Uvicorn |
-| Task queue | Celery + Redis |
-| Database | PostgreSQL via SQLAlchemy + Alembic |
-| Cache / STM | Redis |
-| Frontend | Next.js 14 (App Router) + Tailwind + Tremor |
-| Auth | JWT (python-jose), httpOnly cookies |
-| Blocking | boto3 WAF v2 + Cloudflare Python SDK |
-| Alerts | AWS SES via boto3 |
-| Deployment | EC2 t3.small + Nginx + PM2 + Let's Encrypt |
-| DNS | Namecheap → EC2 Elastic IP |
-| Local dev | Docker Compose (postgres + redis only) |
+| Backend | FastAPI + Python 3.11 |
+| Database | PostgreSQL 16 |
+| Cache / queue broker | Redis 7 |
+| Background jobs | Celery + Celery Beat |
+| Frontend | Next.js 16 (App Router) |
+| Styling | Tailwind CSS + CSS variables (no component library) |
+| Auth | httpOnly JWT cookies + bcrypt + pyotp |
+| Email | AWS SES |
+| Billing | Stripe (code complete, keys pending) |
+| Detection | Custom multi-agent engine (Python 3.11) |
+| Blocking | AWS WAF v2 (boto3) + Cloudflare API |
+| Process manager | PM2 (EC2 production) |
+| Web server | Nginx |
 
 ---
 
-## Folder Structure
+## Repository Structure
 
 ```
-[product]/
-├── engine/
-│   ├── agents/              # adapted agents — no CSV deps, accept log dicts
-│   ├── coordinator/         # MetaAgentOrchestrator
-│   ├── ingestion/
-│   │   ├── s3_reader.py     # reads new entries from client S3 bucket
-│   │   ├── apigw_parser.py  # AWS API Gateway access log format
-│   │   ├── alb_parser.py    # ALB log format
-│   │   └── normalizer.py    # normalizes any format to internal schema
-│   ├── memory/              # SharedMemory backed by PostgreSQL + Redis
-│   └── schemas.py           # Pydantic models for internal log schema
-│
-├── api/
-│   ├── main.py              # FastAPI app, CORS, middleware
-│   ├── auth.py              # JWT creation and validation
-│   ├── deps.py              # get_db, get_current_client dependencies
+abuse/
+├── api/                    FastAPI backend
+│   ├── main.py             App entry point, CORS, all routers registered
+│   ├── deps.py             get_db(), get_current_client() dependencies
+│   ├── auth_utils.py       Hashing, JWT, cookies, OTP, SES email
+│   ├── limiter.py          Shared slowapi rate limiter
 │   └── routes/
-│       ├── verdicts.py      # GET /verdicts with filters and pagination
-│       ├── dashboard.py     # GET /dashboard/summary stats
-│       ├── clients.py       # client config CRUD
-│       └── auth.py          # POST /auth/login, /auth/logout
-│
-├── workers/
-│   ├── celery_app.py        # Celery config, broker = Redis
-│   ├── beat.py              # periodic schedule per active client
-│   └── tasks/
-│       ├── process_logs.py  # S3 read → engine → write verdicts
-│       ├── send_alerts.py   # SES email on critical verdicts
-│       └── push_blocks.py   # WAF or Cloudflare block on high-confidence threat
-│
-├── blocking/
-│   ├── aws_waf.py           # update IP sets via boto3 wafv2
-│   └── cloudflare.py        # push firewall rules via Cloudflare API
-│
+│       ├── auth.py         All auth endpoints
+│       ├── clients.py      Client S3 + alert config
+│       ├── verdicts.py     Detection results + manual blocking
+│       ├── dashboard.py    Summary stats endpoint
+│       ├── ips.py          IP intelligence table
+│       └── billing.py      Stripe checkout + webhook
 ├── db/
-│   ├── models.py            # SQLAlchemy ORM models
-│   ├── session.py           # DB session factory
-│   └── migrations/          # Alembic migration files
-│
-├── frontend/
-│   ├── src/
-│   │   ├── app/
-│   │   │   ├── page.tsx                   # marketing homepage
-│   │   │   ├── pricing/page.tsx
-│   │   │   ├── login/page.tsx
-│   │   │   └── dashboard/
-│   │   │       ├── page.tsx               # overview, stats, cost counter
-│   │   │       ├── alerts/page.tsx        # live alert feed
-│   │   │       ├── ips/page.tsx           # IP intelligence, history
-│   │   │       └── settings/page.tsx      # S3 config, alert prefs, IAM guide
-│   │   └── components/
-│   │       ├── marketing/                 # homepage, nav, pricing cards
-│   │       └── dashboard/                 # tremor charts, verdict tables, stat cards
-│   └── package.json
-│
-├── tests/
+│   ├── models.py           SQLAlchemy ORM (7 tables)
+│   ├── session.py          Engine + SessionLocal
+│   └── migrations/         3 Alembic migrations (initial, stripe, mfa_backup_codes)
+├── engine/
+│   ├── engine -> source    Symlink for import resolution
+│   ├── schemas/models.py   LogRecord Pydantic model
+│   └── source/
+│       ├── agents/         7 detection agents
+│       ├── coordinator/    MetaAgentOrchestrator
+│       ├── memory/         SharedMemory + Redis-backed ProductSharedMemory
+│       ├── pipeline/run.py run_pipeline() — Celery entry point
+│       └── ingestion/      S3Reader, apigw_parser, alb_parser, normalizer
+├── workers/
+│   ├── celery_app.py       Celery app + config
+│   ├── beat.py             poll_all_clients every 15 min
+│   └── tasks/
+│       ├── process_logs.py S3 -> detect -> verdicts + ip_memory
+│       ├── send_alerts.py  SES alerts for high/critical
+│       └── push_blocks.py  WAF + Cloudflare block/unblock
+├── blocking/
+│   ├── aws_waf.py          WAF IP set management
+│   └── cloudflare.py       Cloudflare firewall rules
+├── frontend/               Next.js 16
+│   └── src/
+│       ├── app/            All routes (marketing + dashboard)
+│       ├── components/     UI components
+│       ├── lib/api.ts      API_URL constant
+│       └── middleware.ts   Edge auth gatekeeper
 ├── docker/
-│   ├── docker-compose.yml   # local dev: postgres + redis
-│   └── nginx.conf
-├── .env.example
-└── requirements.txt
+│   ├── docker-compose.yml  Local Postgres + Redis
+│   ├── nginx.conf          Production Nginx config
+│   └── ecosystem.config.js PM2 process definitions
+├── DESIGN_SYSTEM.md        CSS variables, typography, component conventions
+├── DEV_NOTES.md            Developer onboarding guide (zero to everything)
+├── DEPLOYMENT.md           Step-by-step production server setup guide
+└── NOTES.md                Product strategy and positioning notes
 ```
 
 ---
 
-## Internal Log Schema
+## All API Endpoints
 
-Every log format is normalized into this dict before any agent sees it.
-This is the contract between ingestion and the engine.
+### Auth (`/auth`)
 
+| Method | Path | Description |
+|---|---|---|
+| POST | /auth/register | Create account |
+| POST | /auth/verify-email | Submit OTP |
+| POST | /auth/resend-verification | Re-send OTP |
+| POST | /auth/login | Login → sets httpOnly cookies |
+| POST | /auth/logout | Clear cookies, revoke session |
+| POST | /auth/refresh | Silent token refresh |
+| GET | /auth/me | Current client profile |
+| POST | /auth/forgot-password | Request password reset OTP |
+| POST | /auth/reset-password | Email + OTP + new password |
+| GET | /auth/google | Start Google OAuth |
+| GET | /auth/google/callback | Google callback |
+| GET | /auth/github | Start GitHub OAuth |
+| GET | /auth/github/callback | GitHub callback |
+| GET | /auth/microsoft | Start Microsoft Entra OAuth |
+| GET | /auth/microsoft/callback | Microsoft callback |
+| POST | /auth/mfa/setup | Generate TOTP secret + QR URI |
+| POST | /auth/mfa/verify | Confirm TOTP, enable MFA, get backup codes |
+| POST | /auth/mfa/disable | Disable MFA |
+| POST | /auth/login/mfa | Submit TOTP code during login challenge |
+| GET | /auth/sessions | List active sessions |
+| DELETE | /auth/sessions/{id} | Revoke one session |
+| DELETE | /auth/sessions | Revoke all sessions |
+
+### Other endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| GET | /clients/me | Client config |
+| PATCH | /clients/me | Update client config |
+| GET | /verdicts | Paginated verdicts |
+| GET | /verdicts/{id} | Single verdict |
+| POST | /verdicts/{id}/block | Manual block |
+| POST | /verdicts/{id}/unblock | Manual unblock |
+| GET | /dashboard/summary?days= | Stats + trend |
+| GET | /ips | IP intelligence table |
+| GET | /billing/status | Tier + subscription |
+| POST | /billing/checkout | Create Stripe Checkout Session |
+| POST | /billing/portal | Create Stripe Customer Portal Session |
+| POST | /billing/webhook | Stripe webhook handler |
+| GET | /health | `{"status": "ok"}` |
+
+---
+
+## Database Schema
+
+### `clients`
+One row per customer account. Key columns: `email`, `password_hash` (null for
+OAuth-only), `company_name`, `s3_bucket`, `s3_prefix`, `log_format` (apigw/alb),
+`aws_region`, `last_processed_key`, `tier` (free/starter/growth/pro),
+`mfa_enabled`, `mfa_secret` (Fernet-encrypted), `stripe_customer_id`,
+`stripe_subscription_id`, `tier_expires_at`, `alerts_enabled`, `alert_email`,
+`waf_ip_set_id`, `cloudflare_zone_id`, `cloudflare_token`.
+
+### `oauth_accounts`
+Links a provider identity to a client. Unique on `(provider, provider_id)`.
+Supports Google, GitHub, Microsoft. One client can have multiple OAuth accounts.
+
+### `refresh_tokens`
+One row per active browser session. Stored as SHA-256 hash. `revoked` bool for
+instant invalidation. Powers "View and revoke sessions" in Settings.
+
+### `verdicts`
+One row per pipeline batch result. `ip`, `threat_type`, `severity`,
+`confidence` (0-1), `agents_triggered` (JSON array), `explanation`, `blocked`,
+`cost_prevented`.
+
+### `ip_memory`
+One row per `(client_id, ip)`. Updated on every detection run. Powers the IPs
+dashboard page. `first_seen`, `last_seen`, `total_requests`, `threat_count`,
+`risk_score`, `geo_country`.
+
+### `alerts_sent`
+Deduplication table for SES notifications. One row per `(verdict_id, channel)`.
+
+### `mfa_backup_codes`
+10 hashed single-use recovery codes per client.
+
+**Migrations applied:** `c957d12130b9` → `b4e8f2a1c953` → `e3c1a7f920d4` (head)
+
+---
+
+## Detection Engine
+
+### Seven agents
+
+| Agent | Signal detected | Algorithm |
+|---|---|---|
+| VolumeAgent | DoS / DDoS / floods | Isolation Forest |
+| TemporalAgent | Bot periodicity, off-hours | FFT + CUSUM |
+| AuthAgent | Brute force, credential stuffing | Failed auth rate analysis |
+| PayloadAgent | SQLi, XSS, path traversal | Pattern matching |
+| SequenceAgent | Endpoint enumeration | Sequence analysis |
+| GeoIPAgent | Geographic anomalies | Graph-based clustering |
+| KnowledgeAgent | Cross-session threats | Known signature matching |
+
+All 7 run in parallel. `MetaAgentOrchestrator` fuses results via weighted average
++ XGBoost stacking + conflict resolution rules.
+
+### Severity bands
+- ≥ 0.80 → critical
+- ≥ 0.60 → high
+- ≥ 0.40 → medium
+- < 0.40 → low
+
+### State persistence
+LTM (baselines, IAT pools, agent history) persisted in Redis as
+`clew:ltm:{client_id}`. Loaded at task start, flushed at task end. Survives
+worker restarts and redeployments.
+
+### Entry point
 ```python
-{
-    "timestamp": "2024-01-15T14:23:01Z",   # ISO-8601 UTC
-    "ip":        "203.0.113.42",
-    "method":    "GET",
-    "endpoint":  "/api/v1/users",
-    "status":    200,
-    "response_size": 1240,                  # bytes
-    "latency":   45,                        # milliseconds
-    "user_agent": "python-requests/2.28",
-    "client_id": "uuid-string"
-}
+from engine.pipeline.run import run_pipeline
+verdict = run_pipeline(records=[...], client_id="uuid", redis_client=redis_conn)
 ```
 
 ---
 
-## Database Models (core tables)
-
-**clients**
-id, email, password_hash, company_name, s3_bucket, s3_prefix, log_format,
-aws_region, waf_ip_set_id, cloudflare_zone_id, cloudflare_token,
-alert_email, tier (starter/growth/pro), last_processed_key, created_at
-
-**verdicts**
-id, client_id, timestamp, ip, method, endpoint, threat_type, severity
-(low/medium/high/critical), confidence (0-1), agents_triggered (array),
-explanation (text), blocked (bool), cost_prevented (float), created_at
-
-**ip_memory**
-id, client_id, ip, first_seen, last_seen, total_requests, threat_count,
-risk_score, geo_country, notes
-
-**alerts_sent**
-id, client_id, verdict_id, channel (email/slack), sent_at, status
-
-Every query is filtered by client_id. No client ever sees another client's data.
-
----
-
-## Data Flow
+## S3 Ingestion Pipeline
 
 ```
-Celery beat fires every 15-30 min per active client
-    ↓
-process_logs task runs
-    ↓
-s3_reader reads new log entries since last_processed_key
-    ↓
-parser normalizes entries to internal schema
-    ↓
-engine agents process the batch in parallel
-    ↓
-MetaAgentOrchestrator produces verdicts
-    ↓
-verdicts written to PostgreSQL
-    ↓
-if confidence > threshold AND tier = growth/pro → push_blocks fires (WAF/Cloudflare)
-if severity = critical → send_alerts fires (SES email)
-    ↓
-dashboard reads verdicts via FastAPI → displayed in Next.js
+Celery Beat (every 15 min)
+    poll_all_clients task
+        → one process_logs task per client with s3_bucket configured
+            → S3Reader: list objects since last_processed_key
+            → Normalize: apigw_parser or alb_parser → List[dict]
+            → run_pipeline() in 500-record batches
+            → INSERT into verdicts, UPSERT into ip_memory
+            → UPDATE client.last_processed_key
+            → trigger send_alerts (high/critical)
+            → trigger push_block (Growth/Pro, confidence >= 0.75)
 ```
 
 ---
 
-## URL Structure
+## Frontend Pages
 
-```
-[domain]/                   → marketing homepage (Next.js, public)
-[domain]/pricing            → pricing page (public)
-[domain]/login              → auth page (public)
-[domain]/dashboard          → overview dashboard (protected, JWT required)
-[domain]/dashboard/alerts   → alert feed (protected)
-[domain]/dashboard/ips      → IP intelligence (protected)
-[domain]/dashboard/settings → client config, S3 setup guide (protected)
-api.[domain]/               → FastAPI (all API routes)
-```
+| Route | Notes |
+|---|---|
+| `/` | Marketing homepage: Hero, interactive CostCalculator, HowItWorks, Pricing, Footer |
+| `/pricing` | Standalone pricing page |
+| `/login` | Credentials + Google/GitHub/Microsoft OAuth |
+| `/register` | Email + password + company name |
+| `/verify-email` | 6-digit OTP, resend button |
+| `/forgot-password` | Anti-enumeration — always shows neutral success message |
+| `/reset-password` | Email + OTP + new password — logs in on success |
+| `/dashboard` | Stats grid, 7/30d stacked bar chart, top IPs list, recent verdicts |
+| `/dashboard/alerts` | Paginated verdict feed, filters (severity / IP / date), manual block |
+| `/dashboard/ips` | IP intelligence table, sortable by risk score / request count |
+| `/dashboard/settings` | S3 config, IAM policy guide, alert email, MFA, sessions, billing |
+| 404 | Custom not-found page |
+| Error boundary | Global error page |
 
-Nginx on EC2 routes: `api.[domain]/*` → FastAPI port 8000,
-everything else → Next.js port 3000.
+**SEO:** OG metadata in `layout.tsx`. `/sitemap.xml` and `/robots.txt`
+generated by Next.js server functions.
 
----
-
-## Blocking: How It Works
-
-There are three architecturally distinct approaches to blocking, in increasing
-order of integration cost and speed:
-
-**Approach 1 — WAF rule injection** *(what Clew uses in v1)*
-Clew detects from logs, then automatically pushes a block rule to the client's
-existing WAF (AWS WAF IP set, Cloudflare Firewall Rule, or nginx deny directive).
-No new infrastructure required on the client side. Detection stays log-only.
-Latency to block: 5–30 seconds (detection cycle time + rule push).
-Acceptable for persistent attacks; not suited for flash attacks.
-This is the lowest integration cost and what Growth/Pro clients get.
-
-**Approach 2 — Blocklist sidecar** *(future roadmap)*
-Clew maintains a Redis-backed blocklist. A small gateway plugin (nginx module,
-Kong plugin, or AWS Lambda authorizer) does a single Redis lookup per request —
-binary, sub-1ms. Once Clew's detection fires it writes to Redis; all subsequent
-requests from that IP are blocked synchronously by the plugin, not Clew.
-Detection is async and smart; enforcement is a dumb fast lookup.
-This is how Signal Sciences (Fastly) and similar products work.
-Requires the client to install a small plugin — higher integration cost.
-
-**Approach 3 — Inline reverse proxy** *(not in v1, highest cost)*
-Clew sits in the request path. Unknown IPs pass through while analysis runs in
-parallel. Once flagged, blocks immediately with zero subsequent latency.
-Adds ~50–100ms before a threat is confirmed. Requires rerouting all client traffic.
-Highest integration cost — not feasible for the zero-integration positioning.
+**Auth gatekeeper:** `middleware.ts` runs at the Edge on every request. Verifies
+JWT with `jose` (Web Crypto API). Silent refresh on expiry. Redirect to `/login`
+on auth failure.
 
 ---
 
-**Tier mapping to blocking approach:**
+## Auth System
 
-**Starter tier (monitoring only)**
-Client grants S3 GetObject permission. Engine detects and records. No write access
-to client infrastructure. Dashboard shows findings, no automated blocking.
-
-**Growth / Pro tier (WAF rule injection enabled)**
-Client additionally grants wafv2:UpdateIPSet + wafv2:GetIPSet on their WebACL,
-OR provides a Cloudflare API token with Firewall Rules permission.
-When engine produces a high-confidence verdict, push_blocks task:
-- AWS: calls boto3 wafv2.update_ip_set to add IP to client's WAF IP set
-- Cloudflare: calls Cloudflare API to create a block rule for the IP
-Dashboard shows blocked vs detected split, with expiry and whitelist controls.
-
-Blocking code is in the repo from day one but only activates for Growth/Pro clients.
-The trust-first sequencing is intentional: monitoring is read-only and any CTO can
-approve it in 5 minutes. Blocking touches production and requires 60–90 days of
-proven low false-positive detection before a client will commit.
+- **Two-token system:** 15-min access token + 7-day refresh token, both in httpOnly
+  cookies (inaccessible to JavaScript)
+- **Token rotation:** each `/auth/refresh` call revokes the old token and issues a
+  new pair
+- **Password security:** SHA-256 pre-hash → bcrypt(rounds=12)
+- **OAuth:** Google, GitHub, Microsoft Entra — supports linking multiple providers
+  to one account, and linking to existing credentials account by email match
+- **MFA:** TOTP (RFC 6238) via pyotp, secret Fernet-encrypted at rest, 10 backup codes
+- **Rate limiting:** slowapi (IP-based) + manual Redis counters (email-based)
 
 ---
 
-## Pricing Tiers
+## Blocking Integrations
 
-> ⚠️ Pricing needs final verification — INR figures are indicative, USD conversions
-> to be confirmed before publishing.
+**AWS WAF v2** — customer creates an IP set in their own AWS account, grants Clew's
+IAM role `wafv2:GetIPSet` + `wafv2:UpdateIPSet`, stores the IP set ARN in Settings.
 
-| Tier | Price | Volume | Blocking | Notes |
-|---|---|---|---|---|
-| **Pilot (Early Adopter)** | ₹0 for 60 days, then ₹4,999/mo | — | No | First 5 clients; manual onboarding; weekly check-in call included |
-| **Starter** | ₹9,999/mo (~$120) | Up to 10M API calls/mo | No | Detection + dashboard |
-| **Growth** | ₹14,999/mo (~$180) | Up to 50M API calls/mo | Yes (WAF/CF) | + WAF rule injection, Slack alerts, priority support |
-| **Pro** | ₹29,999/mo (~$360) | Up to 200M API calls/mo | Yes (WAF/CF) | + custom thresholds, quarterly business review |
-| **Clew Audit** | $1,000 USD (one-time) | Full historical logs | No | Full historical log audit — scans entire log history, surfaces all past incidents, delivered as a report via the dashboard |
+**Cloudflare** — customer provides API token with Firewall Rules permission and
+zone ID. Stored per-client in DB.
 
-**Clew Audit** is a standalone one-time purchase. Client provides S3 read access to
-their full historical logs. Clew runs a complete retrospective analysis and surfaces
-every incident pattern found across the entire history. Useful as a sales entry point
-("find out what's already happened") and as an upsell to an ongoing Starter/Growth plan.
-
-Payment: first 5 clients are invoiced manually. No payment processor integration in v1.
+Both can be active simultaneously. Blocking threshold: confidence ≥ 0.75, tier ≥
+growth.
 
 ---
 
-## Key Decisions
+## Billing (Stripe — code complete)
 
-- No inline proxy, no SDK, no client code changes ever.
-- Monorepo: frontend and backend in same repo. One deploy target.
-- No Vercel. Everything on one EC2 behind Nginx.
-- No PDF reports. Everything surfaces through the dashboard.
-- LTM persists in PostgreSQL (ip_memory table). Survives restarts.
-- STM lives in Redis with TTL per processing window.
-- PDF generation, Slack alerts, middleware SDK are future work. Not in v1.
-- First 5 clients: invoice manually. No payment processor integration in v1.
-- Blocking code is in the repo from day one but only activates for growth tier clients.
+**Status:** All code is written. DB migration `b4e8f2a1c953` is applied. Blocked on
+getting production Stripe API keys (company registration in progress, ~1 week).
 
----
+**What's built:**
+- `GET /billing/status` — current tier + subscription state
+- `POST /billing/checkout` — create Stripe Checkout Session
+- `POST /billing/portal` — create Stripe Customer Portal Session
+- `POST /billing/webhook` — verify Stripe signature, handle subscription lifecycle events
+- Webhook handles: `checkout.session.completed`, `customer.subscription.updated`,
+  `customer.subscription.deleted`
 
-## Local Dev Setup
-
-```bash
-# Start postgres and redis
-docker-compose up -d
-
-# Python backend
-python3.11 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn api.main:app --reload --port 8000
-
-# Celery (separate terminal)
-celery -A workers.celery_app worker --beat --loglevel=info
-
-# Frontend (separate terminal)
-cd frontend && npm install && npm run dev
-```
-
-Environment variables (see .env.example):
-DATABASE_URL, REDIS_URL, SECRET_KEY (JWT), AWS_ACCESS_KEY_ID,
-AWS_SECRET_ACCESS_KEY, AWS_REGION, SES_FROM_EMAIL, CLOUDFLARE_API_TOKEN
+**To activate:** obtain Stripe keys, create products + prices in Stripe dashboard,
+configure webhook endpoint. See `DEPLOYMENT.md` → "Adding Stripe Later".
 
 ---
 
-## Deployment (EC2)
+## Production Infrastructure
 
-Single EC2 t3.small running Ubuntu 24.04.
-RDS PostgreSQL t3.micro (separate, managed).
-Redis self-hosted on the same EC2 to save cost until 15+ clients.
+Single EC2 t3.small (Ubuntu 24.04). Self-hosted Postgres + Redis on the same instance.
 
-Process manager: PM2 runs Next.js, Uvicorn, and Celery as persistent processes.
-Nginx handles SSL termination (Let's Encrypt via certbot) and routing.
-DNS: Namecheap A records → EC2 Elastic IP.
+**Four PM2 processes** (defined in `docker/ecosystem.config.js`):
+- `clew-api` — Uvicorn, 2 workers, port 8000
+- `clew-frontend` — Next.js `start`, port 3000
+- `clew-worker` — Celery worker, concurrency 4
+- `clew-beat` — Celery beat scheduler (exactly one instance)
 
-Deploy flow: SSH → git pull → pip install → npm build → pm2 restart all.
-No CI/CD in v1. Manual deploy is fine for first 10 clients.
+**Nginx** (`docker/nginx.conf`) — two server blocks:
+- `yourdomain.com` → Next.js :3000
+- `api.yourdomain.com` → FastAPI :8000
+
+Full production setup steps are in `DEPLOYMENT.md`.
+
+---
+
+## What Is Not Yet Active
+
+| Item | Status | Blocker |
+|---|---|---|
+| Stripe billing | Code + migration complete | Stripe API keys (company registration ~1 week) |
+| WAF/Cloudflare blocking | Code complete | Each customer must configure their own WAF/CF |
+| EC2 production deploy | Not yet done | Stripe keys first, then deploy |
+| OG image asset | Not created | Visual design work |
+
+---
+
+## Key Design Decisions
+
+- **No inline proxy, no SDK, no client code changes.** Zero integration is the
+  positioning — anything that requires a code change kills deals.
+- **One EC2, no Kubernetes.** Sufficient for first 50 clients. Adds no operational
+  complexity.
+- **No component library.** Custom CSS-variable design system (see `DESIGN_SYSTEM.md`).
+  Terminal aesthetic — monospace, no gradients, no rounded corners.
+- **LTM in Redis, not PostgreSQL.** LTM is high-write internal engine state, not
+  relational data. Redis with JSON serialisation is simpler and faster.
+- **Stripe deferred but code-ready.** All billing code is live. First few customers
+  can be invoiced manually until keys arrive.
+- **httpOnly cookies, not localStorage.** Prevents the entire class of XSS token
+  theft attacks.
+- **Currency from timezone.** India → INR, everywhere else → USD. No geolocation API
+  needed; pure timezone string matching.

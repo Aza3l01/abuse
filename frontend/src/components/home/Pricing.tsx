@@ -17,16 +17,31 @@ interface Tier {
 
 const TIERS: Tier[] = [
   {
-    name: "Starter",
-    priceINR: "₹9,999/mo",
-    priceUSD: "$149/mo",
-    volume: "Up to 10M calls/mo",
+    name: "Free",
+    priceINR: "₹0/mo",
+    priceUSD: "$0/mo",
+    volume: "Up to 2M calls/mo",
     blocking: false,
     features: [
       "Detection + dashboard",
-      "IP intelligence history",
-      "Email alerts on critical threats",
+      "7-day threat history",
+      "Top 10 threat IPs",
       "AWS API Gateway + ALB support",
+    ],
+    cta: "Start free",
+    highlight: false,
+  },
+  {
+    name: "Starter",
+    priceINR: "₹6,999/mo",
+    priceUSD: "$99/mo",
+    volume: "Up to 10M calls/mo",
+    blocking: false,
+    features: [
+      "Everything in Free",
+      "Full threat history",
+      "Email alerts on critical threats",
+      "IP intelligence history",
     ],
     cta: "Get started",
     highlight: false,
@@ -59,7 +74,7 @@ const TIERS: Tier[] = [
       "Quarterly business review",
       "Dedicated onboarding",
     ],
-    cta: "Get Started",
+    cta: "Get started",
     highlight: false,
   },
   {
@@ -128,7 +143,7 @@ export function Pricing() {
         </div>
 
         {/* Tier grid */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-0">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-0">
           {TIERS.map((tier, i) => (
             <div
               key={tier.name}
@@ -154,7 +169,7 @@ export function Pricing() {
                 </p>
               )}
               {!tier.highlight && (
-                <div style={{ height: tier.name === "Pilot" ? "0" : "28px" }} />
+                <div style={{ height: "28px" }} />
               )}
 
               <p
@@ -206,7 +221,7 @@ export function Pricing() {
                     style={{ color: "var(--color-text-muted)" }}
                   >
                     <span style={{ color: "var(--color-text)", flexShrink: 0 }}>
-                      —
+                      +
                     </span>
                     {f}
                   </li>
@@ -227,14 +242,14 @@ export function Pricing() {
                       flexShrink: 0,
                     }}
                   >
-                    {tier.blocking ? "—" : "×"}
+                    {tier.blocking ? "+" : "×"}
                   </span>
                   Auto blocking
                 </li>
               </ul>
 
               <a
-                href="/login"
+                href={tier.name === "Free" ? "/register" : tier.name === "Enterprise" ? "mailto:jeff@clewsec.com" : "/register"}
                 className="text-sm font-medium text-center transition-opacity hover:opacity-80"
                 style={{
                   padding: "10px 0",
@@ -295,7 +310,7 @@ export function Pricing() {
               {AUDIT_PRICE[currency]}
             </p>
             <a
-              href="/login"
+              href="mailto:jeff@clewsec.com"
               className="text-sm font-medium transition-opacity hover:opacity-80 whitespace-nowrap"
               style={{
                 padding: "10px 20px",
