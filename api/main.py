@@ -10,10 +10,14 @@ from api.limiter import limiter
 
 load_dotenv()
 
+_debug = os.environ.get("DEBUG", "").lower() in ("1", "true", "yes")
+
 app = FastAPI(
     title="Clew API",
     version="0.1.0",
-    # Disable docs in production by checking an env flag if needed later
+    docs_url="/docs" if _debug else None,
+    redoc_url="/redoc" if _debug else None,
+    openapi_url="/openapi.json" if _debug else None,
 )
 
 # ------------------------------------------------------------------

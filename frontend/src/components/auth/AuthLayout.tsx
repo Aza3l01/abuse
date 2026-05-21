@@ -50,6 +50,7 @@ export function AuthLayout({ title, children }: AuthLayoutProps) {
             fontWeight: 700,
             marginBottom: "24px",
             color: "var(--color-text)",
+            textAlign: "center",
           }}
         >
           {title}

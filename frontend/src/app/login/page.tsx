@@ -184,7 +184,7 @@ function LoginForm() {
   }
 
   return (
-    <AuthLayout title="Sign in to Clew">
+    <AuthLayout title="Log in">
 
       {/* OAuth buttons */}
       <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
