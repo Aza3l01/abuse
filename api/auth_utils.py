@@ -16,8 +16,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import bcrypt as _bcrypt
-import boto3
-from botocore.exceptions import ClientError
+import resend
 from cryptography.fernet import Fernet, InvalidToken as _FernetInvalidToken
 from dotenv import load_dotenv
 from jose import JWTError, jwt
@@ -32,9 +31,8 @@ JWT_SECRET = os.environ["JWT_SECRET"]
 JWT_ALGORITHM = os.environ.get("JWT_ALGORITHM", "HS256")
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.environ.get("ACCESS_TOKEN_EXPIRE_MINUTES", "15"))
 REFRESH_TOKEN_EXPIRE_DAYS = int(os.environ.get("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
-SES_FROM_ADDRESS = os.environ.get("SES_FROM_ADDRESS", "noreply@example.com")
-SES_FROM_NAME = os.environ.get("SES_FROM_NAME", "Clew")
-AWS_REGION = os.environ.get("AWS_DEFAULT_REGION", "ap-south-1")
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
+FROM_ADDRESS   = "Clew Security <noreply@email.clewsec.com>"
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
 
 # Fernet key for encrypting TOTP secrets at rest.
@@ -201,102 +199,201 @@ def generate_backup_codes(n: int = 10) -> list[str]:
 
 
 # ------------------------------------------------------------------
-# Email via SES
+# Email via Resend
 # ------------------------------------------------------------------
 def send_email(to: str, subject: str, body_text: str, body_html: str | None = None) -> bool:
     """
-    Send a transactional email via SES.
+    Send a transactional email via Resend.
     Returns True on success, False on failure (caller logs + continues).
     Never raises — a failed email must not crash an auth flow.
     """
     try:
         if os.environ.get("LOG_EMAILS", "").lower() in ("1", "true", "yes"):
-            # Dev mode: print to console instead of sending via SES
             print(f"\n{'='*60}")
             print(f"[EMAIL] To: {to}")
             print(f"[EMAIL] Subject: {subject}")
             print(f"[EMAIL] Body:\n{body_text}")
             print(f"{'='*60}\n")
             return True
-        client = boto3.client("ses", region_name=AWS_REGION)
-        message: dict = {
-            "Subject": {"Data": subject},
-            "Body": {"Text": {"Data": body_text}},
+        resend.api_key = RESEND_API_KEY
+        params: resend.Emails.SendParams = {
+            "from":    FROM_ADDRESS,
+            "to":      [to],
+            "subject": subject,
+            "text":    body_text,
+            "html":    body_html or f"<pre>{body_text}</pre>",
         }
-        if body_html:
-            message["Body"]["Html"] = {"Data": body_html}
-
-        client.send_email(
-            Source=f"{SES_FROM_NAME} <{SES_FROM_ADDRESS}>",
-            Destination={"ToAddresses": [to]},
-            Message=message,
-        )
+        resend.Emails.send(params)
         return True
-    except ClientError:
-        # Log in production; for now a silent False keeps auth working locally
-        # without SES configured.
+    except Exception:
         return False
 
 
 # ------------------------------------------------------------------
-# Email templates (plain text — keep simple until volume warrants HTML)
+# Shared HTML email layout
+# ------------------------------------------------------------------
+_LOGO_URL = "https://clewsec.com/clew-wordmark-light.png"
+
+
+def _p(text: str) -> str:
+    """Inline-styled paragraph for email body."""
+    return (
+        f'<p style="font-family:system-ui,-apple-system,BlinkMacSystemFont,sans-serif;'
+        f'font-size:14px;color:#0D0D0D;line-height:1.6;margin:0 0 16px 0;">{text}</p>'
+    )
+
+
+def _otp_block(code: str) -> str:
+    """Large monospace OTP display block."""
+    return (
+        '<div style="background:#F5F5F5;border:1px solid #D0D0D0;padding:24px;'
+        'text-align:center;margin:24px 0;">'
+        f'<span style="font-family:\'Courier New\',Courier,monospace;font-size:32px;'
+        f'font-weight:700;color:#0D0D0D;letter-spacing:8px;">{code}</span>'
+        '</div>'
+    )
+
+
+def _email_html(heading: str, body_html: str, footer_note: str = "") -> str:
+    """Full HTML email using Clew design system (inline CSS only — Gmail-safe)."""
+    note = footer_note or "If you did not request this, you can safely ignore this email."
+    return (
+        '<!DOCTYPE html><html lang="en">'
+        '<head><meta charset="UTF-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1.0">'
+        '</head>'
+        '<body style="margin:0;padding:0;background:#F5F5F5;">'
+        '<div style="background:#F5F5F5;padding:40px 24px;'
+        'font-family:system-ui,-apple-system,BlinkMacSystemFont,sans-serif;">'
+        # Logo
+        '<div style="margin-bottom:32px;">'
+        f'<img src="{_LOGO_URL}" alt="Clew" width="80" '
+        'style="display:block;border:0;">'
+        '</div>'
+        # Card
+        '<div style="background:#EBEBEB;border:1px solid #D0D0D0;padding:32px;max-width:520px;">'
+        f'<h1 style="font-family:\'Courier Prime\',Courier,\'Courier New\',monospace;'
+        f'font-size:18px;font-weight:700;color:#0D0D0D;margin:0 0 20px 0;">{heading}</h1>'
+        f'{body_html}'
+        '</div>'
+        # Footer
+        f'<p style="font-family:system-ui,-apple-system,BlinkMacSystemFont,sans-serif;'
+        f'font-size:12px;color:#5A5A5A;margin:24px 0 0 0;max-width:520px;">'
+        f'{note}<br>'
+        '&copy; 2026 Clew Security &middot; '
+        '<a href="https://clewsec.com" style="color:#5A5A5A;">clewsec.com</a>'
+        '</p>'
+        '</div></body></html>'
+    )
+
+
+# ------------------------------------------------------------------
+# Email templates
 # ------------------------------------------------------------------
 def send_verification_email(to: str, code: str) -> bool:
-    return send_email(
-        to=to,
-        subject="Verify your Clew account",
-        body_text=(
-            f"Your Clew verification code is: {code}\n\n"
-            f"Enter this code on the verification page. It expires in 15 minutes.\n\n"
-            f"If you didn't create a Clew account, ignore this email."
-        ),
+    body_text = (
+        f"Your Clew verification code is: {code}\n\n"
+        "Enter this code on the verification page. It expires in 15 minutes.\n\n"
+        "If you didn't create a Clew account, ignore this email."
     )
+    body_html = _email_html(
+        heading="Verify your account",
+        body_html=(
+            _p("Enter the code below on the verification page. It expires in 15 minutes.")
+            + _otp_block(code)
+            + _p("If you did not create a Clew account, you can safely ignore this email.")
+        ),
+        footer_note="This code expires in 15 minutes and can only be used once.",
+    )
+    return send_email(to=to, subject="Verify your Clew account", body_text=body_text, body_html=body_html)
 
 
 def send_password_reset_email(to: str, code: str) -> bool:
-    return send_email(
-        to=to,
-        subject="Reset your Clew password",
-        body_text=(
-            f"Your Clew password reset code is: {code}\n\n"
-            f"Enter this code on the reset page. It expires in 15 minutes.\n\n"
-            f"If you didn't request a password reset, ignore this email."
-        ),
+    body_text = (
+        f"Your Clew password reset code is: {code}\n\n"
+        "Enter this code on the reset page. It expires in 15 minutes.\n\n"
+        "If you didn't request a password reset, ignore this email."
     )
+    body_html = _email_html(
+        heading="Reset your password",
+        body_html=(
+            _p("Enter the code below on the password reset page. It expires in 15 minutes.")
+            + _otp_block(code)
+            + _p("If you did not request a password reset, you can safely ignore this email.")
+        ),
+        footer_note="This code expires in 15 minutes and can only be used once.",
+    )
+    return send_email(to=to, subject="Reset your Clew password", body_text=body_text, body_html=body_html)
 
 
 def send_password_changed_email(to: str) -> bool:
-    return send_email(
-        to=to,
-        subject="Your Clew password was changed",
-        body_text=(
-            "Your Clew account password was just changed.\n\n"
-            "If this was you, no action is needed.\n"
-            "If you did not make this change, contact support immediately."
-        ),
+    body_text = (
+        "Your Clew account password was just changed.\n\n"
+        "If this was you, no action is needed.\n"
+        "If you did not make this change, contact support immediately."
     )
+    body_html = _email_html(
+        heading="Your password was changed",
+        body_html=(
+            _p("Your Clew account password was just changed.")
+            + _p("If this was you, no action is needed.")
+            + _p(
+                'If you did not make this change, '
+                '<a href="https://clewsec.com" style="color:#0D0D0D;">contact support</a> immediately.'
+            )
+        ),
+        footer_note="This is a security notice for your Clew account.",
+    )
+    return send_email(to=to, subject="Your Clew password was changed", body_text=body_text, body_html=body_html)
 
 
 def send_oauth_linked_email(to: str, provider: str) -> bool:
     provider_name = provider.capitalize()
+    body_text = (
+        f"{provider_name} sign-in has been linked to your Clew account.\n\n"
+        f"You can now sign in with {provider_name} or your email and password.\n\n"
+        "If you did not do this, contact support immediately."
+    )
+    body_html = _email_html(
+        heading=f"{provider_name} sign-in linked",
+        body_html=(
+            _p(f"{provider_name} sign-in has been linked to your Clew account.")
+            + _p(f"You can now sign in with {provider_name} or your email and password.")
+            + _p(
+                'If you did not authorise this, '
+                '<a href="https://clewsec.com" style="color:#0D0D0D;">contact support</a> immediately.'
+            )
+        ),
+        footer_note="This is a security notice for your Clew account.",
+    )
     return send_email(
         to=to,
         subject=f"{provider_name} sign-in linked to your Clew account",
-        body_text=(
-            f"{provider_name} sign-in has been linked to your Clew account.\n\n"
-            f"You can now sign in with {provider_name} or your email and password.\n\n"
-            f"If you did not do this, contact support immediately."
-        ),
+        body_text=body_text,
+        body_html=body_html,
     )
 
 
 def send_mfa_enabled_email(to: str, enabled: bool) -> bool:
     action = "enabled" if enabled else "disabled"
+    body_text = (
+        f"Two-factor authentication (TOTP) has been {action} on your Clew account.\n\n"
+        "If you did not make this change, contact support immediately."
+    )
+    body_html = _email_html(
+        heading=f"Two-factor authentication {action}",
+        body_html=(
+            _p(f"Two-factor authentication (TOTP) has been <strong>{action}</strong> on your Clew account.")
+            + _p(
+                'If you did not make this change, '
+                '<a href="https://clewsec.com" style="color:#0D0D0D;">contact support</a> immediately.'
+            )
+        ),
+        footer_note="This is a security notice for your Clew account.",
+    )
     return send_email(
         to=to,
         subject=f"Two-factor authentication {action} on your Clew account",
-        body_text=(
-            f"Two-factor authentication (TOTP) has been {action} on your Clew account.\n\n"
-            f"If you did not make this change, contact support immediately."
-        ),
+        body_text=body_text,
+        body_html=body_html,
     )

@@ -23,6 +23,9 @@ redis==5.2.1
 # AWS
 boto3==1.38.22
 
+# Email
+resend==2.10.0
+
 # Billing
 stripe==15.1.0
 

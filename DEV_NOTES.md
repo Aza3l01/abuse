@@ -39,7 +39,7 @@ abuse/                         <- project root (repo: "abuse", product: Clew)
 ├── api/                       <- FastAPI backend
 │   ├── main.py                <- app entry point, CORS, routers wired in
 │   ├── deps.py                <- get_db(), get_current_client() dependencies
-│   ├── auth_utils.py          <- hashing, JWT, cookies, OTP, SES email
+│   ├── auth_utils.py          <- hashing, JWT, cookies, OTP, Resend email
 │   ├── limiter.py             <- shared slowapi rate limiter instance
 │   └── routes/
 │       ├── auth.py            <- all auth endpoints (register, login, OAuth, MFA)
@@ -78,7 +78,7 @@ abuse/                         <- project root (repo: "abuse", product: Clew)
 │   ├── beat.py                <- periodic schedule (poll every 15 min)
 │   └── tasks/
 │       ├── process_logs.py    <- S3 -> detect -> verdicts + ip_memory
-│       ├── send_alerts.py     <- SES email alerts for high/critical
+│       ├── send_alerts.py     <- Resend email alerts for high/critical
 │       └── push_blocks.py     <- WAF / Cloudflare IP block tasks
 │
 ├── blocking/
@@ -138,7 +138,7 @@ abuse/                         <- project root (repo: "abuse", product: Clew)
 | Frontend | Next.js 16 (App Router) | Server components, Edge middleware |
 | Styling | Tailwind + CSS variables | No component library, custom design system |
 | Auth | httpOnly JWTs + bcrypt | Cookies unreadable by JS — no XSS token theft |
-| Email | AWS SES | Transactional verification + alert emails |
+| Email | Resend | Transactional verification + alert emails |
 | Billing | Stripe | Subscription management (keys pending) |
 | Detection | Custom multi-agent engine | Validated on CICIDS2017, CTU-13, CSIC |
 | Blocking | AWS WAF v2 + Cloudflare | Growth/Pro tiers |
@@ -173,7 +173,7 @@ Set `DATABASE_URL=postgresql://clew:password@localhost:5432/clew`,
 `REDIS_URL=redis://localhost:6379/0`, and the two generated secrets.
 
 Add `LOG_EMAILS=1` to print all outbound emails to terminal instead of sending
-via SES — required for local development since you won't have AWS credentials.
+via Resend — required for local development unless you have a Resend API key.
 
 ### 3. Start infrastructure
 ```bash
@@ -500,7 +500,7 @@ onto `sys.path` automatically at import time.
 7. Trigger `send_alerts` for high/critical verdicts
 8. Trigger `push_block` for Growth/Pro clients with high confidence
 
-**`send_alerts`**: SES email for high/critical verdicts. Deduplicates via
+**`send_alerts`**: Resend email for high/critical verdicts. Deduplicates via
 `alerts_sent` table — won't re-send on Celery retries.
 
 **`push_block`**: Checks tier ≥ growth and confidence ≥ 0.75, then calls
@@ -702,10 +702,11 @@ anything to work:
 | `TOTP_ENCRYPTION_KEY` | Fernet key — generated with `Fernet.generate_key()` |
 
 Set `LOG_EMAILS=1` locally to print all sent emails to terminal instead of
-sending via SES. Do not set this in production.
+sending via Resend. Do not set this in production.
 
+`RESEND_API_KEY` — get from [resend.com](https://resend.com) dashboard → API Keys.
 For OAuth, each provider needs `CLIENT_ID` and `CLIENT_SECRET` from their dev console.
-For S3/SES, the standard `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` + `AWS_REGION`.
+For S3/WAF, the standard `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` + `AWS_DEFAULT_REGION`.
 
 ---
 
