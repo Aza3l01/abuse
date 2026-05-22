@@ -12,6 +12,7 @@ from celery import Celery
 from dotenv import load_dotenv
 
 load_dotenv()
+load_dotenv(".env.local", override=True)  # local dev overrides (gitignored)
 
 REDIS_URL: str = os.environ["REDIS_URL"]
 

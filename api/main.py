@@ -9,6 +9,7 @@ from api.routes import auth, clients, verdicts, dashboard, ips, billing
 from api.limiter import limiter
 
 load_dotenv()
+load_dotenv(".env.local", override=True)  # local dev overrides (gitignored)
 
 _debug = os.environ.get("DEBUG", "").lower() in ("1", "true", "yes")
 

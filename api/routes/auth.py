@@ -900,7 +900,7 @@ async def login_mfa(
     # Try TOTP first, then backup code
     totp_secret = decrypt_totp_secret(client.mfa_secret)
     totp = pyotp.TOTP(totp_secret)
-    if totp.verify(code, valid_window=1):
+    if totp.verify(code, valid_window=2):
         _issue_tokens(response, db, client, request)
         return {"message": "Logged in."}
 
@@ -968,7 +968,7 @@ async def mfa_verify(
 
     totp_secret = decrypt_totp_secret(client.mfa_secret)
     totp = pyotp.TOTP(totp_secret)
-    if not totp.verify(body.code.strip(), valid_window=1):
+    if not totp.verify(body.code.strip(), valid_window=2):
         raise HTTPException(status_code=400, detail="Invalid authenticator code.")
 
     # Generate 10 single-use backup codes; store hashes, return plaintext once

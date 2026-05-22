@@ -12,6 +12,7 @@ import hashlib
 import os
 import random
 import string
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -32,7 +33,7 @@ JWT_ALGORITHM = os.environ.get("JWT_ALGORITHM", "HS256")
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.environ.get("ACCESS_TOKEN_EXPIRE_MINUTES", "15"))
 REFRESH_TOKEN_EXPIRE_DAYS = int(os.environ.get("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
-FROM_ADDRESS   = "Clew Security <noreply@email.clewsec.com>"
+FROM_ADDRESS   = "Clew <noreply@email.clewsec.com>"
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
 
 # Fernet key for encrypting TOTP secrets at rest.
@@ -99,7 +100,7 @@ def create_access_token(subject: str, extra: dict[str, Any] | None = None) -> st
 def create_refresh_token(subject: str) -> str:
     """Create a long-lived refresh JWT stored as a hashed value in the DB."""
     expire = datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
-    payload = {"sub": subject, "exp": expire, "type": "refresh"}
+    payload = {"sub": subject, "exp": expire, "type": "refresh", "jti": str(uuid.uuid4())}
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
@@ -280,7 +281,7 @@ def _email_html(heading: str, body_html: str, footer_note: str = "") -> str:
         f'<p style="font-family:system-ui,-apple-system,BlinkMacSystemFont,sans-serif;'
         f'font-size:12px;color:#5A5A5A;margin:24px 0 0 0;max-width:520px;">'
         f'{note}<br>'
-        '&copy; 2026 Clew Security &middot; '
+        '&copy; 2026 Clew &middot; '
         '<a href="https://clewsec.com" style="color:#5A5A5A;">clewsec.com</a>'
         '</p>'
         '</div></body></html>'

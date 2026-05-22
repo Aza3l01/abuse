@@ -9,6 +9,7 @@ from alembic import context
 
 # Load .env so DATABASE_URL is available when running alembic from the CLI
 load_dotenv()
+load_dotenv(".env.local", override=True)  # local dev overrides (gitignored)
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
