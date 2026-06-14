@@ -35,10 +35,13 @@ production API keys (approximately one week).
 
 | Tier | Price | Blocking | History |
 |---|---|---|---|
-| Free | $0 | No | 7 days |
-| Starter | $99 / ₹6,999 per month | No | 90 days |
-| Growth | $249 / ₹14,999 per month | WAF + Cloudflare | 1 year |
-| Pro | $449 / ₹29,999 per month | WAF + Cloudflare (lower threshold) | Unlimited |
+| Starter | $39 / ₹2,999 per month | No | 90 days |
+| Growth | $69 / ₹4,999 per month | WAF + Cloudflare | 1 year |
+| Pro | $129 / ₹9,999 per month | WAF + Cloudflare (lower threshold) | 3 years |
+| Enterprise | Custom | WAF + Cloudflare + inline proxy (future) | Unlimited |
+| Clew Audit | $599 / ₹49,999 one-time (Early Access) | — | — |
+
+All tiers marked **EARLY ACCESS** — prices valid until 2027. All paid tiers include a 14-day free trial. Annual billing available at 2 months free (~17% off).
 
 Currency auto-detected from browser timezone. Manual toggle available.
 
@@ -136,12 +139,6 @@ abuse/
 | GET | /auth/me | Current client profile |
 | POST | /auth/forgot-password | Request password reset OTP |
 | POST | /auth/reset-password | Email + OTP + new password |
-| GET | /auth/google | Start Google OAuth |
-| GET | /auth/google/callback | Google callback |
-| GET | /auth/github | Start GitHub OAuth |
-| GET | /auth/github/callback | GitHub callback |
-| GET | /auth/microsoft | Start Microsoft Entra OAuth |
-| GET | /auth/microsoft/callback | Microsoft callback |
 | POST | /auth/mfa/setup | Generate TOTP secret + QR URI |
 | POST | /auth/mfa/verify | Confirm TOTP, enable MFA, get backup codes |
 | POST | /auth/mfa/disable | Disable MFA |
@@ -173,16 +170,11 @@ abuse/
 ## Database Schema
 
 ### `clients`
-One row per customer account. Key columns: `email`, `password_hash` (null for
-OAuth-only), `company_name`, `s3_bucket`, `s3_prefix`, `log_format` (apigw/alb),
+One row per customer account. Key columns: `email`, `password_hash`, `company_name`, `s3_bucket`, `s3_prefix`, `log_format` (apigw/alb),
 `aws_region`, `last_processed_key`, `tier` (free/starter/growth/pro),
 `mfa_enabled`, `mfa_secret` (Fernet-encrypted), `stripe_customer_id`,
 `stripe_subscription_id`, `tier_expires_at`, `alerts_enabled`, `alert_email`,
 `waf_ip_set_id`, `cloudflare_zone_id`, `cloudflare_token`.
-
-### `oauth_accounts`
-Links a provider identity to a client. Unique on `(provider, provider_id)`.
-Supports Google, GitHub, Microsoft. One client can have multiple OAuth accounts.
 
 ### `refresh_tokens`
 One row per active browser session. Stored as SHA-256 hash. `revoked` bool for
@@ -267,7 +259,7 @@ Celery Beat (every 15 min)
 |---|---|
 | `/` | Marketing homepage: Hero, interactive CostCalculator, HowItWorks, Pricing, Footer |
 | `/pricing` | Standalone pricing page |
-| `/login` | Credentials + Google/GitHub/Microsoft OAuth |
+| `/login` | Email + password |
 | `/register` | Email + password + company name |
 | `/verify-email` | 6-digit OTP, resend button |
 | `/forgot-password` | Anti-enumeration — always shows neutral success message |
@@ -295,8 +287,6 @@ on auth failure.
 - **Token rotation:** each `/auth/refresh` call revokes the old token and issues a
   new pair
 - **Password security:** SHA-256 pre-hash → bcrypt(rounds=12)
-- **OAuth:** Google, GitHub, Microsoft Entra — supports linking multiple providers
-  to one account, and linking to existing credentials account by email match
 - **MFA:** TOTP (RFC 6238) via pyotp, secret Fernet-encrypted at rest, 10 backup codes
 - **Rate limiting:** slowapi (IP-based) + manual Redis counters (email-based)
 

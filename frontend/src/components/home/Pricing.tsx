@@ -127,19 +127,21 @@ export function Pricing() {
             </p>
           </div>
 
-          <button
-            onClick={() => setCurrency(currency === "INR" ? "USD" : "INR")}
-            className="text-xs transition-colors"
+          <select
+            value={currency}
+            onChange={(e) => setCurrency(e.target.value as Currency)}
+            className="text-xs"
             style={{
-              background: "none",
+              background: "var(--color-bg)",
               border: "1px solid var(--color-border)",
               cursor: "pointer",
               color: "var(--color-text-muted)",
               padding: "6px 12px",
             }}
           >
-            View in {currency === "INR" ? "USD" : "INR"}
-          </button>
+            <option value="USD">USD ($)</option>
+            <option value="INR">INR (₹)</option>
+          </select>
         </div>
 
         {/* Tier grid */}

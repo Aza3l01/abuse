@@ -340,7 +340,7 @@ def send_password_changed_email(to: str) -> bool:
             + _p("If this was you, no action is needed.")
             + _p(
                 'If you did not make this change, '
-                '<a href="https://clewsec.com" style="color:#0D0D0D;">contact support</a> immediately.'
+                '<a href="mailto:support@clewsec.com" style="color:#0D0D0D;">contact support</a> immediately.'
             )
         ),
         footer_note="This is a security notice for your Clew account.",
@@ -362,7 +362,7 @@ def send_oauth_linked_email(to: str, provider: str) -> bool:
             + _p(f"You can now sign in with {provider_name} or your email and password.")
             + _p(
                 'If you did not authorise this, '
-                '<a href="https://clewsec.com" style="color:#0D0D0D;">contact support</a> immediately.'
+                '<a href="mailto:support@clewsec.com" style="color:#0D0D0D;">contact support</a> immediately.'
             )
         ),
         footer_note="This is a security notice for your Clew account.",
@@ -387,7 +387,7 @@ def send_mfa_enabled_email(to: str, enabled: bool) -> bool:
             _p(f"Two-factor authentication (TOTP) has been <strong>{action}</strong> on your Clew account.")
             + _p(
                 'If you did not make this change, '
-                '<a href="https://clewsec.com" style="color:#0D0D0D;">contact support</a> immediately.'
+                '<a href="mailto:support@clewsec.com" style="color:#0D0D0D;">contact support</a> immediately.'
             )
         ),
         footer_note="This is a security notice for your Clew account.",

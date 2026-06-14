@@ -136,7 +136,7 @@ export default function IpsPage() {
         <div style={{ display: "flex", gap: "4px" }}>
           <input
             type="text"
-            placeholder="Country code (e.g. CN)"
+            placeholder="Country code (e.g. US)"
             value={country}
             onChange={e => { setCountry(e.target.value.toUpperCase().slice(0, 2)); setPage(1); }}
             maxLength={2}

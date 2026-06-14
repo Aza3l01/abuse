@@ -99,7 +99,7 @@ def run_pipeline(
     Run the detection engine on a batch of normalised log dicts.
 
     Args:
-        records:      List of normalised log dicts (internal schema from PRODUCT_CONTEXT.md).
+        records:      List of normalised log dicts (internal schema from CONTEXT.md).
         client_id:    Clew client UUID (used to scope Redis LTM key).
         redis_client: Optional redis.Redis instance. When omitted LTM is in-process only.
 

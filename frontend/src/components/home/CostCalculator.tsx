@@ -267,29 +267,29 @@ export function CostCalculator() {
                 >
                   {fmt(result.total, currency)}
                 </p>
-                <p
-                  className="text-xs mt-2"
-                  style={{ color: "var(--color-text-muted)", maxWidth: "420px" }}
+                <div
+                  className="flex items-center gap-2 mt-2 flex-wrap"
+                  style={{ color: "var(--color-text-muted)" }}
                 >
-                  Conservative estimate using AWS pricing and industry breach
-                  benchmarks.{" "}
-                  <button
-                    onClick={() =>
-                      setCurrency(currency === "INR" ? "USD" : "INR")
-                    }
+                  <p className="text-xs" style={{ color: "var(--color-text-muted)" }}>
+                    Conservative estimate using AWS pricing and industry breach benchmarks.
+                  </p>
+                  <select
+                    value={currency}
+                    onChange={(e) => setCurrency(e.target.value as "INR" | "USD")}
+                    className="text-xs"
                     style={{
-                      background: "none",
-                      border: "none",
+                      background: "var(--color-bg)",
+                      border: "1px solid var(--color-border)",
                       cursor: "pointer",
                       color: "var(--color-text-muted)",
-                      textDecoration: "underline",
-                      padding: 0,
-                      fontSize: "inherit",
+                      padding: "2px 6px",
                     }}
                   >
-                    Switch to {currency === "INR" ? "USD" : "INR"}
-                  </button>
-                </p>
+                    <option value="USD">USD ($)</option>
+                    <option value="INR">INR (₹)</option>
+                  </select>
+                </div>
               </div>
 
               <a
