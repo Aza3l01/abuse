@@ -22,9 +22,9 @@ The current `normalizer.py` splits all log lines into fixed 500-record chunks re
 - IPs with fewer than 10 requests are still counted in `ip_memory` (total_requests, last_seen) but do not trigger the full detection pipeline — not enough signal to be meaningful
 
 **What to change:**
-- `engine/source/ingestion/normalizer.py`: replace the fixed-batch split with group-by-IP. Return type changes from `list[list[dict]]` to `dict[str, list[dict]]` (IP → records)
+- `detection/engine/ingestion/normalizer.py`: replace the fixed-batch split with group-by-IP. Return type changes from `list[list[dict]]` to `dict[str, list[dict]]` (IP → records)
 - `workers/tasks/process_logs.py`: update the loop to iterate `ip_groups.items()`, call `run_pipeline(records_for_ip, ...)` per IP
-- `engine/source/pipeline/run.py`: `primary_ip` derivation becomes `records[0]["ip"]` since all records share one IP
+- `detection/engine/pipeline/run.py`: `primary_ip` derivation becomes `records[0]["ip"]` since all records share one IP
 
 **Minimum threshold:** 10 requests per IP per window. Document in `CONTEXT.md` as a known tunable parameter — future Pro custom thresholds will expose this per-org.
 
@@ -781,7 +781,7 @@ Show in the billing card or dashboard summary: "X / 10M requests processed this 
 
 `GeoLite2-City.mmdb` is in place and `scripts/download_geoip.sh` handles both files. The ASN database needs wiring into the product.
 
-- Add `GEOIP_ASN_DB_PATH` env var pointing to `engine/datasets/GeoLite2-ASN.mmdb` — use env var so the path can be swapped without a code change
+- Add `GEOIP_ASN_DB_PATH` env var pointing to `detection/datasets/GeoLite2-ASN.mmdb` — use env var so the path can be swapped without a code change
 - Add `geo_asn_number` (integer) and `geo_asn_org` (string, e.g. "DigitalOcean LLC") to `ip_memory` — Alembic migration
 - Populate via `geoip2.database.Reader` on `ip_memory` UPSERT in `process_logs.py`
 - Handle `None` from the reader gracefully — graceful null for IPs not in the database
@@ -791,10 +791,10 @@ Show in the billing card or dashboard summary: "X / 10M requests processed this 
 
 ### 33. Groq integration — explainable verdict summaries (Pro tier)
 
-- The LLM client (`engine/source/llm/client.py`) already supports any OpenAI-compatible endpoint
+- The LLM client (`detection/engine/llm/client.py`) already supports any OpenAI-compatible endpoint
 - Add `GROQ_API_KEY` to `.env`
 - Add Groq as the production LLM: `base_url="https://api.groq.com/openai/v1"`, `model="llama-3.3-70b-versatile"`
-- In `engine/source/pipeline/run.py` — after verdict is produced, if `tier == "pro"`: call Groq to generate a 1–3 sentence human-readable explanation, stored in `verdicts.explanation`
+- In `detection/engine/pipeline/run.py` — after verdict is produced, if `tier == "pro"`: call Groq to generate a 1–3 sentence human-readable explanation, stored in `verdicts.explanation`
 - Gate `explanation` field in the verdicts API response behind tier check
 - Verdict detail page: show explanation in an expandable card for Pro users; non-Pro users see the lock icon upsell (see item 19)
 - Fall back to Ollama/local for dev (`DEBUG=1`) so no API key needed locally

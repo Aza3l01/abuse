@@ -5,10 +5,10 @@ __pycache__/
 *.pyd
 .env
 .env.local
-engine/.env
-engine/.venv/
-engine/venv/
-engine/datasets/
+detection/.env
+detection/.venv/
+detection/venv/
+detection/datasets/
 .venv
 
 # Node / Next.js

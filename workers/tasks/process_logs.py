@@ -29,10 +29,10 @@ import redis as redis_lib
 from workers.celery_app import celery_app
 
 # ---------------------------------------------------------------------------
-# Engine path — ensure `engine/` is importable even when Celery's cwd differs
+# Engine path — ensure `detection/` is importable even when Celery's cwd differs
 # ---------------------------------------------------------------------------
 _REPO_ROOT = Path(__file__).parent.parent.parent   # abuse/
-_ENGINE_ROOT = _REPO_ROOT / "engine"
+_ENGINE_ROOT = _REPO_ROOT / "detection"
 for _p in [str(_REPO_ROOT), str(_ENGINE_ROOT)]:
     if _p not in sys.path:
         sys.path.insert(0, _p)

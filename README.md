@@ -1,4 +1,4 @@
-# Clew — Developer Guide
+# Clew README
 
 This document is the single reference for a developer working on Clew.
 Covers what the product is, how the codebase is organised, how to run everything
@@ -19,16 +19,8 @@ their existing AWS API Gateway or ALB logs. No code changes, no proxy, no SDK.
 Clew polls S3 every 15 minutes, runs the detection engine, and surfaces findings
 in a web dashboard.
 
-**Target customers:** Series A/B SaaS companies and SMBs with public APIs and no
+**Target customers:** Seed, Series A SaaS companies and SMBs with public APIs and no
 dedicated security team.
-
-**Tiers:**
-| Tier | Price | Core features |
-|---|---|---|
-| Free | $0 | Monitoring + dashboard, 7-day history |
-| Starter | $99/mo | All Free + 90-day history + email alerts |
-| Growth | $249/mo | All Starter + auto-blocking via WAF/Cloudflare |
-| Pro | $449/mo | All Growth + aggressive blocking threshold + priority support |
 
 ---
 
@@ -57,10 +49,9 @@ abuse/                         <- project root (repo: "abuse", product: Clew)
 │       ├── b4e8f2a1c953_add_stripe_billing_columns.py
 │       └── e3c1a7f920d4_add_mfa_backup_codes.py
 │
-├── engine/                    <- AI detection engine
-│   ├── engine -> source       <- symlink: makes `from engine.xxx` work
+├── detection/                 <- AI detection engine
 │   ├── schemas/models.py      <- LogRecord pydantic model
-│   └── source/
+│   └── engine/                <- engine package; `from engine.xxx` imports resolve here
 │       ├── agents/            <- 7 detection agents
 │       ├── coordinator/       <- MetaAgentOrchestrator (fusion + XGB)
 │       ├── memory/
@@ -138,8 +129,8 @@ abuse/                         <- project root (repo: "abuse", product: Clew)
 | Frontend | Next.js 16 (App Router) | Server components, Edge middleware |
 | Styling | Tailwind + CSS variables | No component library, custom design system |
 | Auth | httpOnly JWTs + bcrypt | Cookies unreadable by JS — no XSS token theft |
-| Email | Resend | Transactional verification + alert emails |
-| Billing | Stripe | Subscription management (keys pending) |
+| Email | AWS SES (via Resend) | Transactional verification + alert emails |
+| Billing | Razorpay (INR) + Stripe (USD) | Razorpay first target; Stripe pending company registration |
 | Detection | Custom multi-agent engine | Validated on CICIDS2017, CTU-13, CSIC |
 | Blocking | AWS WAF v2 + Cloudflare | Growth/Pro tiers |
 | Process manager | PM2 | Manages all 4 server processes |
@@ -238,7 +229,7 @@ Frontend: `http://localhost:3000`
 |---|---|---|
 | `id` | UUID | Primary key |
 | `email` | varchar | Unique, indexed |
-| `password_hash` | varchar | Null for OAuth-only accounts |
+| `password_hash` | varchar | bcrypt hash |
 | `company_name` | varchar | |
 | `email_verified` | bool | Must be True before login allowed |
 | `s3_bucket` | varchar | Customer's log bucket |
@@ -257,11 +248,6 @@ Frontend: `http://localhost:3000`
 | `waf_ip_set_id` | varchar | Customer's WAF IP set ARN |
 | `cloudflare_zone_id` | varchar | |
 | `cloudflare_token` | varchar | Encrypted at rest |
-
-**`oauth_accounts`** — links a provider identity to a client
-
-One client can have multiple OAuth accounts (Google AND GitHub, for example).
-Unique constraint on `(provider, provider_id)`.
 
 **`refresh_tokens`** — active browser sessions
 
@@ -328,13 +314,6 @@ GET  /auth/me                       Current client profile
 POST /auth/forgot-password          Request password reset OTP
 POST /auth/reset-password           Email + OTP + new password
 
-GET  /auth/google                   Start Google OAuth
-GET  /auth/google/callback          Google callback
-GET  /auth/github                   Start GitHub OAuth
-GET  /auth/github/callback          GitHub callback
-GET  /auth/microsoft                Start Microsoft Entra OAuth
-GET  /auth/microsoft/callback       Microsoft callback
-
 POST /auth/mfa/setup                Generate TOTP secret + QR URI
 POST /auth/mfa/verify               Confirm TOTP code, enable MFA, get backup codes
 POST /auth/mfa/disable              Disable MFA
@@ -398,15 +377,6 @@ attempt will fail (the token was revoked), alerting them that something is wrong
 **Password hashing:** SHA-256 pre-hash → bcrypt(rounds=12). Pre-hashing prevents
 bcrypt's 72-byte truncation issue for long passwords.
 
-**OAuth (Google / GitHub / Microsoft) flow:**
-1. `GET /auth/{provider}` generates a PKCE state token, stores it in Redis for
-   10 min, redirects to provider's consent page
-2. Provider redirects back to `/auth/{provider}/callback?code=...&state=...`
-3. Server validates state (CSRF check), exchanges code for user profile
-4. `_handle_oauth_sign_in()`: find existing account by provider ID, or by email
-   (link), or create new account
-5. Issue JWT cookies, redirect to `/dashboard`
-
 **MFA (TOTP) flow:**
 - Setup: `POST /auth/mfa/setup` returns an `otpauth://` URI. User scans with any
   authenticator app. `POST /auth/mfa/verify` confirms and enables MFA, returns
@@ -431,7 +401,7 @@ bcrypt's 72-byte truncation issue for long passwords.
 | `GeoIPAgent` | Geographic anomalies | Graph-based clustering |
 | `KnowledgeAgent` | Cross-session threat memory | Known signature matching |
 
-### Orchestrator — `engine/source/coordinator/meta_agent.py`
+### Orchestrator — `detection/engine/coordinator/meta_agent.py`
 
 `MetaAgentOrchestrator` collects all 7 agent confidence scores and fuses them via:
 1. Weighted average (per-agent weights tuned on training data)
@@ -474,15 +444,11 @@ The engine has two memory tiers:
 and calls `mem.flush()` to write back after each batch. Worker restarts and
 redeployments do not lose detection context.
 
-### The import symlink
+### Import path setup
 
-```
-engine/engine -> source    (symlink)
-```
-
-This lets `from engine.agents.xxx import ...` resolve correctly when the project
-root is on `sys.path`. `engine/source/pipeline/run.py` inserts the engine root
-onto `sys.path` automatically at import time.
+`detection/engine/pipeline/run.py` inserts `detection/` onto `sys.path` at import
+time, so `from engine.xxx` and `from schemas.models` resolve correctly regardless
+of Celery's working directory.
 
 ---
 
@@ -542,7 +508,7 @@ Key variables:
 |---|---|---|
 | `/` | Server | Marketing homepage: Hero, CostCalculator, HowItWorks, Pricing, Footer |
 | `/pricing` | Server | Standalone pricing comparison page |
-| `/login` | Client | Credentials + Google/GitHub/Microsoft login |
+| `/login` | Client | Email + password |
 | `/register` | Client | Email + password + company name |
 | `/verify-email` | Client | 6-digit OTP input |
 | `/forgot-password` | Client | Email field (anti-enumeration: always shows "if registered, check email") |
@@ -654,7 +620,7 @@ curl http://localhost:8000/auth/me -b cookies.txt
 ```bash
 source .venv/bin/activate
 set -o allexport && source .env && set +o allexport
-python -m pytest engine/source/tests/ -v
+python -m pytest detection/engine/tests/ -v
 ```
 
 ### Inspect Redis
@@ -705,14 +671,599 @@ Set `LOG_EMAILS=1` locally to print all sent emails to terminal instead of
 sending via Resend. Do not set this in production.
 
 `RESEND_API_KEY` — get from [resend.com](https://resend.com) dashboard → API Keys.
-For OAuth, each provider needs `CLIENT_ID` and `CLIENT_SECRET` from their dev console.
-For S3/WAF, the standard `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` + `AWS_DEFAULT_REGION`.
+For S3/WAF, use `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` + `AWS_DEFAULT_REGION`.
 
 ---
 
 ## What Is Not Yet Active
 
-- **Stripe billing** — code and migration complete, waiting on company registration
-  for production keys. Once you have keys, see `DEPLOYMENT.md` → "Adding Stripe Later".
+- **Razorpay billing** — to be built (Phase 6 in TODO.md). INR customers are the first target market.
+- **Stripe billing** — code exists but keys are pending company registration. Implement after first INR clients.
 - **WAF/Cloudflare blocking** — code complete; requires each customer to configure
   their WAF IP set or Cloudflare zone in the Settings page.
+
+---
+
+## Testing and Deployment
+
+This is a linear walkthrough for deploying to production. Do every step in order.
+When it says "on your laptop" it means a terminal on your local machine, not the SSH session.
+
+---
+
+### What you will end up with
+
+- `https://clewsec.com` — Next.js frontend
+- `https://api.clewsec.com` — FastAPI backend
+- Four PM2-managed background processes: `clew-api`, `clew-frontend`, `clew-worker`, `clew-beat`
+- PostgreSQL + Redis, both localhost-only
+
+---
+
+### Phase 1 — AWS Setup
+
+#### 1.1 Create an IAM user for Clew
+
+Your server needs to call WAF to block IPs. Create a dedicated machine user `clew-server`.
+
+**Step A — Create the WAF policy:**
+1. IAM → Policies → Create policy → JSON tab → paste:
+   ```json
+   {
+     "Version": "2012-10-17",
+     "Statement": [{
+       "Effect": "Allow",
+       "Action": ["wafv2:GetIPSet", "wafv2:UpdateIPSet"],
+       "Resource": "*"
+     }]
+   }
+   ```
+2. Name it `ClewWAFBlockingPolicy` → Create policy
+
+**Step B — Create the user:**
+1. IAM → Users → Create user → Username: `clew-server`
+2. Leave console access unticked (machine user, not a person)
+3. Attach policies directly → search `ClewWAFBlockingPolicy` → tick it → Create user
+
+**Get access keys:**
+1. Click the new user → Security credentials tab → Create access key
+2. Use case: "Application running outside AWS"
+3. Copy both values into a password manager immediately — the secret is shown once only
+4. These go in `.env` as `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`
+
+---
+
+#### 1.2 Set up Resend for outbound email
+
+1. [resend.com](https://resend.com) → Domains → Add Domain → `email.clewsec.com`
+2. Add the DNS records Resend shows you (DKIM TXT, SPF TXT, DMARC TXT) in your registrar
+3. Verify the domain in Resend
+4. API Keys → Create API Key → `clew-production` → Full access → copy the key
+5. Add to `.env` as `RESEND_API_KEY`
+
+---
+
+### Phase 2 — EC2 Server
+
+#### 2.1 Launch the instance
+
+AWS Console → EC2 → Launch instances:
+- **Name:** `clew-production`
+- **AMI:** Ubuntu Server 24.04 LTS (Canonical)
+- **Instance type:** `t3.small` (2 vCPU, 2 GB RAM, ~$15/month)
+- **Key pair:** Create new → `clew-key` → RSA → .pem format
+  ```bash
+  # On your laptop after download:
+  mv ~/Downloads/clew-key.pem ~/.ssh/clew-key.pem
+  chmod 400 ~/.ssh/clew-key.pem
+  ```
+- **Security group inbound rules:**
+
+  | Port | Source |
+  |---|---|
+  | 22 SSH | My IP |
+  | 80 HTTP | Anywhere |
+  | 443 HTTPS | Anywhere |
+
+- **Storage:** 20 GB gp3
+
+#### 2.2 Elastic IP (permanent IP address)
+
+EC2 → Elastic IPs → Allocate → Actions → Associate → select `clew-production`.
+Write down the IP — it goes in every SSH command and DNS record.
+
+#### 2.3 DNS
+
+In your registrar, add:
+
+| Type | Name | Value | TTL |
+|---|---|---|---|
+| A | @ | Elastic IP | 300 |
+| A | api | Elastic IP | 300 |
+
+---
+
+### Phase 3 — Server Setup
+
+#### 3.1 SSH in
+
+```bash
+ssh -i ~/.ssh/clew-key.pem ubuntu@YOUR_ELASTIC_IP
+```
+
+First connection: type `yes` to accept the host key.
+
+#### 3.2 System packages
+
+```bash
+sudo apt update && sudo apt upgrade -y
+
+# Python 3.12
+sudo apt install -y python3.12-venv python3.12-dev build-essential
+
+# Node.js 20
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt install -y nodejs
+
+# PostgreSQL
+sudo apt install -y postgresql postgresql-contrib
+
+# Redis
+sudo apt install -y redis-server
+
+# Nginx
+sudo apt install -y nginx
+
+# Certbot
+sudo apt install -y certbot python3-certbot-nginx
+
+# PM2
+sudo npm install -g pm2
+
+# Git
+sudo apt install -y git
+```
+
+#### 3.3 Create the PostgreSQL database
+
+```bash
+sudo -u postgres psql << 'EOF'
+CREATE USER clew WITH PASSWORD 'REPLACE_WITH_STRONG_PASSWORD';
+CREATE DATABASE clew OWNER clew;
+GRANT ALL PRIVILEGES ON DATABASE clew TO clew;
+EOF
+```
+
+Use 20+ random characters for the password. Save it — it goes in `DATABASE_URL`.
+Postgres listens on localhost only. Never open port 5432 in your security group.
+
+#### 3.4 Lock Redis to localhost
+
+```bash
+sudo nano /etc/redis/redis.conf
+# Ensure this line is present and NOT commented out:
+# bind 127.0.0.1 ::1
+
+sudo systemctl restart redis-server
+sudo systemctl enable redis-server
+```
+
+---
+
+### Phase 4 — Deploy the Code
+
+#### 4.1 Clone the repository
+
+```bash
+cd /home/ubuntu
+git clone https://github.com/Aza3l01/abuse.git
+cd abuse
+```
+
+#### 4.2 Download GeoIP databases
+
+```bash
+MAXMIND_LICENSE_KEY=YOUR_MAXMIND_LICENSE_KEY ./scripts/download_geoip.sh
+```
+
+Expected output shows both `GeoLite2-ASN.mmdb` (12 MB) and `GeoLite2-City.mmdb` (63 MB) written to `detection/datasets/`.
+
+**Monthly auto-update (add after server is stable):**
+```bash
+crontab -e
+# Add this line:
+0 3 1 * * cd /home/ubuntu/abuse && MAXMIND_LICENSE_KEY=$(grep MAXMIND_LICENSE_KEY .env | cut -d= -f2) ./scripts/download_geoip.sh >> /var/log/geoip_update.log 2>&1
+```
+
+#### 4.3 Python virtual environment
+
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+Takes about 2 minutes. Run `source .venv/bin/activate` every time you SSH in and need to run Python manually.
+
+#### 4.4 Create the backend .env file
+
+```bash
+cp .env.example .env
+chmod 600 /home/ubuntu/abuse/.env
+nano /home/ubuntu/abuse/.env
+```
+
+Fill in every value. Generate the two secrets on your laptop:
+```bash
+# JWT secret (64 hex characters)
+openssl rand -hex 64
+
+# TOTP Fernet key
+python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+Key values to fill in:
+- `DATABASE_URL` — use the password from step 3.3
+- `JWT_SECRET` — paste the openssl output
+- `TOTP_ENCRYPTION_KEY` — paste the Fernet key
+- `FRONTEND_URL=https://clewsec.com`
+- `COOKIE_DOMAIN=.clewsec.com`
+- `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` — from step 1.1
+- `RESEND_API_KEY` — from step 1.2
+- `MAXMIND_LICENSE_KEY` — your MaxMind key
+
+#### 4.5 Run database migrations
+
+```bash
+cd /home/ubuntu/abuse
+source .venv/bin/activate
+alembic upgrade head
+```
+
+Expected:
+```
+INFO  [alembic.runtime.migration] Running upgrade  -> c957d12130b9, initial schema
+INFO  [alembic.runtime.migration] Running upgrade c957d12130b9 -> b4e8f2a1c953, add stripe billing columns
+INFO  [alembic.runtime.migration] Running upgrade b4e8f2a1c953 -> e3c1a7f920d4, add mfa backup codes
+```
+
+#### 4.6 Create the frontend .env.local file
+
+```bash
+cat > /home/ubuntu/abuse/frontend/.env.local << 'EOF'
+NEXT_PUBLIC_API_URL=https://api.clewsec.com
+NEXT_PUBLIC_SITE_URL=https://clewsec.com
+JWT_SECRET=PASTE_SAME_JWT_SECRET_AS_BACKEND_ENV
+EOF
+```
+
+`JWT_SECRET` must be identical to the value in `/home/ubuntu/abuse/.env`.
+
+#### 4.7 Build the frontend
+
+```bash
+cd /home/ubuntu/abuse/frontend
+npm install
+npm run build
+```
+
+Takes 1–2 minutes. Any error here is almost always a missing env var.
+
+---
+
+### Phase 5 — Nginx
+
+```bash
+sudo nano /etc/nginx/sites-available/clew
+```
+
+Paste:
+```nginx
+server {
+    server_name clewsec.com www.clewsec.com;
+    listen 80;
+    location / {
+        proxy_pass         http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header   Upgrade       $http_upgrade;
+        proxy_set_header   Connection    'upgrade';
+        proxy_set_header   Host          $host;
+        proxy_set_header   X-Real-IP     $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_cache_bypass $http_upgrade;
+    }
+}
+
+server {
+    server_name api.clewsec.com;
+    listen 80;
+    location / {
+        proxy_pass         http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+```bash
+sudo ln -s /etc/nginx/sites-available/clew /etc/nginx/sites-enabled/
+sudo rm -f /etc/nginx/sites-enabled/default
+sudo nginx -t    # must say "syntax is ok"
+sudo systemctl reload nginx
+```
+
+---
+
+### Phase 6 — HTTPS
+
+DNS must be pointing at your server first:
+```bash
+ping clewsec.com       # must show YOUR Elastic IP
+ping api.clewsec.com   # must show YOUR Elastic IP
+```
+
+```bash
+sudo certbot --nginx -d clewsec.com -d www.clewsec.com -d api.clewsec.com
+sudo certbot renew --dry-run    # verify auto-renewal works
+```
+
+---
+
+### Phase 7 — PM2
+
+#### 7.1 Create ecosystem.config.js
+
+```bash
+nano /home/ubuntu/abuse/ecosystem.config.js
+```
+
+```js
+module.exports = {
+  apps: [
+    {
+      name:        'clew-api',
+      cwd:         '/home/ubuntu/abuse',
+      interpreter: '/home/ubuntu/abuse/.venv/bin/python3',
+      script:      '/home/ubuntu/abuse/.venv/bin/uvicorn',
+      args:        'api.main:app --host 127.0.0.1 --port 8000 --workers 2',
+      env_file:    '/home/ubuntu/abuse/.env',
+    },
+    {
+      name:   'clew-frontend',
+      cwd:    '/home/ubuntu/abuse/frontend',
+      script: 'node_modules/.bin/next',
+      args:   'start --port 3000',
+      env: {
+        NODE_ENV:             'production',
+        NEXT_PUBLIC_API_URL:  'https://api.clewsec.com',
+        NEXT_PUBLIC_SITE_URL: 'https://clewsec.com',
+      },
+    },
+    {
+      name:        'clew-worker',
+      cwd:         '/home/ubuntu/abuse',
+      interpreter: '/home/ubuntu/abuse/.venv/bin/python',
+      script:      '/home/ubuntu/abuse/.venv/bin/celery',
+      args:        '-A workers.celery_app worker --loglevel=info --concurrency=4',
+      env_file:    '/home/ubuntu/abuse/.env',
+    },
+    {
+      // IMPORTANT: run exactly ONE instance of clew-beat.
+      // Two instances = every task fires twice.
+      name:        'clew-beat',
+      cwd:         '/home/ubuntu/abuse',
+      interpreter: '/home/ubuntu/abuse/.venv/bin/python',
+      script:      '/home/ubuntu/abuse/.venv/bin/celery',
+      args:        '-A workers.celery_app beat --loglevel=info',
+      env_file:    '/home/ubuntu/abuse/.env',
+    },
+  ],
+};
+```
+
+#### 7.2 Start and register
+
+```bash
+cd /home/ubuntu/abuse
+pm2 start ecosystem.config.js
+pm2 save
+pm2 startup    # copy and run the sudo command it prints
+```
+
+#### 7.3 Verify
+
+```bash
+pm2 status
+# All four rows should show "online"
+```
+
+If any show `errored`:
+```bash
+pm2 logs clew-api --lines 50
+pm2 logs clew-worker --lines 50
+```
+
+---
+
+### Phase 8 — Firewall
+
+```bash
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+sudo ufw allow ssh
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+sudo ufw enable
+```
+
+Do NOT open 5432 (Postgres) or 6379 (Redis).
+
+---
+
+### Phase 9 — Verification Checklist
+
+```bash
+# API health (bypasses Nginx)
+curl http://localhost:8000/health
+# Expected: {"status":"ok"}
+
+# Frontend up (bypasses Nginx)
+curl -s http://localhost:3000 | head -5
+
+# Redis alive
+redis-cli ping
+# Expected: PONG
+
+# Migrations current
+cd /home/ubuntu/abuse && source .venv/bin/activate && alembic current
+# Expected: e3c1a7f920d4 (head)
+
+# All processes running
+pm2 status
+```
+
+Browser checklist:
+
+| URL | Expected |
+|---|---|
+| `https://clewsec.com` | Marketing homepage, padlock visible |
+| `https://api.clewsec.com/health` | `{"status":"ok"}` |
+| `http://clewsec.com` | Redirects to https:// |
+| `https://clewsec.com/register` | Registration form loads |
+
+---
+
+### Pushing Code Updates
+
+```bash
+cd /home/ubuntu/abuse
+git pull
+
+# If requirements.txt changed:
+source .venv/bin/activate && pip install -r requirements.txt
+
+# If a migration was added:
+source .venv/bin/activate && alembic upgrade head
+
+# If frontend changed:
+cd frontend && npm run build && cd ..
+
+# Refresh GeoIP databases manually (monthly cron handles this normally):
+MAXMIND_LICENSE_KEY=$(grep MAXMIND_LICENSE_KEY .env | cut -d= -f2) ./scripts/download_geoip.sh
+
+# Restart what changed:
+pm2 restart clew-api               # API or worker code
+pm2 restart clew-frontend          # frontend (after npm run build)
+pm2 restart clew-worker clew-beat  # Celery tasks
+
+# When in doubt:
+pm2 restart all
+```
+
+---
+
+### Upgrading the Server
+
+Two minutes downtime. No data loss.
+
+1. EC2 → tick `clew-production` → Instance state → Stop → wait
+2. Actions → Instance settings → Change instance type
+3. Instance state → Start
+4. SSH back in: `pm2 resurrect && pm2 status`
+
+| Type | vCPU | RAM | ~$/mo | When |
+|---|---|---|---|---|
+| t3.small | 2 | 2 GB | $15 | Up to ~10 customers |
+| t3.medium | 2 | 4 GB | $30 | First paying customers |
+| t3.large | 2 | 8 GB | $60 | Heavy log volumes |
+| t3.xlarge | 4 | 16 GB | $120 | 30+ customers |
+
+After upgrading to t3.xlarge: update `CELERY_CONCURRENCY=8` in `.env`, then `pm2 restart clew-worker`.
+
+---
+
+### Testing Tiers Without Billing
+
+To test Growth/Pro features locally without going through payment:
+
+```bash
+psql postgresql://clew:YOUR_DB_PASSWORD@localhost/clew
+```
+
+```sql
+SELECT email, tier FROM clients WHERE email = 'your@email.com';
+UPDATE clients SET tier = 'growth' WHERE email = 'your@email.com';
+\q
+```
+
+Valid values: `starter`, `growth`, `pro`
+
+---
+
+### Customer Onboarding — S3 Access
+
+When a customer connects their S3 bucket, they add this policy to their bucket in their own AWS account:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": ["s3:GetObject", "s3:ListBucket"],
+    "Resource": [
+      "arn:aws:s3:::THEIR-BUCKET-NAME",
+      "arn:aws:s3:::THEIR-BUCKET-NAME/*"
+    ],
+    "Principal": { "AWS": "arn:aws:iam::YOUR_CLEW_ACCOUNT_ID:root" }
+  }]
+}
+```
+
+`YOUR_CLEW_ACCOUNT_ID` is the 12-digit number in the top-right of your AWS console. Give this to customers during onboarding.
+
+---
+
+### Adding Razorpay (INR — build first)
+
+1. Razorpay Dashboard → Products → Plans → create 6 plans (Starter/Growth/Pro × Monthly/Annual)
+2. Copy each Plan ID
+3. Add to `.env`:
+   ```
+   RAZORPAY_KEY_ID=rzp_live_...
+   RAZORPAY_KEY_SECRET=...
+   RAZORPAY_PLAN_STARTER_MONTHLY_INR=plan_...
+   # ... (see .env.example for full list)
+   ```
+4. `pm2 restart clew-api`
+
+---
+
+### Adding Stripe (USD — after company registration)
+
+1. Stripe Dashboard → Developers → API keys → copy Secret key (`sk_live_...`)
+2. Products → create one product per tier, two prices each (monthly INR + USD):
+
+   | Tier | USD | INR |
+   |---|---|---|
+   | Starter | $39/mo | ₹2,999/mo |
+   | Growth | $69/mo | ₹4,999/mo |
+   | Pro | $129/mo | ₹9,999/mo |
+
+3. Developers → Webhooks → Add endpoint: `https://api.clewsec.com/billing/webhook`
+   Events: `checkout.session.completed`, `customer.subscription.updated`, `customer.subscription.deleted`
+   Copy the signing secret (`whsec_...`)
+4. Add to `.env`:
+   ```
+   STRIPE_SECRET_KEY=sk_live_...
+   STRIPE_WEBHOOK_SECRET=whsec_...
+   STRIPE_PRICE_STARTER_INR=price_...
+   STRIPE_PRICE_STARTER_USD=price_...
+   # ... (see .env.example for full list)
+   ```
+5. `pm2 restart clew-api`
+
+Test with `sk_test_...` first. Test card: `4242 4242 4242 4242`, any future expiry, any CVC.

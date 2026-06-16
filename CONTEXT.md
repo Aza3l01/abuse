@@ -87,7 +87,7 @@ abuse/
 │   ├── models.py           SQLAlchemy ORM (7 tables)
 │   ├── session.py          Engine + SessionLocal
 │   └── migrations/         3 Alembic migrations (initial, stripe, mfa_backup_codes)
-├── engine/
+├── detection/
 │   ├── engine -> source    Symlink for import resolution
 │   ├── schemas/models.py   LogRecord Pydantic model
 │   └── source/
