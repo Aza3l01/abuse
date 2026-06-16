@@ -24,7 +24,7 @@ if [[ -z "${MAXMIND_LICENSE_KEY:-}" ]]; then
   exit 1
 fi
 
-DEST="engine/datasets"
+DEST="detection/datasets"
 mkdir -p "$DEST"
 
 download_db() {
