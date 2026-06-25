@@ -13,7 +13,7 @@ Clew polls S3 every 15 minutes, runs a multi-agent AI detection engine, and surf
 findings through a web dashboard. High-confidence threats can be automatically blocked
 via AWS WAF or Cloudflare on paid tiers.
 
-**Target customers:** Series A/B SaaS companies and SMBs with public APIs and no
+**Target customers:** Seed, Series A/B SaaS companies and SMBs with public APIs and no
 dedicated security team. Decision maker is a CTO or VP Engineering.
 
 **Key differentiators:**
@@ -58,7 +58,7 @@ Currency auto-detected from browser timezone. Manual toggle available.
 | Frontend | Next.js 16 (App Router) |
 | Styling | Tailwind CSS + CSS variables (no component library) |
 | Auth | httpOnly JWT cookies + bcrypt + pyotp |
-| Email | AWS SES |
+| Email | Resend |
 | Billing | Stripe (code complete, keys pending) |
 | Detection | Custom multi-agent engine (Python 3.11) |
 | Blocking | AWS WAF v2 (boto3) + Cloudflare API |

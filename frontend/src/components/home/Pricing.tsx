@@ -3,11 +3,16 @@
 import { useState, useEffect } from "react";
 
 type Currency = "INR" | "USD";
+type BillingPeriod = "monthly" | "annual";
 
 interface Tier {
   name: string;
-  priceINR: string | null;
-  priceUSD: string | null;
+  monthlyINR: string | null;
+  monthlyUSD: string | null;
+  annualINR: string | null;
+  annualUSD: string | null;
+  annualNoteINR: string | null;
+  annualNoteUSD: string | null;
   volume: string;
   blocking: boolean;
   features: string[];
@@ -17,46 +22,39 @@ interface Tier {
 
 const TIERS: Tier[] = [
   {
-    name: "Free",
-    priceINR: "₹0/mo",
-    priceUSD: "$0/mo",
-    volume: "Up to 2M calls/mo",
-    blocking: false,
-    features: [
-      "Detection + dashboard",
-      "7-day threat history",
-      "Top 10 threat IPs",
-      "AWS API Gateway + ALB support",
-    ],
-    cta: "Start free",
-    highlight: false,
-  },
-  {
     name: "Starter",
-    priceINR: "₹6,999/mo",
-    priceUSD: "$99/mo",
+    monthlyINR: "₹2,999/mo",
+    monthlyUSD: "$39/mo",
+    annualINR: "₹2,499/mo",
+    annualUSD: "$32/mo",
+    annualNoteINR: "₹29,988 billed annually",
+    annualNoteUSD: "$384 billed annually",
     volume: "Up to 10M calls/mo",
     blocking: false,
     features: [
-      "Everything in Free",
+      "Detection + dashboard",
       "Full threat history",
       "Email alerts on critical threats",
       "IP intelligence history",
+      "AWS API Gateway + ALB support",
     ],
     cta: "Get started",
     highlight: false,
   },
   {
     name: "Growth",
-    priceINR: "₹14,999/mo",
-    priceUSD: "$249/mo",
+    monthlyINR: "₹4,999/mo",
+    monthlyUSD: "$69/mo",
+    annualINR: "₹4,166/mo",
+    annualUSD: "$57/mo",
+    annualNoteINR: "₹49,992 billed annually",
+    annualNoteUSD: "$684 billed annually",
     volume: "Up to 50M calls/mo",
     blocking: true,
     features: [
       "Everything in Starter",
       "Auto WAF rule injection",
       "Cloudflare blocking",
-      "Slack alerts",
       "Priority support",
     ],
     cta: "Get started",
@@ -64,23 +62,32 @@ const TIERS: Tier[] = [
   },
   {
     name: "Pro",
-    priceINR: "₹29,999/mo",
-    priceUSD: "$449/mo",
+    monthlyINR: "₹9,999/mo",
+    monthlyUSD: "$129/mo",
+    annualINR: "₹8,333/mo",
+    annualUSD: "$107/mo",
+    annualNoteINR: "₹99,996 billed annually",
+    annualNoteUSD: "$1,284 billed annually",
     volume: "Up to 200M calls/mo",
     blocking: true,
     features: [
       "Everything in Growth",
+      "AI-generated threat explanations",
       "Custom thresholds",
-      "Quarterly business review",
       "Dedicated onboarding",
+      "Quarterly business review",
     ],
     cta: "Get started",
     highlight: false,
   },
   {
     name: "Enterprise",
-    priceINR: null,
-    priceUSD: null,
+    monthlyINR: null,
+    monthlyUSD: null,
+    annualINR: null,
+    annualUSD: null,
+    annualNoteINR: null,
+    annualNoteUSD: null,
     volume: "Beyond 200M calls/mo",
     blocking: true,
     features: [
@@ -95,10 +102,11 @@ const TIERS: Tier[] = [
   },
 ];
 
-const AUDIT_PRICE = { INR: "₹79,999", USD: "$999" };
+const AUDIT_PRICE = { INR: "₹49,999", USD: "$599" };
 
 export function Pricing() {
   const [currency, setCurrency] = useState<Currency>("INR");
+  const [billingPeriod, setBillingPeriod] = useState<BillingPeriod>("monthly");
 
   useEffect(() => {
     const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -127,25 +135,75 @@ export function Pricing() {
             </p>
           </div>
 
-          <select
-            value={currency}
-            onChange={(e) => setCurrency(e.target.value as Currency)}
-            className="text-xs"
-            style={{
-              background: "var(--color-bg)",
-              border: "1px solid var(--color-border)",
-              cursor: "pointer",
-              color: "var(--color-text-muted)",
-              padding: "6px 12px",
-            }}
-          >
-            <option value="USD">USD ($)</option>
-            <option value="INR">INR (₹)</option>
-          </select>
+          <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+            {/* Billing period toggle */}
+            <div style={{ display: "flex", border: "1px solid var(--color-border)" }}>
+              <button
+                onClick={() => setBillingPeriod("monthly")}
+                className="text-xs"
+                style={{
+                  padding: "6px 12px",
+                  background: billingPeriod === "monthly" ? "var(--color-text)" : "var(--color-bg)",
+                  color: billingPeriod === "monthly" ? "var(--color-bg)" : "var(--color-text-muted)",
+                  border: "none",
+                  cursor: "pointer",
+                }}
+              >
+                Monthly
+              </button>
+              <button
+                onClick={() => setBillingPeriod("annual")}
+                className="text-xs"
+                style={{
+                  padding: "6px 12px",
+                  background: billingPeriod === "annual" ? "var(--color-text)" : "var(--color-bg)",
+                  color: billingPeriod === "annual" ? "var(--color-bg)" : "var(--color-text-muted)",
+                  border: "none",
+                  cursor: "pointer",
+                }}
+              >
+                Annual -17%
+              </button>
+            </div>
+
+            <select
+              value={currency}
+              onChange={(e) => setCurrency(e.target.value as Currency)}
+              className="text-xs"
+              style={{
+                background: "var(--color-bg)",
+                border: "1px solid var(--color-border)",
+                cursor: "pointer",
+                color: "var(--color-text-muted)",
+                padding: "6px 12px",
+              }}
+            >
+              <option value="USD">USD ($)</option>
+              <option value="INR">INR (₹)</option>
+            </select>
+          </div>
+        </div>
+
+        {/* Early Access banner — attached to tier grid */}
+        <div
+          style={{
+            padding: "12px 16px",
+            background: "var(--color-surface)",
+            border: "1px solid var(--color-border)",
+            borderBottom: "none",
+            textAlign: "center",
+          }}
+        >
+          <p style={{ fontFamily: "var(--font-mono)", fontSize: "11px", fontWeight: 700, letterSpacing: "0.1em", color: "var(--color-text)", margin: 0 }}>
+            EARLY ACCESS
+          </p>
+          <p style={{ fontFamily: "var(--font-mono)", fontSize: "11px", letterSpacing: "0.04em", color: "var(--color-text-muted)", margin: "2px 0 0" }}>
+            until 00:00 UTC January 1, 2027
+          </p>
         </div>
 
         {/* Tier grid */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-0">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-0">
           {TIERS.map((tier, i) => (
             <div
               key={tier.name}
@@ -181,17 +239,29 @@ export function Pricing() {
                 {tier.name}
               </p>
 
-              {tier.priceINR !== null ? (
-                <p
-                  className="font-brand font-bold mb-1 whitespace-pre-line"
-                  style={{
-                    fontSize: "1.5rem",
-                    color: "var(--color-text)",
-                    lineHeight: "1.3",
-                  }}
-                >
-                  {currency === "INR" ? tier.priceINR : tier.priceUSD}
-                </p>
+              {tier.monthlyINR !== null ? (
+                <>
+                  <p
+                    className="font-brand font-bold mb-1"
+                    style={{
+                      fontSize: "1.5rem",
+                      color: "var(--color-text)",
+                      lineHeight: "1.3",
+                    }}
+                  >
+                    {billingPeriod === "monthly"
+                      ? (currency === "INR" ? tier.monthlyINR : tier.monthlyUSD)
+                      : (currency === "INR" ? tier.annualINR : tier.annualUSD)}
+                  </p>
+                  {billingPeriod === "annual" && (
+                    <p
+                      className="text-xs mb-1"
+                      style={{ color: "var(--color-text-muted)" }}
+                    >
+                      {currency === "INR" ? tier.annualNoteINR : tier.annualNoteUSD}
+                    </p>
+                  )}
+                </>
               ) : (
                 <p
                   className="font-brand font-bold mb-1"
@@ -251,7 +321,7 @@ export function Pricing() {
               </ul>
 
               <a
-                href={tier.name === "Free" ? "/register" : tier.name === "Enterprise" ? "mailto:jeff@clewsec.com" : "/register"}
+                href={tier.name === "Enterprise" ? "mailto:jeff@clewsec.com" : "/register"}
                 className="text-sm font-medium text-center transition-opacity hover:opacity-80"
                 style={{
                   padding: "10px 0",
@@ -300,8 +370,6 @@ export function Pricing() {
               style={{ color: "var(--color-text-muted)", maxWidth: "800px" }}
             >
               {`Full retrospective scan of your entire log history. Surfaces every incident pattern that has ever occurred.`}
-              <br />
-              {`Delivered as a detailed report in the dashboard.`}
             </p>
           </div>
           <div className="flex items-center gap-6 shrink-0">

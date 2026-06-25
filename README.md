@@ -1140,6 +1140,9 @@ Browser checklist:
 ### Pushing Code Updates
 
 ```bash
+# SSH in:
+ssh -i ~/.ssh/clew-key.pem ubuntu@YOUR_ELASTIC_IP
+
 cd /home/ubuntu/abuse
 git pull
 

@@ -4,13 +4,15 @@ import Link from "next/link";
 interface AuthLayoutProps {
   title: string;
   children: ReactNode;
+  /** Optional banner rendered between the wordmark and the card, visually attached to the card top. */
+  banner?: ReactNode;
 }
 
 /**
  * Shared wrapper for all auth pages (login, register, verify-email, etc.)
  * Centered card, Clew wordmark at top, no marketing navigation.
  */
-export function AuthLayout({ title, children }: AuthLayoutProps) {
+export function AuthLayout({ title, children, banner }: AuthLayoutProps) {
   return (
     <div
       style={{
@@ -32,6 +34,13 @@ export function AuthLayout({ title, children }: AuthLayoutProps) {
           style={{ height: "18px", width: "auto", filter: "var(--logo-filter)" }}
         />
       </Link>
+
+      {/* Banner — attached to top of card (no bottom border so card border closes it) */}
+      {banner && (
+        <div style={{ width: "100%", maxWidth: "400px" }}>
+          {banner}
+        </div>
+      )}
 
       {/* Card */}
       <div
