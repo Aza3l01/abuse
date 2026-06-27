@@ -40,7 +40,7 @@ export function Navbar() {
       >
         <a href="/" aria-label="Clew home">
           <Image
-            src="/clew-wordmark.svg"
+            src="/clew-wordmark-dark.svg"
             alt="Clew"
             width={72}
             height={40}

@@ -36,7 +36,7 @@ export function DashboardSidebar({ company }: { company?: string }) {
       <div style={{ padding: "20px 20px 16px" }}>
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
-          src="/clew-wordmark.svg"
+          src="/clew-wordmark-dark.svg"
           alt="Clew"
           style={{ height: "14px", width: "auto", filter: "var(--logo-filter)" }}
         />

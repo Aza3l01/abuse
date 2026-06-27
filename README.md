@@ -147,7 +147,7 @@ abuse/                         <- project root (repo: "abuse", product: Clew)
 
 ### 2. Clone and configure env
 ```bash
-git clone <repo> clew && cd clew
+git clone <repo> clew && cd clew (abuse not clew)
 cp .env.example .env
 ```
 
@@ -210,12 +210,6 @@ npm run dev
 ```
 
 Frontend: `http://localhost:3000`
-
-### Full flow smoke test
-1. Register at `/register`
-2. The verification OTP prints to the FastAPI terminal (because `LOG_EMAILS=1`)
-3. Paste OTP at `/verify-email`
-4. Log in → reach `/dashboard`
 
 ---
 

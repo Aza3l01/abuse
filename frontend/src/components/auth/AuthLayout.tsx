@@ -29,7 +29,7 @@ export function AuthLayout({ title, children, banner }: AuthLayoutProps) {
       <Link href="/" style={{ marginBottom: "32px", display: "block" }}>
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
-          src="/clew-wordmark.svg"
+          src="/clew-wordmark-dark.svg"
           alt="Clew"
           style={{ height: "18px", width: "auto", filter: "var(--logo-filter)" }}
         />
