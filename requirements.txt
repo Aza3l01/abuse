@@ -43,3 +43,6 @@ numpy==2.4.4
 scipy==1.17.1
 scikit-learn==1.8.0
 xgboost==3.2.0
+
+# Offline evaluation harness only (detection/evaluate.py, not imported at runtime)
+pandas==3.0.2
