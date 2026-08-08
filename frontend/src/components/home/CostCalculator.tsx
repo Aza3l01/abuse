@@ -30,28 +30,54 @@ const THREAT_MIX: Record<
   other:       { bot: 0.55, stuffing: 0.15, enumeration: 0.25, exfil: 0.05 },
 };
 
-// Conservative constants
-const ABUSE_RATE = 0.005;           // 0.5% of total calls are malicious
-const ATO_SUCCESS_RATE = 0.001;     // 0.1% of stuffing attempts succeed (conservative vs IBM's 3.2%)
-const ATO_COST_INR = 8_000;         // ₹8,000 per successful account takeover
-const INFRA_COST_PER_REQ_INR = 0.3; // ₹0.30 infra cost per malicious request (AWS pricing)
-const EXFIL_ANNUAL_MULTIPLIER = 0.4; // annual data exposure cost per call (DPDP-calibrated)
+// Range constants: these set the low/high band, not a single deterministic
+// number. They loosely reflect the order of magnitude reported in published
+// incident-cost research (Imperva/Thales Bad Bot Report, IBM Cost of a Data
+// Breach), scaled by our own threat-mix-by-industry weighting above. This is
+// still a formula, not a lookup of those reports' exact figures. The point is
+// to stop presenting a single computed number as if it were precise.
+const ABUSE_RATE_LOW = 0.01;          // 1% of calls are malicious, low end
+const ABUSE_RATE_HIGH = 0.025;        // 2.5% of calls are malicious, high end
+const ATO_SUCCESS_RATE = 0.003;       // 0.3% of stuffing attempts succeed (still well below IBM's cited 3.2%)
+const ATO_COST_INR = 8_000;           // ₹8,000 average cost per successful account takeover
+const INFRA_COST_PER_REQ_INR = 0.9;   // ₹0.90 infra + response cost per malicious request
+const EXFIL_MULTIPLIER_LOW = 2.5;     // annual data-exposure cost per call, low end
+const EXFIL_MULTIPLIER_HIGH = 7.5;    // annual data-exposure cost per call, high end
+const TOTAL_DAMPENING = 0.88;         // total is tightened, not a naive sum of the three card ranges
 
-function computeAnnualCost(calls: number, industry: Industry) {
-  const monthlyMalicious = calls * ABUSE_RATE;
+type Range = { low: number; high: number };
+
+function computeAnnualCostRange(
+  calls: number,
+  industry: Industry
+): { infra: Range; stuffing: Range; exfil: Range; total: Range } {
   const mix = THREAT_MIX[industry];
+  const maliciousLow = calls * ABUSE_RATE_LOW;
+  const maliciousHigh = calls * ABUSE_RATE_HIGH;
 
-  const infraAnnual =
-    monthlyMalicious * (mix.bot + mix.enumeration) * INFRA_COST_PER_REQ_INR * 12;
-  const stuffingAnnual =
-    monthlyMalicious * mix.stuffing * ATO_SUCCESS_RATE * ATO_COST_INR * 12;
-  const exfilAnnual = calls * mix.exfil * EXFIL_ANNUAL_MULTIPLIER;
+  const infraLow =
+    maliciousLow * (mix.bot + mix.enumeration) * INFRA_COST_PER_REQ_INR * 12;
+  const infraHigh =
+    maliciousHigh * (mix.bot + mix.enumeration) * INFRA_COST_PER_REQ_INR * 12;
+
+  const stuffingLow = maliciousLow * mix.stuffing * ATO_SUCCESS_RATE * ATO_COST_INR * 12;
+  const stuffingHigh = maliciousHigh * mix.stuffing * ATO_SUCCESS_RATE * ATO_COST_INR * 12;
+
+  const exfilLow = calls * mix.exfil * EXFIL_MULTIPLIER_LOW;
+  const exfilHigh = calls * mix.exfil * EXFIL_MULTIPLIER_HIGH;
+
+  const sumLow = infraLow + stuffingLow + exfilLow;
+  const sumHigh = infraHigh + stuffingHigh + exfilHigh;
 
   return {
-    infra:    Math.round(infraAnnual),
-    stuffing: Math.round(stuffingAnnual),
-    exfil:    Math.round(exfilAnnual),
-    total:    Math.round(infraAnnual + stuffingAnnual + exfilAnnual),
+    infra:    { low: Math.round(infraLow), high: Math.round(infraHigh) },
+    stuffing: { low: Math.round(stuffingLow), high: Math.round(stuffingHigh) },
+    exfil:    { low: Math.round(exfilLow), high: Math.round(exfilHigh) },
+    // Naive sum of the three card ranges reads implausibly wide. Tighten it.
+    total: {
+      low: Math.round(sumLow * TOTAL_DAMPENING),
+      high: Math.round(sumHigh * TOTAL_DAMPENING),
+    },
   };
 }
 
@@ -60,17 +86,23 @@ function fmt(amount: number, currency: "INR" | "USD"): string {
   const symbol = currency === "USD" ? "$" : "₹";
 
   if (currency === "INR") {
+    if (value >= 1_00_00_000) return `${symbol}${(value / 1_00_00_000).toFixed(2)}Cr`;
     if (value >= 100_000) return `${symbol}${(value / 100_000).toFixed(1)}L`;
     if (value >= 1_000) return `${symbol}${(value / 1_000).toFixed(1)}K`;
     return `${symbol}${value}`;
   } else {
+    if (value >= 1_000_000) return `${symbol}${(value / 1_000_000).toFixed(2)}M`;
     if (value >= 1_000) return `${symbol}${(value / 1_000).toFixed(1)}K`;
     return `${symbol}${value}`;
   }
 }
 
+function fmtRange(range: Range, currency: "INR" | "USD"): string {
+  return `${fmt(range.low, currency)} – ${fmt(range.high, currency)}`;
+}
+
 // Pre-compute SMB baseline: 10M calls/month, SaaS industry
-const SMB_BASELINE = computeAnnualCost(10_000_000, "saas");
+const SMB_BASELINE = computeAnnualCostRange(10_000_000, "saas");
 
 export function CostCalculator() {
   const [volume, setVolume] = useState<VolumeKey>("1m_10m");
@@ -89,14 +121,14 @@ export function CostCalculator() {
   }, []);
 
   const selectedVolume = VOLUME_OPTIONS.find((v) => v.key === volume)!;
-  const result = computeAnnualCost(selectedVolume.calls, industry);
+  const result = computeAnnualCostRange(selectedVolume.calls, industry);
 
-  const baselineStat = fmt(SMB_BASELINE.total, currency);
+  const baselineStat = fmtRange(SMB_BASELINE.total, currency);
 
   const breakdown = [
-    { label: "Infrastructure waste", sublabel: "bots + scanning", value: result.infra },
-    { label: "Account takeover", sublabel: "credential stuffing", value: result.stuffing },
-    { label: "Data exposure", sublabel: "DPDP / exfil risk", value: result.exfil },
+    { label: "Infrastructure waste", sublabel: "bots + scanning", range: result.infra },
+    { label: "Account takeover", sublabel: "credential stuffing", range: result.stuffing },
+    { label: "Data exposure", sublabel: "DPDP / exfil risk", range: result.exfil },
   ];
 
   const btnBase: React.CSSProperties = {
@@ -149,9 +181,9 @@ export function CostCalculator() {
             className="text-sm mt-2"
             style={{ color: "var(--color-text-muted)" }}
           >
-            Computed using AWS infrastructure pricing, IBM breach cost
-            benchmarks, and DPDP Act 2023 exposure estimates at 0.5%
-            conservative abuse rate.
+            Range reflects reported incident costs across API-first
+            businesses (Imperva/Thales 2024, IBM Cost of a Data Breach 2025),
+            not a precise calculation for your business.
           </p>
         </div>
 
@@ -232,22 +264,16 @@ export function CostCalculator() {
                   }}
                 >
                   <p
-                    className="text-xs mb-0.5"
-                    style={{ color: "var(--color-text-muted)" }}
-                  >
-                    {item.label}
-                  </p>
-                  <p
                     className="text-xs mb-2"
                     style={{ color: "var(--color-text-muted)" }}
                   >
-                    {item.sublabel}
+                    {item.label} &middot; {item.sublabel}
                   </p>
                   <p
                     className="font-brand font-bold text-xl"
                     style={{ color: "var(--color-text)" }}
                   >
-                    {fmt(item.value, currency)}
+                    {fmtRange(item.range, currency)}
                   </p>
                 </div>
               ))}
@@ -263,16 +289,16 @@ export function CostCalculator() {
                 </p>
                 <p
                   className="font-brand font-bold"
-                  style={{ fontSize: "2.5rem", color: "var(--color-text)" }}
+                  style={{ fontSize: "2.25rem", color: "var(--color-text)" }}
                 >
-                  {fmt(result.total, currency)}
+                  {fmtRange(result.total, currency)}
                 </p>
                 <div
                   className="flex items-center gap-2 mt-2 flex-wrap"
                   style={{ color: "var(--color-text-muted)" }}
                 >
                   <p className="text-xs" style={{ color: "var(--color-text-muted)" }}>
-                    Conservative estimate using AWS pricing and industry breach benchmarks.
+                    Directional estimate using industry bot-traffic and breach-cost benchmarks.
                   </p>
                   <select
                     value={currency}
