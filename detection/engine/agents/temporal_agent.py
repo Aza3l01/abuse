@@ -21,8 +21,9 @@ Key calibrations for CICIDS 2017 (synthetic timestamps):
 
 from __future__ import annotations
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 import numpy as np
 
@@ -58,19 +59,26 @@ class TemporalAgent(BaseAgent):
 
     # Cold-start fallback — replaced adaptively once LTM is stable
     MIN_PERIODIC_IPS          = 2        # require ≥ 2 IPs showing periodicity
+    ROBUST_FALLBACK_BATCHES   = 50       # item 45 Gap B: if distribution never stabilizes, use median/MAD after this many batches
 
-    def _update_adaptive_thresholds(self) -> None:
-        """Replace cold-start constants with data-derived values from LTM."""
-        off_mean, off_std = self.memory.ltm.get_batch_distribution(
-            "TemporalAgent", "off_hours_ratio"
+    def _update_adaptive_thresholds(self, robust: bool = False) -> None:
+        """Replace cold-start constants with data-derived values from LTM.
+
+        Args:
+          robust: item 45 Gap B — use median/MAD instead of mean/std once
+                  is_distribution_stable() has failed to fire for
+                  ROBUST_FALLBACK_BATCHES batches.
+        """
+        get_dist = (
+            self.memory.ltm.get_batch_distribution_robust if robust
+            else self.memory.ltm.get_batch_distribution
         )
+        off_mean, off_std = get_dist("TemporalAgent", "off_hours_ratio")
         if off_mean is not None and off_std is not None:
             self.OFF_HOURS_DOMINANT_RATIO = min(0.99, off_mean + 2.0 * off_std)
 
         # MIN_PERIODIC_IPS: derive from observed periodicity rate in benign batches
-        periodic_mean, _ = self.memory.ltm.get_batch_distribution(
-            "TemporalAgent", "periodic_ip_count"
-        )
+        periodic_mean, _ = get_dist("TemporalAgent", "periodic_ip_count")
         if periodic_mean is not None:
             # Require at least mean + 1 to be above noise floor
             self.MIN_PERIODIC_IPS = max(2, int(periodic_mean) + 1)
@@ -123,11 +131,30 @@ class TemporalAgent(BaseAgent):
         off_hours_count = 0
         all_ts_ms: List[float] = []
 
+        # Item 5d: convert the hardcoded UTC off-hours window to the tenant's
+        # actual local time using GeoIPAgent's historical timezone baseline.
+        # Falls back to UTC (baseline_tz stays None) on cold start or
+        # geographically dispersed traffic — a wrong inferred timezone
+        # actively flips the signal, which is worse than no adjustment.
+        baseline_tz: Optional[ZoneInfo] = None
+        baseline_tz_name = self.memory.ltm.get_baseline_timezone()
+        if baseline_tz_name:
+            try:
+                baseline_tz = ZoneInfo(baseline_tz_name)
+            except Exception:
+                baseline_tz = None
+
         for r in ctx.records:
             ts_ms = r.timestamp.timestamp() * 1000.0
             ip_timestamps[r.ip].append(ts_ms)
             all_ts_ms.append(ts_ms)
-            if r.timestamp.hour in self.OFF_HOURS:
+
+            local_hour = r.timestamp.hour
+            if baseline_tz is not None:
+                ts_utc = r.timestamp if r.timestamp.tzinfo is not None else r.timestamp.replace(tzinfo=timezone.utc)
+                local_hour = ts_utc.astimezone(baseline_tz).hour
+
+            if local_hour in self.OFF_HOURS:
                 off_hours_count += 1
 
         ts_span_ms = (max(all_ts_ms) - min(all_ts_ms)) if len(all_ts_ms) > 1 else 0.0
@@ -175,9 +202,20 @@ class TemporalAgent(BaseAgent):
         })
 
         # Replace cold-start constants once distribution is stable
-        if self.memory.ltm.is_distribution_stable("TemporalAgent"):
+        if self.memory.ltm.is_robust_locked("TemporalAgent"):
+            self._update_adaptive_thresholds(robust=True)
+        elif self.memory.ltm.is_distribution_stable("TemporalAgent"):
             self._update_adaptive_thresholds()
             ctx.log("ORIENT: distribution stable — adaptive thresholds active")
+        elif self.memory.ltm.get_batch_stats_count("TemporalAgent") >= self.ROBUST_FALLBACK_BATCHES:
+            # Item 45 Gap B: distribution never stabilized — robust fallback.
+            self.memory.ltm.lock_robust_mode("TemporalAgent")
+            self._update_adaptive_thresholds(robust=True)
+            ctx.log(
+                f"ORIENT: distribution never stabilized after "
+                f"{self.memory.ltm.get_batch_stats_count('TemporalAgent')} batches — "
+                f"robust (median/MAD) calibration now locked in"
+            )
 
     def hypothesize(self, ctx: AgentContext) -> None:
         """Form bot-timing hypothesis with stricter guards."""
@@ -346,8 +384,13 @@ class TemporalAgent(BaseAgent):
         })
 
         # Replace cold-start constants once distribution is stable
-        if self.memory.ltm.is_distribution_stable("TemporalAgent"):
+        if self.memory.ltm.is_robust_locked("TemporalAgent"):
+            self._update_adaptive_thresholds(robust=True)
+        elif self.memory.ltm.is_distribution_stable("TemporalAgent"):
             self._update_adaptive_thresholds()
+        elif self.memory.ltm.get_batch_stats_count("TemporalAgent") >= self.ROBUST_FALLBACK_BATCHES:
+            self.memory.ltm.lock_robust_mode("TemporalAgent")
+            self._update_adaptive_thresholds(robust=True)
 
         # If VolumeAgent already flagged this batch as DoS/DDoS, the periodic IAT
         # pattern is explained by the flood itself — suppress BOT_ACTIVITY to avoid

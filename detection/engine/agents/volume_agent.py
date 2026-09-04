@@ -21,7 +21,8 @@ Key calibrations for CICIDS 2017 (500-record windows):
 
 from __future__ import annotations
 from collections import Counter
-from typing import List, Optional
+import threading
+from typing import Dict, List, Optional
 
 import numpy as np
 
@@ -37,9 +38,11 @@ except ImportError:
     _SKLEARN_AVAILABLE = False
 
 
-# Module-level model — shared across all VolumeAgent instances (fits once per process)
-_iso_forest: Optional["_IsolationForest"] = None
-_iso_forest_trained_on: int = 0   # number of samples used at last fit
+# Module-level models — keyed per tenant (memory.tenant_key) so one customer's
+# traffic distribution never trains the model another customer is scored against.
+_iso_forest: Dict[str, "_IsolationForest"] = {}
+_iso_forest_trained_on: Dict[str, int] = {}   # tenant -> sample count at last fit
+_iso_lock = threading.Lock()
 
 # Minimum samples needed before the IF is useful
 _ISO_MIN_SAMPLES = 30
@@ -60,6 +63,7 @@ class VolumeAgent(BaseAgent):
     DOMINANT_IP_RATIO      = 0.90     # single IP must own >90% of traffic
     HIGH_LATENCY_BENIGN_MS = 6500.0   # single-IP batches with avg latency above this are likely long-lived benign sessions
     MIN_WARMUP_BATCHES     = 15       # minimum global batches before alerting
+    ROBUST_FALLBACK_BATCHES = 50      # item 45 Gap B: if distribution never stabilizes, use median/MAD after this many batches
     # Distributed DoS (DDoS) detection thresholds
     # DDoS uses a coordinated cluster of IPs (e.g. 2–20), each sending significant
     # traffic. Truly distributed benign traffic has many IPs each sending few requests.
@@ -148,7 +152,7 @@ class VolumeAgent(BaseAgent):
             f"avg_lat={avg_latency:.0f}ms"
         )
 
-    def _update_adaptive_thresholds(self) -> None:
+    def _update_adaptive_thresholds(self, robust: bool = False) -> None:
         """Replace cold-start constants with data-derived values from LTM.
         Called once per batch after distribution has stabilised.
 
@@ -158,22 +162,31 @@ class VolumeAgent(BaseAgent):
             adapts the threshold DOWN but we never let it drop below the DDoS range.
           HIGH_RATE_ABSOLUTE >= 50  — prevents the absolute-flood threshold from
             becoming so low that benign spikes trigger single-source-flood verdicts.
+
+        Args:
+          robust: item 45 Gap B — when True, use median/MAD instead of mean/std
+                  (called once is_distribution_stable() has failed to fire for
+                  ROBUST_FALLBACK_BATCHES batches, e.g. genuinely bursty real
+                  traffic that never settles into the mean+-5%-variance window).
         """
-        dom_mean, dom_std = self.memory.ltm.get_batch_distribution("VolumeAgent", "dom_ratio")
+        get_dist = (
+            self.memory.ltm.get_batch_distribution_robust if robust
+            else self.memory.ltm.get_batch_distribution
+        )
+        dom_mean, dom_std = get_dist("VolumeAgent", "dom_ratio")
         if dom_mean is not None and dom_std is not None:
             self.DOMINANT_IP_RATIO = min(0.99, max(0.65, dom_mean + 2.0 * dom_std))
 
-        top_mean, top_std = self.memory.ltm.get_batch_distribution("VolumeAgent", "top_count")
+        top_mean, top_std = get_dist("VolumeAgent", "top_count")
         if top_mean is not None and top_std is not None:
             self.HIGH_RATE_ABSOLUTE = max(50.0, top_mean + 2.0 * top_std)
 
-        lat_mean, lat_std = self.memory.ltm.get_batch_distribution("VolumeAgent", "avg_latency")
+        lat_mean, lat_std = get_dist("VolumeAgent", "avg_latency")
         if lat_mean is not None and lat_std is not None:
             self.HIGH_LATENCY_BENIGN_MS = lat_mean + 3.0 * lat_std
 
     def _retrain_iso_forest(self) -> None:
         """Fit (or refit) the Isolation Forest on historical batch stats from LTM."""
-        global _iso_forest, _iso_forest_trained_on
         if not _SKLEARN_AVAILABLE:
             return
 
@@ -196,28 +209,32 @@ class VolumeAgent(BaseAgent):
             [v / max_lat for v in raw_lat],
         ])
 
-        if _iso_forest is None or _iso_forest_trained_on < n - 10:
-            _iso_forest = _IsolationForest(
-                n_estimators=100,
-                contamination=0.05,
-                random_state=42,
-                n_jobs=1,
-            )
-            _iso_forest.fit(X)
-            _iso_forest_trained_on = n
+        tenant = self.memory.tenant_key
+        with _iso_lock:
+            if _iso_forest.get(tenant) is None or _iso_forest_trained_on.get(tenant, 0) < n - 10:
+                model = _IsolationForest(
+                    n_estimators=100,
+                    contamination=0.05,
+                    random_state=42,
+                    n_jobs=1,
+                )
+                model.fit(X)
+                _iso_forest[tenant] = model
+                _iso_forest_trained_on[tenant] = n
 
     def _iso_anomaly_score(self, dom_ratio: float, top_count: float, avg_latency: float) -> Optional[float]:
         """
         Return the Isolation Forest anomaly score for the current batch features.
         Score < 0 means anomalous; more negative = more anomalous.
-        Returns None if IF is not trained yet.
+        Returns None if IF is not trained yet for this tenant.
         """
-        if not _SKLEARN_AVAILABLE or _iso_forest is None:
+        model = _iso_forest.get(self.memory.tenant_key)
+        if not _SKLEARN_AVAILABLE or model is None:
             return None
         top_norm = top_count / max(self.HIGH_RATE_ABSOLUTE, 1)
         lat_norm  = avg_latency / max(self.HIGH_LATENCY_BENIGN_MS, 1)
         x = np.array([[dom_ratio, min(top_norm, 1.0), min(lat_norm, 1.0)]])
-        return float(_iso_forest.score_samples(x)[0])
+        return float(model.score_samples(x)[0])
 
     def orient(self, ctx: AgentContext) -> None:
         """Fetch historical baselines for dominant endpoints; check warm-up state."""
@@ -225,16 +242,34 @@ class VolumeAgent(BaseAgent):
         batch_num = self.memory.ltm.get_batch_count()
         ctx.raw_metrics["batch_num"] = batch_num
 
-        # Record batch-level stats for adaptive threshold computation
-        self.memory.ltm.record_batch_stats("VolumeAgent", {
-            "dom_ratio":   ctx.raw_metrics.get("dominant_ratio", 0.0),
-            "top_count":   float(ctx.raw_metrics.get("top_ip_count", 0)),
-            "avg_latency": ctx.raw_metrics.get("avg_latency", 0.0),
-        })
+        # Record batch-level stats for adaptive threshold computation.
+        # Skipped in focus mode (item 1, Pass B) — a single-IP batch has
+        # dom_ratio==1.0 by construction, which would drag the learned mean
+        # toward 1.0 and corrupt both the adaptive threshold and the
+        # Isolation Forest fit. Focus mode reads LTM; it does not write it.
+        if ctx.mode != "focus":
+            self.memory.ltm.record_batch_stats("VolumeAgent", {
+                "dom_ratio":   ctx.raw_metrics.get("dominant_ratio", 0.0),
+                "top_count":   float(ctx.raw_metrics.get("top_ip_count", 0)),
+                "avg_latency": ctx.raw_metrics.get("avg_latency", 0.0),
+            })
 
         # Replace hardcoded constants once distribution is stable
-        if self.memory.ltm.is_distribution_stable("VolumeAgent"):
+        if self.memory.ltm.is_robust_locked("VolumeAgent"):
+            self._update_adaptive_thresholds(robust=True)
+        elif self.memory.ltm.is_distribution_stable("VolumeAgent"):
             self._update_adaptive_thresholds()
+        elif self.memory.ltm.get_batch_stats_count("VolumeAgent") >= self.ROBUST_FALLBACK_BATCHES:
+            # Item 45 Gap B: distribution never stabilized (bursty real traffic) —
+            # lock into robust median/MAD calibration permanently (sticky, avoids
+            # thrashing back and forth with the noisy is_distribution_stable() check).
+            self.memory.ltm.lock_robust_mode("VolumeAgent")
+            self._update_adaptive_thresholds(robust=True)
+            ctx.log(
+                f"ORIENT: distribution never stabilized after "
+                f"{self.memory.ltm.get_batch_stats_count('VolumeAgent')} batches — "
+                f"robust (median/MAD) calibration now locked in"
+            )
 
         if batch_num >= self.MIN_WARMUP_BATCHES:
             ctx.raw_metrics["in_warmup"] = False

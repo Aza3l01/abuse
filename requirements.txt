@@ -1,6 +1,7 @@
 # Web
 fastapi==0.115.12
 uvicorn[standard]==0.34.2
+pydantic==2.13.4
 
 # Database
 sqlalchemy==2.0.41
@@ -10,6 +11,7 @@ psycopg2-binary==2.9.10
 # Auth
 bcrypt==5.0.0
 python-jose[cryptography]==3.3.0
+cryptography==48.0.0
 authlib==1.5.2
 pyotp==2.9.0
 
@@ -28,6 +30,7 @@ resend==2.10.0
 
 # Billing
 stripe==15.1.0
+razorpay==1.4.2
 
 # Rate limiting
 slowapi==0.1.9

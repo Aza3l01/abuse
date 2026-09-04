@@ -11,11 +11,22 @@ All agents share a single SharedMemory instance passed at construction.
 
 from __future__ import annotations
 import threading
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional
 
 from schemas.models import EvidenceEntry, LogRecord
+
+
+def _median(values: List[float]) -> float:
+    """Plain-stdlib median (avoids adding numpy/statistics-module coupling
+    to this file just for one helper used by the robust calibration path)."""
+    s = sorted(values)
+    n = len(s)
+    mid = n // 2
+    if n % 2:
+        return s[mid]
+    return (s[mid - 1] + s[mid]) / 2
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +109,44 @@ class LongTermMemory:
         with self._lock:
             vals = self._endpoint_rates[endpoint]
             return (sum(vals) / len(vals)) if vals else None
+
+    # ── Tenant timezone baseline (item 5d) ────────────────────────────
+    # Historical (not live-batch) majority vote of resolved timezones, fed
+    # batch-by-batch by GeoIPAgent, so TemporalAgent can convert its
+    # hardcoded UTC off-hours window to the tenant's actual local time.
+
+    _MAX_TZ_HISTORY = 50
+
+    def record_batch_timezone(self, tz: str) -> None:
+        """Record this batch's majority resolved IANA timezone, if any."""
+        if not tz:
+            return
+        with self._lock:
+            if not hasattr(self, "_tz_history"):
+                self._tz_history: List[str] = []
+            self._tz_history.append(tz)
+            if len(self._tz_history) > self._MAX_TZ_HISTORY:
+                self._tz_history.pop(0)
+
+    def get_baseline_timezone(
+        self, min_batches: int = 10, min_majority: float = 0.60,
+    ) -> Optional[str]:
+        """Return the tenant's inferred operating timezone from a stable
+        historical baseline, or None if there isn't one yet (cold start) or
+        traffic is too geographically dispersed for a clear majority.
+
+        Callers must fall back to UTC when this returns None — a wrong
+        inferred timezone actively flips the off-hours signal, which is
+        worse than no adjustment at all.
+        """
+        with self._lock:
+            history = getattr(self, "_tz_history", [])
+            if len(history) < min_batches:
+                return None
+            tz, n = Counter(history).most_common(1)[0]
+            if n / len(history) < min_majority:
+                return None
+            return tz
 
     def record_auth_failure(self, ip: str, count: int) -> None:
         with self._lock:
@@ -207,6 +256,63 @@ class LongTermMemory:
             variance = sum((v - mean) ** 2 for v in vals) / len(vals)
             std = variance ** 0.5
             return (mean, std)
+
+    def get_batch_distribution_robust(self, agent_name: str, metric: str) -> tuple:
+        """Robust equivalent of get_batch_distribution(): (median, MAD scaled
+        to be comparable to std) of a named metric across stored batches.
+        Returns (None, None) if fewer than 5 samples exist.
+
+        Item 45 Gap B: is_distribution_stable() requires 10 consecutive
+        batches whose variance changes by <=5% — genuinely bursty real
+        traffic can fail that test forever. Median/MAD are far less
+        sensitive to the outlier batches that keep variance from settling,
+        so agents fall back to this after ROBUST_FALLBACK_BATCHES batches
+        with no stability, rather than staying on cold-start defaults
+        indefinitely.
+        """
+        with self._lock:
+            history = getattr(self, "_batch_stats", {}).get(agent_name, [])
+            vals = [b[metric] for b in history if metric in b]
+            if len(vals) < 5:
+                return (None, None)
+            median = _median(vals)
+            abs_dev = [abs(v - median) for v in vals]
+            mad = _median(abs_dev)
+            # Scale factor so MAD approximates std for normally-distributed data.
+            robust_std = mad * 1.4826
+            # Never return a narrower (more sensitive) band than plain mean/std
+            # would give: MAD deliberately discounts outlier/spike batches, but
+            # on bursty real traffic those spikes are often genuine spread, not
+            # noise — measured regression on the CICIDS harness confirmed
+            # median+MAD alone can be tighter than mean+std and over-fire.
+            mean = sum(vals) / len(vals)
+            variance = sum((v - mean) ** 2 for v in vals) / len(vals)
+            plain_std = variance ** 0.5
+            return (max(median, mean), max(robust_std, plain_std))
+
+    def get_batch_stats_count(self, agent_name: str) -> int:
+        """How many batch-stats snapshots exist for this agent. Used to decide
+        when to fall back to robust median/MAD calibration (item 45 Gap B)."""
+        with self._lock:
+            return len(getattr(self, "_batch_stats", {}).get(agent_name, []))
+
+    def is_robust_locked(self, agent_name: str) -> bool:
+        """Item 45 Gap B: once an agent has fallen back to robust (median/MAD)
+        calibration, it stays there permanently rather than re-testing
+        is_distribution_stable() every batch. That check is noisy on real
+        traffic (flips true/false batch to batch around a trailing 10-batch
+        window), and re-testing it caused thresholds to thrash between the
+        mean/std and median/MAD estimator every batch — a measured
+        regression on the CICIDS harness. Locking makes the fallback a
+        one-way, durable mode switch instead."""
+        with self._lock:
+            return getattr(self, "_robust_locked", {}).get(agent_name, False)
+
+    def lock_robust_mode(self, agent_name: str) -> None:
+        with self._lock:
+            if not hasattr(self, "_robust_locked"):
+                self._robust_locked: Dict[str, bool] = {}
+            self._robust_locked[agent_name] = True
 
     def is_distribution_stable(self, agent_name: str) -> bool:
         """True when rolling variance of key metrics has not changed > 5%
@@ -329,3 +435,8 @@ class SharedMemory:
         self.stm = ShortTermMemory(window_seconds)
         self.ltm = LongTermMemory()
         self.board = EvidenceBoard()
+
+    @property
+    def tenant_key(self) -> str:
+        """Isolation key for per-tenant ML models. Overridden in ProductSharedMemory."""
+        return "default"

@@ -9,7 +9,11 @@ detection/.env
 detection/.venv/
 detection/venv/
 detection/datasets/
+detection/results/
 .venv
+
+# Celery
+celerybeat-schedule
 
 # Node / Next.js
 frontend/node_modules/
@@ -22,3 +26,4 @@ frontend/out/
 .DS_Store
 STRATEGY_POST.md
 TODO.md
+TODO_ARCHIVE.md

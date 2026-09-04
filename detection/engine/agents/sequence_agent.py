@@ -148,18 +148,24 @@ class SequenceAgent(BaseAgent):
                 continue
             ip_log_probs[ip] = self._ip_log_prob(transitions)
 
-        # Record transition frequency for adaptive baseline
-        all_transitions: Counter = Counter()
-        for transitions in ip_transitions.values():
-            all_transitions.update(transitions)
-        # Store top-20 transition counts as ratios (normalised to [0,1])
-        total = max(sum(all_transitions.values()), 1)
-        for (a, b), cnt in all_transitions.most_common(20):
-            self.memory.ltm.record_batch_stats(
-                "SequenceAgent", {f"trans::{a}::{b}": cnt / total}
-            )
-        # Monotonic batch counter (never evicted, unlike _batch_stats)
-        batch_count = self.memory.ltm.increment_agent_batch_count("SequenceAgent")
+        # Record transition frequency for adaptive baseline. Skipped in focus
+        # mode (item 1, Pass B) — a single-IP batch's transitions are not a
+        # representative sample of the cross-tenant baseline; focus mode
+        # reads LTM, it does not write it.
+        if ctx.mode != "focus":
+            all_transitions: Counter = Counter()
+            for transitions in ip_transitions.values():
+                all_transitions.update(transitions)
+            # Store top-20 transition counts as ratios (normalised to [0,1])
+            total = max(sum(all_transitions.values()), 1)
+            for (a, b), cnt in all_transitions.most_common(20):
+                self.memory.ltm.record_batch_stats(
+                    "SequenceAgent", {f"trans::{a}::{b}": cnt / total}
+                )
+            # Monotonic batch counter (never evicted, unlike _batch_stats)
+            batch_count = self.memory.ltm.increment_agent_batch_count("SequenceAgent")
+        else:
+            batch_count = self.memory.ltm.get_agent_batch_count("SequenceAgent")
 
         ctx.raw_metrics["ip_log_probs"] = ip_log_probs
 

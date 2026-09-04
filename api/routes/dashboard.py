@@ -16,13 +16,21 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
-from sqlalchemy import func
+from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
-from api.deps import get_current_client, get_db
-from db.models import Client, IpMemory, Verdict
+from api.deps import CurrentOrg, get_current_org, get_db
+from db.models import IpMemory, Verdict
 
 router = APIRouter()
+
+_SEVERITY_RANK = case(
+    (Verdict.severity == "critical", 0),
+    (Verdict.severity == "high", 1),
+    (Verdict.severity == "medium", 2),
+    (Verdict.severity == "low", 3),
+    else_=4,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -38,9 +46,13 @@ class TrendDay(BaseModel):
 
 
 class TopIp(BaseModel):
-    ip:         str
-    count:      int
-    risk_score: float
+    ip:              str
+    count:           int
+    risk_score:      float
+    highest_severity: Optional[str] = None
+    geo_country:      Optional[str] = None
+    geo_asn_org:      Optional[str] = None
+    blocked:          bool = False
 
 
 class DashboardSummary(BaseModel):
@@ -52,6 +64,15 @@ class DashboardSummary(BaseModel):
     cost_prevented:   float
     ips_flagged:      int
     trend:            list[TrendDay]
+    # Item 15/16/17: empty/scanning states + connection health + last-scanned
+    s3_configured:          bool
+    s3_connected_at:        Optional[datetime]
+    s3_status:              Optional[str]
+    s3_status_message:      Optional[str]
+    calibration_status:     Optional[str]
+    last_scan_completed_at: Optional[datetime]
+    last_scan_status:       Optional[str]
+    last_scan_error:        Optional[str]
 
 
 # ---------------------------------------------------------------------------
@@ -60,9 +81,9 @@ class DashboardSummary(BaseModel):
 
 @router.get("/dashboard/summary", response_model=DashboardSummary)
 def get_summary(
-    days:           int     = Query(7, ge=1, le=90),
-    db:             Session = Depends(get_db),
-    current_client: Client  = Depends(get_current_client),
+    days:        int        = Query(7, ge=1, le=90),
+    db:          Session    = Depends(get_db),
+    current_org: CurrentOrg = Depends(get_current_org),
 ):
     """
     Return aggregated stats for the current client over the last `days` days.
@@ -84,7 +105,7 @@ def get_summary(
             func.count(Verdict.id).label("cnt"),
         )
         .filter(
-            Verdict.client_id == current_client.id,
+            Verdict.org_id == current_org.id,
             Verdict.timestamp >= start_date,
         )
         .group_by(
@@ -121,7 +142,7 @@ def get_summary(
     new_today = (
         db.query(func.count(Verdict.id))
         .filter(
-            Verdict.client_id == current_client.id,
+            Verdict.org_id == current_org.id,
             Verdict.timestamp >= today_start,
         )
         .scalar()
@@ -133,7 +154,7 @@ def get_summary(
     cost = (
         db.query(func.sum(Verdict.cost_prevented))
         .filter(
-            Verdict.client_id == current_client.id,
+            Verdict.org_id == current_org.id,
             Verdict.timestamp >= start_date,
         )
         .scalar()
@@ -145,7 +166,7 @@ def get_summary(
     ips_flagged = (
         db.query(func.count(func.distinct(Verdict.ip)))
         .filter(
-            Verdict.client_id == current_client.id,
+            Verdict.org_id == current_org.id,
             Verdict.timestamp >= start_date,
         )
         .scalar()
@@ -157,7 +178,7 @@ def get_summary(
     top_rows = (
         db.query(Verdict.ip, func.count(Verdict.id).label("cnt"))
         .filter(
-            Verdict.client_id == current_client.id,
+            Verdict.org_id == current_org.id,
             Verdict.timestamp >= start_date,
         )
         .group_by(Verdict.ip)
@@ -167,23 +188,50 @@ def get_summary(
     )
 
     ip_list = [r.ip for r in top_rows]
-    risk_map: dict[str, float] = {}
+    memories: dict[str, IpMemory] = {}
     if ip_list:
-        memories = (
+        rows = (
             db.query(IpMemory)
             .filter(
-                IpMemory.client_id == current_client.id,
+                IpMemory.org_id == current_org.id,
                 IpMemory.ip.in_(ip_list),
             )
             .all()
         )
-        risk_map = {m.ip: m.risk_score for m in memories}
+        memories = {m.ip: m for m in rows}
+
+    # Item 18: highest severity per top IP within the period
+    best_severity: dict[str, str] = {}
+    if ip_list:
+        best_rank: dict[str, int] = {}
+        sev_rows = (
+            db.query(Verdict.ip, Verdict.severity, _SEVERITY_RANK.label("rank"))
+            .filter(
+                Verdict.org_id == current_org.id,
+                Verdict.timestamp >= start_date,
+                Verdict.ip.in_(ip_list),
+            )
+            .all()
+        )
+        for ip, sev, rank in sev_rows:
+            if ip not in best_rank or rank < best_rank[ip]:
+                best_rank[ip] = rank
+                best_severity[ip] = sev
 
     top_ips = [
-        TopIp(ip=r.ip, count=r.cnt, risk_score=risk_map.get(r.ip, 0.0))
+        TopIp(
+            ip=r.ip,
+            count=r.cnt,
+            risk_score=memories[r.ip].risk_score if r.ip in memories else 0.0,
+            highest_severity=best_severity.get(r.ip),
+            geo_country=memories[r.ip].geo_country if r.ip in memories else None,
+            geo_asn_org=memories[r.ip].geo_asn_org if r.ip in memories else None,
+            blocked=bool(memories[r.ip].waf_blocked or memories[r.ip].cloudflare_blocked) if r.ip in memories else False,
+        )
         for r in top_rows
     ]
 
+    org = current_org.organization
     return DashboardSummary(
         period_days=days,
         total_threats=total_threats,
@@ -193,4 +241,12 @@ def get_summary(
         cost_prevented=round(float(cost), 2),
         ips_flagged=ips_flagged,
         trend=list(day_map.values()),
+        s3_configured=bool(org.s3_bucket and org.log_format),
+        s3_connected_at=org.s3_connected_at,
+        s3_status=org.s3_status,
+        s3_status_message=org.s3_status_message,
+        calibration_status=org.calibration_status,
+        last_scan_completed_at=org.last_scan_completed_at,
+        last_scan_status=org.last_scan_status,
+        last_scan_error=org.last_scan_error,
     )

@@ -18,7 +18,7 @@ Usage:
 
     verdict = run_pipeline(
         records=[{"timestamp": "...", "ip": "...", ...}, ...],
-        client_id="uuid-...",
+        org_id="uuid-...",
         redis_client=redis_conn,   # optional — omit in tests
     )
 """
@@ -66,7 +66,7 @@ def dict_to_log_record(d: dict) -> LogRecord:
     Convert a normalised log dict (internal schema) to a LogRecord.
 
     Required keys: timestamp (ISO-8601 str or datetime), ip, method, endpoint, status
-    Optional keys: response_size, latency, user_agent, client_id
+    Optional keys: response_size, latency, user_agent, org_id
     """
     ts = d["timestamp"]
     if isinstance(ts, str):
@@ -78,11 +78,12 @@ def dict_to_log_record(d: dict) -> LogRecord:
         ip=str(d["ip"]),
         method=str(d.get("method", "GET")),
         endpoint=str(d["endpoint"]),
+        endpoint_template=d.get("endpoint_template"),
         status=int(d["status"]),
         response_size=int(d.get("response_size", 0)),
         latency=float(d.get("latency", 0.0)),
         user_agent=str(d.get("user_agent", "")),
-        client_id=str(d.get("client_id", "")),
+        org_id=str(d.get("org_id", "")),
         # Research fields — not set from production logs
         label="BENIGN",
         attack_category="Benign",
@@ -92,20 +93,29 @@ def dict_to_log_record(d: dict) -> LogRecord:
 
 def run_pipeline(
     records: list[dict],
-    client_id: str,
+    org_id: str,
     redis_client: Optional[Any] = None,
+    home_country: str = "",
+    mode: str = "window",
 ) -> dict:
     """
     Run the detection engine on a batch of normalised log dicts.
 
     Args:
         records:      List of normalised log dicts (internal schema from CONTEXT.md).
-        client_id:    Clew client UUID (used to scope Redis LTM key).
+        org_id:       Clew organisation UUID (used to scope Redis LTM key).
         redis_client: Optional redis.Redis instance. When omitted LTM is in-process only.
+        home_country: Tenant's expected home country (ISO 3166-1 alpha-2), from
+                      Organization.home_country. Empty string means "unknown" —
+                      GeoIPAgent suppresses its foreign-concentration check in
+                      that case.
+        mode:         "window" (default, Pass A — mixed-IP batches) or "focus"
+                      (item 1's Pass B — a single-IP group). Forwarded to
+                      MetaAgentOrchestrator.run().
 
     Returns:
         A dict ready to be inserted into the `verdicts` Postgres table.
-        Keys: client_id, ip, method, endpoint, threat_type, severity, confidence,
+        Keys: org_id, ip, method, endpoint, threat_type, severity, confidence,
               agents_triggered, explanation, blocked, cost_prevented, timestamp, is_attack.
     """
     if not records:
@@ -113,37 +123,58 @@ def run_pipeline(
 
     log_records: list[LogRecord] = [dict_to_log_record(r) for r in records]
 
-    # Tag all records with the client_id (they may not have it set from the dict)
+    # Tag all records with the org_id (they may not have it set from the dict)
     for lr in log_records:
-        if not lr.client_id:
-            lr.client_id = client_id
+        if not lr.org_id:
+            lr.org_id = org_id
 
-    memory = ProductSharedMemory(client_id=client_id, redis_client=redis_client)
+    memory = ProductSharedMemory(org_id=org_id, redis_client=redis_client)
+    if home_country:
+        memory.ltm._tenant_home_country = home_country
     orchestrator = MetaAgentOrchestrator(memory)
 
-    verdict: FusionVerdict = orchestrator.run(log_records)
+    verdict: FusionVerdict = orchestrator.run(log_records, mode=mode)
 
     memory.flush()
 
-    # Derive primary IP: the most frequent IP in the batch.
-    ip_counter: Counter = Counter(lr.ip for lr in log_records)
-    primary_ip: str = ip_counter.most_common(1)[0][0]
+    if mode == "focus":
+        # Focus batches are already a single IP's records by construction
+        # (group_by_ip()) — no need for a Counter majority vote.
+        primary_ip = log_records[0].ip
+    else:
+        # Derive primary IP: the most frequent IP in the batch.
+        ip_counter: Counter = Counter(lr.ip for lr in log_records)
+        primary_ip = ip_counter.most_common(1)[0][0]
 
     # Derive representative method/endpoint from the most common values.
     method_counter: Counter = Counter(lr.method for lr in log_records)
     endpoint_counter: Counter = Counter(lr.endpoint for lr in log_records)
 
     logger.info(
-        "Pipeline verdict: client=%s  is_attack=%s  threat=%s  confidence=%.2f  primary_ip=%s",
-        client_id,
+        "Pipeline verdict: org=%s  is_attack=%s  threat=%s  confidence=%.2f  primary_ip=%s",
+        org_id,
         verdict.is_attack,
         verdict.threat_type.value,
         verdict.confidence_score,
         primary_ip,
     )
 
+    # Item 19: per-agent score table for the verdict detail page — every
+    # dispatched/skipped agent's own finding, not just the triggered subset
+    # `agents_triggered` carries. Skipped agents already carry a placeholder
+    # AgentFinding (confidence_score=0.0, threat_detected=False) from the
+    # orchestrator's triage step, so this is a full 6-row breakdown.
+    agent_scores = [
+        {
+            "agent_name": f.agent_name,
+            "score": round(f.confidence_score, 4),
+            "triggered": f.threat_detected,
+        }
+        for f in verdict.agent_findings
+    ]
+
     return {
-        "client_id": client_id,
+        "org_id": org_id,
         "ip": primary_ip,
         "method": method_counter.most_common(1)[0][0],
         "endpoint": endpoint_counter.most_common(1)[0][0],
@@ -151,6 +182,7 @@ def run_pipeline(
         "severity": _severity(verdict.confidence_score) if verdict.is_attack else "none",
         "confidence": round(verdict.confidence_score, 4),
         "agents_triggered": verdict.contributing_agents,
+        "agent_scores": agent_scores,
         "explanation": verdict.explanation,
         "blocked": False,          # blocking integrations added in Phase 7
         "cost_prevented": 0.0,     # cost model added in Phase 6

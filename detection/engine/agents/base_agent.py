@@ -48,6 +48,10 @@ class AgentContext:
     raw_metrics: Dict[str, Any] = field(default_factory=dict)
     reasoning_trace: List[str] = field(default_factory=list)
     iteration: int = 0
+    # "window" (default, cross-IP 500-record batches, writes LTM) or "focus"
+    # (item 1's per-IP re-run pass — reads LTM but must never write it, since
+    # every focus batch has dom_ratio==1.0 by construction).
+    mode: str = "window"
 
     def log(self, msg: str) -> None:
         self.reasoning_trace.append(f"[iter={self.iteration}] {msg}")
@@ -79,12 +83,12 @@ class BaseAgent(ABC):
 
     # ── Public entry point ─────────────────────────────────────────────────
 
-    def run(self, records: List[LogRecord]) -> AgentFinding:
+    def run(self, records: List[LogRecord], mode: str = "window") -> AgentFinding:
         """
         Execute the OODA loop for a batch of log records.
         Returns an AgentFinding regardless of outcome.
         """
-        ctx = AgentContext(records=records)
+        ctx = AgentContext(records=records, mode=mode)
         ctx.log(f"OBSERVE: received {len(records)} records")
 
         # ① OBSERVE

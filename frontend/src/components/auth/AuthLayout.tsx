@@ -105,32 +105,8 @@ const primaryBtnStyle: React.CSSProperties = {
   textAlign: "center",
 };
 
-const oauthBtnStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  gap: "8px",
-  width: "100%",
-  padding: "10px",
-  background: "transparent",
-  border: "1px solid var(--color-border)",
-  color: "var(--color-text)",
-  fontSize: "14px",
-  cursor: "pointer",
-};
-
-const dividerStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: "12px",
-  marginTop: "20px",
-  marginBottom: "20px",
-};
-
 export {
   inputStyle,
   labelStyle,
   primaryBtnStyle,
-  oauthBtnStyle,
-  dividerStyle,
 };

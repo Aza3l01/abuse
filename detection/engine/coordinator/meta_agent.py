@@ -53,9 +53,11 @@ try:
 except ImportError:
     _XGB_AVAILABLE = False
 
-# Module-level XGB stacker — one model shared across all orchestrator instances
-_xgb_stacker: Optional["_XGBClassifier"] = None
-_xgb_trained_on: int = 0
+# Module-level XGB stacker — keyed per tenant (memory.tenant_key) so one
+# customer's verdict history never trains the model another customer is scored against.
+_xgb_stacker: Dict[str, "_XGBClassifier"] = {}
+_xgb_trained_on: Dict[str, int] = {}
+_xgb_lock = threading.Lock()
 _XGB_MIN_SAMPLES = 50          # minimum labeled verdicts before activation
 # Feature order: VolumeAgent, TemporalAgent, AuthAgent, PayloadAgent, SequenceAgent, GeoIPAgent, n_active, compound_boost
 _XGB_AGENT_ORDER = ["VolumeAgent", "TemporalAgent", "AuthAgent", "PayloadAgent", "SequenceAgent", "GeoIPAgent"]
@@ -184,33 +186,52 @@ class MetaAgentOrchestrator:
 
     # ── Public entry point ─────────────────────────────────────────────────
 
-    def run(self, records: List[LogRecord]) -> FusionVerdict:
+    def run(self, records: List[LogRecord], mode: str = "window") -> FusionVerdict:
         """
         Full pipeline:
           1. Clear the evidence board for this batch.
-          2. Triage: decide which agents are warranted.
+          2. Triage: decide which agents are warranted (window mode only).
           3. Dispatch warranted agents in parallel.
           4. Fuse findings → verdict.
+
+        mode="focus" is item 1's per-IP re-run pass (Pass B): dispatches only
+        {AuthAgent, PayloadAgent, SequenceAgent, VolumeAgent}. VolumeAgent's
+        own DDoS/dominance block self-gates on unique_ips>=2 and
+        unique_ips>MAX_IP_DIVERSITY, neither of which a single-IP batch ever
+        satisfies, so it naturally degrades to a plain per-IP rate check
+        without needing special-cased logic. GeoIPAgent and TemporalAgent are
+        cross-IP by design (MIN_PERIODIC_IPS / botnet-spread checks need >1
+        IP to mean anything) and are skipped entirely in focus mode. Focus
+        mode never writes LTM batch stats or increments the global batch
+        counter — every focus batch has dom_ratio==1.0 by construction,
+        which would corrupt the window pass's adaptive thresholds.
         """
         # Fresh board for each batch
         self.memory.board.clear()
-        # Increment global batch counter every batch (used by agents for warmup)
-        self.memory.ltm.increment_batch_count()
 
-        logger.info(
-            "[MetaAgent] Dispatching agents for %d records",
-            len(records),
-        )
+        if mode == "focus":
+            plan = DispatchPlan(
+                agents=["AuthAgent", "PayloadAgent", "SequenceAgent", "VolumeAgent"],
+                reasoning=["focus mode (item 1, Pass B) — restricted per-IP agent set"],
+            )
+        else:
+            # Increment global batch counter every batch (used by agents for warmup)
+            self.memory.ltm.increment_batch_count()
 
-        # ── Step 1: Triage ───────────────────────────────────────────────
-        plan = self._triage(records)
-        logger.info(
-            "[MetaAgent] Triage: dispatching %s | skipped: %s",
-            plan.agents, list(plan.skip_reasons.keys()),
-        )
+            logger.info(
+                "[MetaAgent] Dispatching agents for %d records",
+                len(records),
+            )
+
+            # ── Step 1: Triage ───────────────────────────────────────────────
+            plan = self._triage(records)
+            logger.info(
+                "[MetaAgent] Triage: dispatching %s | skipped: %s",
+                plan.agents, list(plan.skip_reasons.keys()),
+            )
 
         # ── Step 2: Parallel agent dispatch ─────────────────────────────
-        findings = self._dispatch(records, plan)
+        findings = self._dispatch(records, plan, mode=mode)
 
         # ── Step 3: Read consolidated evidence board ─────────────────────
         all_evidence = self.tools.call("read_evidence_board")
@@ -269,7 +290,6 @@ class MetaAgentOrchestrator:
 
     def _retrain_xgb(self) -> None:
         """Refit XGBClassifier on accumulated verdict history from LTM."""
-        global _xgb_stacker, _xgb_trained_on
         if not _XGB_AVAILABLE:
             return
 
@@ -288,33 +308,37 @@ class MetaAgentOrchestrator:
             # wait until the dataset has enough positive examples.
             return
 
-        if _xgb_stacker is not None and _xgb_trained_on >= n - 5:
-            return  # No significant new data; skip refit
+        tenant = self.memory.tenant_key
+        with _xgb_lock:
+            if _xgb_stacker.get(tenant) is not None and _xgb_trained_on.get(tenant, 0) >= n - 5:
+                return  # No significant new data; skip refit
 
-        X = np.array([s[0] for s in samples])
-        y = np.array([s[1] for s in samples])
+            X = np.array([s[0] for s in samples])
+            y = np.array([s[1] for s in samples])
 
-        _xgb_stacker = _XGBClassifier(
-            n_estimators=50,
-            max_depth=3,
-            learning_rate=0.1,
-            eval_metric="logloss",
-            verbosity=0,
-            n_jobs=1,
-            random_state=42,
-        )
-        _xgb_stacker.fit(X, y)
-        _xgb_trained_on = n
-        logger.debug("[MetaAgent] XGB stacker retrained on %d samples", n)
+            model = _XGBClassifier(
+                n_estimators=50,
+                max_depth=3,
+                learning_rate=0.1,
+                eval_metric="logloss",
+                verbosity=0,
+                n_jobs=1,
+                random_state=42,
+            )
+            model.fit(X, y)
+            _xgb_stacker[tenant] = model
+            _xgb_trained_on[tenant] = n
+            logger.debug("[MetaAgent] XGB stacker retrained on %d samples", n)
 
     def _xgb_predict_proba(self, features: List[float]) -> Optional[float]:
         """
-        Return P(attack=1) from the XGB stacker, or None if not trained.
+        Return P(attack=1) from the XGB stacker, or None if not trained for this tenant.
         """
-        if not _XGB_AVAILABLE or _xgb_stacker is None:
+        model = _xgb_stacker.get(self.memory.tenant_key)
+        if not _XGB_AVAILABLE or model is None:
             return None
         x = np.array([features])
-        return float(_xgb_stacker.predict_proba(x)[0][1])
+        return float(model.predict_proba(x)[0][1])
 
     # ── Triage ─────────────────────────────────────────────────────────────
 
@@ -414,7 +438,7 @@ class MetaAgentOrchestrator:
 
     # ── Parallel dispatch ──────────────────────────────────────────────────
 
-    def _dispatch(self, records: List[LogRecord], plan: Optional[DispatchPlan] = None) -> List[AgentFinding]:
+    def _dispatch(self, records: List[LogRecord], plan: Optional[DispatchPlan] = None, mode: str = "window") -> List[AgentFinding]:
         active_names = set(plan.agents) if plan else {a.__class__.__name__ for a in self._agents}
         active_agents = [a for a in self._agents if a.__class__.__name__ in active_names]
 
@@ -438,7 +462,7 @@ class MetaAgentOrchestrator:
 
         findings: List[AgentFinding] = list(skipped_findings)
         with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
-            futures = {pool.submit(agent.run, records): agent for agent in active_agents}
+            futures = {pool.submit(agent.run, records, mode): agent for agent in active_agents}
             for future in as_completed(futures):
                 agent = futures[future]
                 try:

@@ -34,7 +34,7 @@ for _p in [str(_REPO_ROOT)]:
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from db.models import Client, Verdict
+from db.models import IpMemory, Organization, Verdict
 from db.session import SessionLocal
 
 logger = logging.getLogger(__name__)
@@ -49,7 +49,7 @@ _BLOCKING_TIERS = {"growth", "pro"}
     max_retries=2,
     default_retry_delay=30,
 )
-def push_block(self, verdict_id: str, client_id: str) -> dict:
+def push_block(self, verdict_id: str, org_id: str) -> dict:
     """
     Attempt to push a block rule for the IP in verdict_id.
     Updates verdict.blocked = True if at least one integration succeeds.
@@ -58,7 +58,7 @@ def push_block(self, verdict_id: str, client_id: str) -> dict:
     try:
         verdict: Verdict | None = (
             db.query(Verdict)
-            .filter(Verdict.id == verdict_id, Verdict.client_id == client_id)
+            .filter(Verdict.id == verdict_id, Verdict.org_id == org_id)
             .first()
         )
         if verdict is None:
@@ -69,15 +69,15 @@ def push_block(self, verdict_id: str, client_id: str) -> dict:
             logger.debug("push_block: verdict %s already blocked", verdict_id)
             return {"status": "already_blocked"}
 
-        client: Client | None = db.query(Client).filter(Client.id == client_id).first()
-        if client is None:
-            return {"status": "skipped", "reason": "client_not_found"}
+        org: Organization | None = db.query(Organization).filter(Organization.id == org_id).first()
+        if org is None:
+            return {"status": "skipped", "reason": "org_not_found"}
 
         # --- Tier gate ---
-        if client.tier not in _BLOCKING_TIERS:
+        if org.tier not in _BLOCKING_TIERS:
             logger.debug(
-                "push_block: client %s on tier %s — blocking not available",
-                client_id, client.tier,
+                "push_block: org %s on tier %s — blocking not available",
+                org_id, org.tier,
             )
             return {"status": "skipped", "reason": "tier_not_eligible"}
 
@@ -93,40 +93,53 @@ def push_block(self, verdict_id: str, client_id: str) -> dict:
         if not ip:
             return {"status": "skipped", "reason": "no_ip"}
 
+        ip_memory: IpMemory | None = (
+            db.query(IpMemory)
+            .filter(IpMemory.org_id == org_id, IpMemory.ip == ip)
+            .first()
+        )
+
         blocked_by: list[str] = []
 
         # --- AWS WAF ---
-        if client.waf_ip_set_id:
+        if org.waf_ip_set_id:
             from blocking.aws_waf import add_ip_to_set
             # WAF IP set name is stored as "name::id" or just the ID if legacy
-            name, _, set_id = client.waf_ip_set_id.partition("::")
+            name, _, set_id = org.waf_ip_set_id.partition("::")
             if not set_id:
                 # legacy: stored as bare ID, use a default name
                 set_id = name
                 name = "clew-blocked-ips"
-            ok = add_ip_to_set(
+            ok, error = add_ip_to_set(
                 ip=ip,
                 waf_ip_set_id=set_id,
                 waf_ip_set_name=name,
-                region=client.aws_region or "us-east-1",
+                region=org.aws_region or "us-east-1",
             )
             if ok:
                 blocked_by.append("waf")
+            if ip_memory is not None:
+                ip_memory.waf_blocked = ok
+                ip_memory.waf_block_error = None if ok else error
 
         # --- Cloudflare ---
-        if client.cloudflare_zone_id and client.cloudflare_token:
+        if org.cloudflare_zone_id and org.cloudflare_token:
             from blocking.cloudflare import block_ip
-            ok = block_ip(
+            ok, error = block_ip(
                 ip=ip,
-                zone_id=client.cloudflare_zone_id,
-                token=client.cloudflare_token,
+                zone_id=org.cloudflare_zone_id,
+                token=org.cloudflare_token,
             )
             if ok:
                 blocked_by.append("cloudflare")
+            if ip_memory is not None:
+                ip_memory.cloudflare_blocked = ok
+                ip_memory.cloudflare_block_error = None if ok else error
 
         if not blocked_by:
+            db.commit()  # persist per-integration error fields even on total failure
             logger.warning(
-                "push_block: no integrations configured or all failed for client %s", client_id
+                "push_block: no integrations configured or all failed for org %s", org_id
             )
             return {"status": "failed", "reason": "no_integration_succeeded"}
 
@@ -154,52 +167,64 @@ def push_block(self, verdict_id: str, client_id: str) -> dict:
     max_retries=2,
     default_retry_delay=30,
 )
-def push_unblock(self, verdict_id: str, client_id: str) -> dict:
+def push_unblock(self, verdict_id: str, org_id: str) -> dict:
     """Remove a block rule for the IP in verdict_id."""
     db = SessionLocal()
     try:
         verdict: Verdict | None = (
             db.query(Verdict)
-            .filter(Verdict.id == verdict_id, Verdict.client_id == client_id)
+            .filter(Verdict.id == verdict_id, Verdict.org_id == org_id)
             .first()
         )
         if verdict is None:
             return {"status": "skipped", "reason": "verdict_not_found"}
 
-        client: Client | None = db.query(Client).filter(Client.id == client_id).first()
-        if client is None:
-            return {"status": "skipped", "reason": "client_not_found"}
+        org: Organization | None = db.query(Organization).filter(Organization.id == org_id).first()
+        if org is None:
+            return {"status": "skipped", "reason": "org_not_found"}
 
         ip = verdict.ip
         if not ip:
             return {"status": "skipped", "reason": "no_ip"}
 
+        ip_memory: IpMemory | None = (
+            db.query(IpMemory)
+            .filter(IpMemory.org_id == org_id, IpMemory.ip == ip)
+            .first()
+        )
+
         unblocked_by: list[str] = []
 
-        if client.waf_ip_set_id:
+        if org.waf_ip_set_id:
             from blocking.aws_waf import remove_ip_from_set
-            name, _, set_id = client.waf_ip_set_id.partition("::")
+            name, _, set_id = org.waf_ip_set_id.partition("::")
             if not set_id:
                 set_id = name
                 name = "clew-blocked-ips"
-            ok = remove_ip_from_set(
+            ok, error = remove_ip_from_set(
                 ip=ip,
                 waf_ip_set_id=set_id,
                 waf_ip_set_name=name,
-                region=client.aws_region or "us-east-1",
+                region=org.aws_region or "us-east-1",
             )
             if ok:
                 unblocked_by.append("waf")
+            if ip_memory is not None:
+                ip_memory.waf_blocked = not ok
+                ip_memory.waf_block_error = None if ok else error
 
-        if client.cloudflare_zone_id and client.cloudflare_token:
+        if org.cloudflare_zone_id and org.cloudflare_token:
             from blocking.cloudflare import unblock_ip
-            ok = unblock_ip(
+            ok, error = unblock_ip(
                 ip=ip,
-                zone_id=client.cloudflare_zone_id,
-                token=client.cloudflare_token,
+                zone_id=org.cloudflare_zone_id,
+                token=org.cloudflare_token,
             )
             if ok:
                 unblocked_by.append("cloudflare")
+            if ip_memory is not None:
+                ip_memory.cloudflare_blocked = not ok
+                ip_memory.cloudflare_block_error = None if ok else error
 
         db.query(Verdict).filter(Verdict.id == verdict_id).update({"blocked": False})
         db.commit()

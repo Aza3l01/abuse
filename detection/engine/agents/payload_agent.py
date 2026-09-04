@@ -41,6 +41,7 @@ class PayloadAgent(BaseAgent):
     MIN_REQUESTS_PER_IP     = 5      # ignore low-volume IPs (noise)
     MAX_IP_ENTROPY_PAIRS    = 20     # cap how many IPs we fully analyse
     MIN_WARMUP_BATCHES      = 15     # system-level warmup guard (global batch count)
+    ROBUST_FALLBACK_BATCHES = 50     # item 45 Gap B: if distribution never stabilizes, use median/MAD after this many batches
 
     # Hard-bypass thresholds — fire regardless of LTM distribution stability.
     # Benign per-IP entropy peaks at ~3 bits (few repeated endpoints); a true
@@ -69,9 +70,19 @@ class PayloadAgent(BaseAgent):
         3306, 3389, 5432, 5900, 6379, 8080, 8443, 8888, 27017,
     })
 
-    def _update_adaptive_thresholds(self) -> None:
-        """Adapt entropy threshold from LTM benign baseline."""
-        mean, std = self.memory.ltm.get_batch_distribution("PayloadAgent", "max_ip_entropy")
+    def _update_adaptive_thresholds(self, robust: bool = False) -> None:
+        """Adapt entropy threshold from LTM benign baseline.
+
+        Args:
+          robust: item 45 Gap B — use median/MAD instead of mean/std once
+                  is_distribution_stable() has failed to fire for
+                  ROBUST_FALLBACK_BATCHES batches.
+        """
+        get_dist = (
+            self.memory.ltm.get_batch_distribution_robust if robust
+            else self.memory.ltm.get_batch_distribution
+        )
+        mean, std = get_dist("PayloadAgent", "max_ip_entropy")
         if mean is not None and std is not None:
             self.ENTROPY_THRESHOLD = mean + 2.0 * std
 
@@ -156,11 +167,15 @@ class PayloadAgent(BaseAgent):
 
     def orient(self, ctx: AgentContext) -> None:
         """Fetch LTM entropy baseline; check evidence board for known-bad IPs."""
-        # Record batch stats for adaptive threshold
-        self.memory.ltm.record_batch_stats("PayloadAgent", {
-            "max_ip_entropy": ctx.raw_metrics.get("max_entropy", 0.0),
-            "total_distinct_endpoints": float(ctx.raw_metrics.get("total_distinct_endpoints", 0)),
-        })
+        # Record batch stats for adaptive threshold. Skipped in focus mode
+        # (item 1, Pass B) — a single-IP batch is not a representative sample
+        # of the endpoint-diversity distribution; focus mode reads LTM, it
+        # does not write it.
+        if ctx.mode != "focus":
+            self.memory.ltm.record_batch_stats("PayloadAgent", {
+                "max_ip_entropy": ctx.raw_metrics.get("max_entropy", 0.0),
+                "total_distinct_endpoints": float(ctx.raw_metrics.get("total_distinct_endpoints", 0)),
+            })
 
         batch_num = self.memory.ltm.get_batch_count()
         if batch_num < self.MIN_WARMUP_BATCHES:
@@ -169,9 +184,21 @@ class PayloadAgent(BaseAgent):
         else:
             ctx.raw_metrics["in_warmup"] = False
 
-        if self.memory.ltm.is_distribution_stable("PayloadAgent"):
+        if self.memory.ltm.is_robust_locked("PayloadAgent"):
+            self._update_adaptive_thresholds(robust=True)
+        elif self.memory.ltm.is_distribution_stable("PayloadAgent"):
             self._update_adaptive_thresholds()
             ctx.log("ORIENT: distribution stable — adaptive entropy threshold active")
+        elif self.memory.ltm.get_batch_stats_count("PayloadAgent") >= self.ROBUST_FALLBACK_BATCHES:
+            # Item 45 Gap B: distribution never stabilized — lock into robust
+            # fallback permanently (sticky, avoids thrashing).
+            self.memory.ltm.lock_robust_mode("PayloadAgent")
+            self._update_adaptive_thresholds(robust=True)
+            ctx.log(
+                f"ORIENT: distribution never stabilized after "
+                f"{self.memory.ltm.get_batch_stats_count('PayloadAgent')} batches — "
+                f"robust (median/MAD) calibration now locked in"
+            )
 
         # Check for prior known-bad IP evidence
         kb_evidence = self.tools.call(
@@ -216,7 +243,14 @@ class PayloadAgent(BaseAgent):
             )
             return
 
-        if ctx.raw_metrics.get("in_warmup") or not self.memory.ltm.is_distribution_stable("PayloadAgent"):
+        # Item 45 Gap B: treat the robust-fallback calibration mode as "ready"
+        # too, or a client whose traffic never satisfies is_distribution_stable()
+        # (bursty real traffic) would stay in warmup_learning forever.
+        calibration_ready = (
+            self.memory.ltm.is_distribution_stable("PayloadAgent")
+            or self.memory.ltm.get_batch_stats_count("PayloadAgent") >= self.ROBUST_FALLBACK_BATCHES
+        )
+        if ctx.raw_metrics.get("in_warmup") or not calibration_ready:
             if ctx.hypothesis != "injection_detected":
                 ctx.hypothesis = "warmup_learning"
                 ctx.log("HYPOTHESIZE: warm-up or unstable distribution — building baseline entropy model")
@@ -320,9 +354,11 @@ class PayloadAgent(BaseAgent):
                     ["payload", "port_scan"],
                 )
 
-        # Post entropy metrics to LTM for future runs
-        for ip, entropy in list(per_ip_entropy.items())[:self.MAX_IP_ENTROPY_PAIRS]:
-            self.memory.ltm.record_batch_stats("PayloadAgent", {"ip_entropy": entropy})
+        # Post entropy metrics to LTM for future runs (window pass only —
+        # see orient()'s focus-mode guard for why).
+        if ctx.mode != "focus":
+            for ip, entropy in list(per_ip_entropy.items())[:self.MAX_IP_ENTROPY_PAIRS]:
+                self.memory.ltm.record_batch_stats("PayloadAgent", {"ip_entropy": entropy})
 
         # Injection investigation — score per-IP hit concentration and pattern diversity
         injection_summary = ctx.raw_metrics.get("injection_summary", {})

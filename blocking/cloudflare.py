@@ -21,11 +21,11 @@ _CF_API = "https://api.cloudflare.com/client/v4"
 _TIMEOUT = 10.0  # seconds
 
 
-def block_ip(ip: str, zone_id: str, token: str) -> bool:
+def block_ip(ip: str, zone_id: str, token: str) -> tuple[bool, str | None]:
     """
     Create a Cloudflare Zone Firewall Access Rule that blocks the given IP.
     Idempotent — silently succeeds if a block for this IP already exists.
-    Returns True on success, False on any error.
+    Returns (True, None) on success, (False, error_message) on any error.
     """
     url = f"{_CF_API}/zones/{zone_id}/firewall/access_rules/rules"
     payload = {
@@ -43,40 +43,42 @@ def block_ip(ip: str, zone_id: str, token: str) -> bool:
         data = r.json()
         if r.status_code == 409 or (not data.get("success") and _is_duplicate(data)):
             logger.debug("cloudflare: %s already blocked on zone %s", ip, zone_id)
-            return True
+            return True, None
         if not data.get("success"):
-            logger.error("cloudflare: block %s failed: %s", ip, data.get("errors"))
-            return False
+            error = str(data.get("errors"))
+            logger.error("cloudflare: block %s failed: %s", ip, error)
+            return False, error
         logger.info("cloudflare: blocked %s on zone %s", ip, zone_id)
-        return True
+        return True, None
     except httpx.RequestError as exc:
         logger.error("cloudflare: network error blocking %s: %s", ip, exc)
-        return False
+        return False, str(exc)
 
 
-def unblock_ip(ip: str, zone_id: str, token: str) -> bool:
+def unblock_ip(ip: str, zone_id: str, token: str) -> tuple[bool, str | None]:
     """
     Remove the Cloudflare Access Rule blocking the given IP.
     Finds the rule by IP first, then deletes it.
-    Returns True on success (or if no rule exists), False on any error.
+    Returns (True, None) on success (or if no rule exists), (False, error) otherwise.
     """
     rule_id = _find_rule_id(ip, zone_id, token)
     if rule_id is None:
         logger.debug("cloudflare: no block rule found for %s on zone %s", ip, zone_id)
-        return True
+        return True, None
 
     url = f"{_CF_API}/zones/{zone_id}/firewall/access_rules/rules/{rule_id}"
     try:
         r = httpx.delete(url, headers=_headers(token), timeout=_TIMEOUT)
         data = r.json()
         if not data.get("success"):
-            logger.error("cloudflare: unblock %s failed: %s", ip, data.get("errors"))
-            return False
+            error = str(data.get("errors"))
+            logger.error("cloudflare: unblock %s failed: %s", ip, error)
+            return False, error
         logger.info("cloudflare: unblocked %s on zone %s", ip, zone_id)
-        return True
+        return True, None
     except httpx.RequestError as exc:
         logger.error("cloudflare: network error unblocking %s: %s", ip, exc)
-        return False
+        return False, str(exc)
 
 
 # ---------------------------------------------------------------------------

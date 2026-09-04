@@ -131,7 +131,7 @@ class KnowledgeAgent:
             # Cap history at 50 entries per IP
             if len(history) > 50:
                 history = history[-50:]
-            self.memory.ltm._batch_stats  # ensure LTM is initialized
+            getattr(self.memory.ltm, "_batch_stats", None)  # ensure LTM is initialized
             self._set_ip_history(ip, history)
 
         # Post to evidence board if IP repeatedly flagged

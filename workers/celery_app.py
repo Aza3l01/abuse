@@ -23,6 +23,8 @@ celery_app = Celery(
     include=[
         "workers.tasks.process_logs",
         "workers.tasks.send_alerts",
+        "workers.tasks.trial_reminders",
+        "workers.tasks.purge_deleted_accounts",
     ],
 )
 

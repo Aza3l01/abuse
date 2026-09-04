@@ -13,29 +13,23 @@ POST   /auth/refresh
 GET    /auth/me
 POST   /auth/forgot-password
 POST   /auth/reset-password
+POST   /auth/change-password
+POST   /auth/delete-account
 POST   /auth/mfa/setup
 POST   /auth/mfa/verify
 POST   /auth/mfa/disable
+POST   /auth/mfa/nudge-dismiss
 GET    /auth/sessions
 DELETE /auth/sessions/{session_id}
 DELETE /auth/sessions
-GET    /auth/google
-GET    /auth/google/callback
-GET    /auth/github
-GET    /auth/github/callback
-GET    /auth/microsoft
-GET    /auth/microsoft/callback
 """
 import os
-import secrets
+import hashlib
 from datetime import datetime, timedelta, timezone
 from typing import Optional
-from urllib.parse import urlencode
 
-import httpx
 import redis as _redis_lib
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
-from fastapi.responses import RedirectResponse
 from jose import JWTError as _JWTError, jwt as _jose_jwt
 import pyotp
 from pydantic import BaseModel
@@ -55,32 +49,26 @@ from api.auth_utils import (
     generate_otp,
     hash_password,
     hash_token,
+    send_login_lockout_email,
     send_mfa_enabled_email,
-    send_oauth_linked_email,
     send_password_changed_email,
     send_password_reset_email,
     send_verification_email,
     set_auth_cookies,
+    set_last_org_cookie,
+    verify_turnstile_token,
     verify_password,
 )
-from api.deps import get_current_client, get_db
+from api.deps import get_current_client, get_current_org, get_db
 from api.limiter import limiter
-from db.models import Client, MfaBackupCode, OAuthAccount, RefreshToken
+from api.routes.billing import cancel_org_subscriptions_for_deletion
+from db.models import Client, MfaBackupCode, Organization, OrganizationMember, PromoCode, RefreshToken
 
 router = APIRouter()
 
 # ---------------------------------------------------------------------------
 # Environment
 # ---------------------------------------------------------------------------
-GOOGLE_CLIENT_ID     = os.environ.get("GOOGLE_CLIENT_ID", "")
-GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
-GOOGLE_REDIRECT_URI  = os.environ.get("GOOGLE_REDIRECT_URI", "")
-GITHUB_CLIENT_ID     = os.environ.get("GITHUB_CLIENT_ID", "")
-GITHUB_CLIENT_SECRET = os.environ.get("GITHUB_CLIENT_SECRET", "")
-GITHUB_REDIRECT_URI  = os.environ.get("GITHUB_REDIRECT_URI", "")
-MICROSOFT_CLIENT_ID     = os.environ.get("MICROSOFT_CLIENT_ID", "")
-MICROSOFT_CLIENT_SECRET = os.environ.get("MICROSOFT_CLIENT_SECRET", "")
-MICROSOFT_REDIRECT_URI  = os.environ.get("MICROSOFT_REDIRECT_URI", "")
 FRONTEND_URL         = os.environ.get("FRONTEND_URL", "http://localhost:3000")
 REDIS_URL            = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 
@@ -107,13 +95,55 @@ def _check_email_rate(email: str, limit: int, window: int, prefix: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Item 6 — login brute force lockout (failed attempts only, distinct from
+# _check_email_rate's blanket per-request counter above)
+# ---------------------------------------------------------------------------
+
+_LOGIN_LOCKOUT_THRESHOLD = 5
+_LOGIN_LOCKOUT_WINDOW    = 15 * 60  # 15 minutes
+
+
+def _login_failure_key(email: str) -> str:
+    return f"clew:login_fail:{hashlib.sha256(email.lower().encode()).hexdigest()}"
+
+
+def _is_login_locked_out(email: str) -> bool:
+    count = _redis.get(_login_failure_key(email))
+    return count is not None and int(count) >= _LOGIN_LOCKOUT_THRESHOLD
+
+
+def _record_login_failure(email: str, account_exists: bool = True) -> None:
+    """Increment the failed-attempt counter; on the attempt that trips the
+    lockout, email the account owner.
+
+    account_exists=False (email not registered) still counts toward the
+    lockout — so failed-attempt timing can't be used to enumerate valid
+    accounts — but never sends mail to an address that isn't a real account.
+    """
+    key = _login_failure_key(email)
+    count = _redis.incr(key)
+    if count == 1:
+        _redis.expire(key, _LOGIN_LOCKOUT_WINDOW)
+    if count == _LOGIN_LOCKOUT_THRESHOLD and account_exists:
+        send_login_lockout_email(email)
+
+
+def _reset_login_failures(email: str) -> None:
+    _redis.delete(_login_failure_key(email))
+
+
+# ---------------------------------------------------------------------------
 # Pydantic request bodies
 # ---------------------------------------------------------------------------
 
 class RegisterBody(BaseModel):
     email: str
     password: str
+    full_name: str
     company_name: str
+    pilot_code: Optional[str] = None
+    captcha_token: str
+    tos_accepted: bool
 
 
 class VerifyEmailBody(BaseModel):
@@ -132,6 +162,7 @@ class LoginBody(BaseModel):
 
 class ForgotPasswordBody(BaseModel):
     email: str
+    captcha_token: str
 
 
 class ResetPasswordBody(BaseModel):
@@ -148,9 +179,19 @@ class MfaDisableBody(BaseModel):
     password: str
 
 
+class ChangePasswordBody(BaseModel):
+    current_password: str
+    new_password: str
+
+
+class DeleteAccountBody(BaseModel):
+    confirmation: str
+
+
 class MfaLoginBody(BaseModel):
     mfa_token: str
     code: str
+    is_backup_code: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -177,22 +218,112 @@ def _store_refresh_token(
     db.commit()
 
 
+def _resolve_org_for_login(
+    db: Session, client_id: str, preferred_org_id: Optional[str],
+) -> Optional[str]:
+    """Pick which org_id goes into the new JWT.
+
+    preferred_org_id (an explicit switch-org target, or the last_org_id
+    cookie) wins if the client still belongs to it. Otherwise auto-select
+    when the client belongs to exactly one org. Multi-org with no valid
+    preference returns None — the frontend sends the user to /select-org.
+    """
+    memberships = (
+        db.query(OrganizationMember)
+        .filter(OrganizationMember.client_id == client_id)
+        .all()
+    )
+    if not memberships:
+        return None
+    if preferred_org_id and any(m.org_id == preferred_org_id for m in memberships):
+        return preferred_org_id
+    if len(memberships) == 1:
+        return memberships[0].org_id
+    return None
+
+
 def _issue_tokens(
     response: Response,
     db: Session,
     client: Client,
     request: Request,
+    org_id: Optional[str] = None,
 ) -> None:
-    """Create an access+refresh token pair, persist the refresh hash, set cookies."""
-    access_tok  = create_access_token(subject=client.id)
+    """Create an access+refresh token pair, persist the refresh hash, set cookies.
+
+    org_id: an explicit org to select (e.g. POST /auth/switch-org, or the org
+    just created at registration). If omitted, falls back to the
+    last_org_id cookie, then to auto-select when there is exactly one org.
+    """
+    preferred = org_id or request.cookies.get("last_org_id")
+    resolved_org_id = _resolve_org_for_login(db, client.id, preferred)
+    extra = {"org_id": resolved_org_id} if resolved_org_id else None
+    access_tok  = create_access_token(subject=client.id, extra=extra)
     refresh_tok = create_refresh_token(subject=client.id)
     _store_refresh_token(db, client.id, refresh_tok, request)
     set_auth_cookies(response, access_tok, refresh_tok)
+    set_last_org_cookie(response, resolved_org_id)
 
 
 # ---------------------------------------------------------------------------
 # POST /auth/register
 # ---------------------------------------------------------------------------
+
+def _email_domain(email: str) -> str:
+    return email.rsplit("@", 1)[-1].lower()
+
+
+def _create_org_for_new_client(
+    db: Session,
+    client_id: str,
+    email: str,
+    company_name: str,
+    pilot_code: Optional[str] = None,
+) -> Organization:
+    """Registration creates Client + Organization + OrganizationMember
+    (role=owner) atomically — one company email maps to one org for now
+    (freelancer multi-org-per-login is a later, separate flow). Caller commits.
+
+    Item 11 trial length: a manual-outreach pilot code gets 30 days, plain
+    self-serve signup gets 7. Item 26: pilot codes are validated against the
+    promo_codes table (exists AND unredeemed) and marked redeemed here, in
+    the same request that creates the Organization.
+    """
+    now = datetime.now(timezone.utc)
+    pilot_code = pilot_code.strip().upper() if pilot_code else None
+    promo: Optional[PromoCode] = None
+    if pilot_code:
+        promo = (
+            db.query(PromoCode)
+            .filter(PromoCode.code == pilot_code, PromoCode.redeemed_at.is_(None))
+            .first()
+        )
+        if promo is None:
+            raise HTTPException(status_code=400, detail="This promo code is no longer available.")
+        trial_source = "manual_outreach"
+        trial_ends_at = now + timedelta(days=30)
+        billing_provider = "pilot"
+    else:
+        trial_source = "self_serve"
+        trial_ends_at = now + timedelta(days=7)
+        billing_provider = None
+    org = Organization(
+        company_name=company_name,
+        domain=_email_domain(email),
+        tier="starter",
+        trial_source=trial_source,
+        trial_ends_at=trial_ends_at,
+        pilot_code_used=pilot_code,
+        billing_provider=billing_provider,
+    )
+    db.add(org)
+    db.flush()  # populate org.id without committing yet
+    if promo is not None:
+        promo.redeemed_at = now
+        promo.redeemed_by_org_id = org.id
+    db.add(OrganizationMember(client_id=client_id, org_id=org.id, role="owner"))
+    return org
+
 
 @router.post("/register", status_code=201)
 @limiter.limit("5/hour")
@@ -201,6 +332,13 @@ async def register(
     body: RegisterBody,
     db: Session = Depends(get_db),
 ):
+    if not body.tos_accepted:
+        raise HTTPException(status_code=400, detail="You must accept the Terms of Service and Privacy Policy.")
+
+    remote_ip = request.client.host if request.client else None
+    if not verify_turnstile_token(body.captcha_token, remote_ip):
+        raise HTTPException(status_code=400, detail="CAPTCHA verification failed. Please try again.")
+
     existing = db.query(Client).filter(Client.email == body.email.lower()).first()
     if existing:
         # Generic message — don't confirm whether the email is registered.
@@ -214,12 +352,15 @@ async def register(
     client = Client(
         email=body.email.lower(),
         password_hash=hash_password(body.password),
-        company_name=body.company_name,
+        full_name=body.full_name,
+        tos_accepted_at=now,
         email_verified=False,
         verify_token=hash_password(otp),  # bcrypt-hash the OTP before storage
         verify_token_expires_at=now + timedelta(seconds=_OTP_EXPIRE_SECONDS),
     )
     db.add(client)
+    db.flush()  # populate client.id without committing yet
+    _create_org_for_new_client(db, client.id, client.email, body.company_name, body.pilot_code)
     db.commit()
 
     send_verification_email(body.email.lower(), otp)
@@ -302,15 +443,29 @@ async def login(
     if not _check_email_rate(body.email, limit=5, window=900, prefix="rl:login"):
         raise HTTPException(status_code=429, detail="Too many requests. Try again later.")
 
-    client = db.query(Client).filter(Client.email == body.email.lower()).first()
+    # Item 6: failed-attempts lockout, distinct from the blanket counter above.
+    if _is_login_locked_out(body.email):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many failed login attempts. Try again in 15 minutes.",
+        )
+
+    client = db.query(Client).filter(
+        Client.email == body.email.lower(),
+        Client.deleted_at.is_(None),
+    ).first()
 
     # Generic error — never reveal which field is wrong or whether the account exists.
     _creds = HTTPException(status_code=401, detail="Invalid credentials.")
 
     if not client or not client.password_hash:
+        _record_login_failure(body.email, account_exists=client is not None)
         raise _creds
     if not verify_password(body.password, client.password_hash):
+        _record_login_failure(body.email, account_exists=True)
         raise _creds
+
+    _reset_login_failures(body.email)
 
     if not client.email_verified:
         raise HTTPException(
@@ -411,16 +566,98 @@ async def refresh_tokens(
 # ---------------------------------------------------------------------------
 
 @router.get("/me")
-async def me(client: Client = Depends(get_current_client)):
+async def me(
+    client: Client = Depends(get_current_client),
+    db: Session = Depends(get_db),
+):
+    memberships = (
+        db.query(OrganizationMember)
+        .filter(OrganizationMember.client_id == client.id)
+        .all()
+    )
+    org_ids = [m.org_id for m in memberships]
+    orgs_by_id = {
+        o.id: o for o in db.query(Organization).filter(Organization.id.in_(org_ids)).all()
+    } if org_ids else {}
+
+    orgs = [
+        {
+            "id":           m.org_id,
+            "company_name": orgs_by_id[m.org_id].company_name if m.org_id in orgs_by_id else None,
+            "role":         m.role,
+        }
+        for m in memberships
+    ]
+
     return {
         "id":             client.id,
         "email":          client.email,
-        "company_name":   client.company_name,
+        "full_name":      client.full_name,
         "email_verified": client.email_verified,
         "mfa_enabled":    client.mfa_enabled,
-        "tier":           client.tier,
+        "mfa_nudge_dismissed_at": client.mfa_nudge_dismissed_at,
         "created_at":     client.created_at,
+        "orgs":           orgs,
     }
+
+
+# ---------------------------------------------------------------------------
+# GET /auth/orgs — list the current client's organisations (for the switcher)
+# ---------------------------------------------------------------------------
+
+@router.get("/orgs")
+async def list_orgs(
+    request: Request,
+    client: Client = Depends(get_current_client),
+    db: Session = Depends(get_db),
+):
+    last_org_id = request.cookies.get("last_org_id")
+    memberships = (
+        db.query(OrganizationMember)
+        .filter(OrganizationMember.client_id == client.id)
+        .all()
+    )
+    org_ids = [m.org_id for m in memberships]
+    orgs_by_id = {
+        o.id: o for o in db.query(Organization).filter(Organization.id.in_(org_ids)).all()
+    } if org_ids else {}
+
+    return [
+        {
+            "id":           m.org_id,
+            "company_name": orgs_by_id[m.org_id].company_name if m.org_id in orgs_by_id else None,
+            "role":         m.role,
+            "active":       m.org_id == last_org_id,
+        }
+        for m in memberships
+    ]
+
+
+class SwitchOrgBody(BaseModel):
+    org_id: str
+
+
+@router.post("/switch-org")
+async def switch_org(
+    body: SwitchOrgBody,
+    request: Request,
+    response: Response,
+    client: Client = Depends(get_current_client),
+    db: Session = Depends(get_db),
+):
+    membership = (
+        db.query(OrganizationMember)
+        .filter(
+            OrganizationMember.client_id == client.id,
+            OrganizationMember.org_id == body.org_id,
+        )
+        .first()
+    )
+    if not membership:
+        raise HTTPException(status_code=403, detail="You are not a member of that organisation.")
+
+    _issue_tokens(response, db, client, request, org_id=body.org_id)
+    return {"message": "Switched organisation.", "org_id": body.org_id}
 
 
 # ---------------------------------------------------------------------------
@@ -434,6 +671,10 @@ async def forgot_password(
     body: ForgotPasswordBody,
     db: Session = Depends(get_db),
 ):
+    remote_ip = request.client.host if request.client else None
+    if not verify_turnstile_token(body.captcha_token, remote_ip):
+        raise HTTPException(status_code=400, detail="CAPTCHA verification failed. Please try again.")
+
     if not _check_email_rate(body.email, limit=3, window=3600, prefix="rl:forgot"):
         raise HTTPException(status_code=429, detail="Too many requests. Try again later.")
 
@@ -493,374 +734,95 @@ async def reset_password(
 
 
 # ---------------------------------------------------------------------------
-# GET /auth/google — redirect to Google consent page
+# POST /auth/change-password: item 22's Settings > Security section
 # ---------------------------------------------------------------------------
 
-@router.get("/google")
-@limiter.limit("20/hour")
-async def google_login(request: Request):
-    state = secrets.token_urlsafe(32)
-    _redis.setex(f"oauth_state:{state}", 600, "1")
-
-    url = "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode(
-        {
-            "client_id":     GOOGLE_CLIENT_ID,
-            "redirect_uri":  GOOGLE_REDIRECT_URI,
-            "response_type": "code",
-            "scope":         "openid email profile",
-            "state":         state,
-            "access_type":   "online",
-        }
-    )
-    return RedirectResponse(url)
-
-
-# ---------------------------------------------------------------------------
-# GET /auth/google/callback
-# ---------------------------------------------------------------------------
-
-@router.get("/google/callback")
-async def google_callback(
+@router.post("/change-password")
+async def change_password(
+    body: ChangePasswordBody,
     request: Request,
     response: Response,
-    code: Optional[str] = None,
-    state: Optional[str] = None,
-    error: Optional[str] = None,
+    client: Client = Depends(get_current_client),
     db: Session = Depends(get_db),
 ):
-    if error or not code or not state:
-        return RedirectResponse(f"{FRONTEND_URL}/login?error=oauth_cancelled")
-
-    state_key = f"oauth_state:{state}"
-    if not _redis.get(state_key):
-        return RedirectResponse(f"{FRONTEND_URL}/login?error=invalid_state")
-    _redis.delete(state_key)
-
-    async with httpx.AsyncClient() as http:
-        token_resp = await http.post(
-            "https://oauth2.googleapis.com/token",
-            data={
-                "code":          code,
-                "client_id":     GOOGLE_CLIENT_ID,
-                "client_secret": GOOGLE_CLIENT_SECRET,
-                "redirect_uri":  GOOGLE_REDIRECT_URI,
-                "grant_type":    "authorization_code",
-            },
+    if not client.password_hash:
+        raise HTTPException(
+            status_code=400,
+            detail="This account has no password set.",
         )
+    if not verify_password(body.current_password, client.password_hash):
+        raise HTTPException(status_code=401, detail="Current password is incorrect.")
+    if len(body.new_password) < 8:
+        raise HTTPException(status_code=422, detail="New password must be at least 8 characters.")
 
-    if token_resp.status_code != 200:
-        return RedirectResponse(f"{FRONTEND_URL}/login?error=oauth_failed")
+    client.password_hash = hash_password(body.new_password)
+    db.commit()
 
-    access_tok = token_resp.json().get("access_token")
-    if not access_tok:
-        return RedirectResponse(f"{FRONTEND_URL}/login?error=oauth_failed")
-
-    async with httpx.AsyncClient() as http:
-        profile_resp = await http.get(
-            "https://www.googleapis.com/oauth2/v3/userinfo",
-            headers={"Authorization": f"Bearer {access_tok}"},
-        )
-
-    if profile_resp.status_code != 200:
-        return RedirectResponse(f"{FRONTEND_URL}/login?error=oauth_failed")
-
-    profile     = profile_resp.json()
-    provider_id = str(profile.get("sub", ""))
-    email       = profile.get("email", "")
-
-    if not provider_id or not email:
-        return RedirectResponse(f"{FRONTEND_URL}/login?error=oauth_no_email")
-
-    return await _handle_oauth_sign_in(
-        db=db,
-        response=response,
-        request=request,
-        provider="google",
-        provider_id=provider_id,
-        email=email.lower(),
-        company_name=profile.get("name") or email.split("@")[0],
-    )
-
-
-# ---------------------------------------------------------------------------
-# GET /auth/github — redirect to GitHub consent page
-# ---------------------------------------------------------------------------
-
-@router.get("/github")
-@limiter.limit("20/hour")
-async def github_login(request: Request):
-    state = secrets.token_urlsafe(32)
-    _redis.setex(f"oauth_state:{state}", 600, "1")
-
-    url = "https://github.com/login/oauth/authorize?" + urlencode(
-        {
-            "client_id":    GITHUB_CLIENT_ID,
-            "redirect_uri": GITHUB_REDIRECT_URI,
-            "scope":        "read:user user:email",
-            "state":        state,
-        }
-    )
-    return RedirectResponse(url)
-
-
-# ---------------------------------------------------------------------------
-# GET /auth/github/callback
-# ---------------------------------------------------------------------------
-
-@router.get("/github/callback")
-async def github_callback(
-    request: Request,
-    response: Response,
-    code: Optional[str] = None,
-    state: Optional[str] = None,
-    error: Optional[str] = None,
-    db: Session = Depends(get_db),
-):
-    if error or not code or not state:
-        return RedirectResponse(f"{FRONTEND_URL}/login?error=oauth_cancelled")
-
-    state_key = f"oauth_state:{state}"
-    if not _redis.get(state_key):
-        return RedirectResponse(f"{FRONTEND_URL}/login?error=invalid_state")
-    _redis.delete(state_key)
-
-    gh_headers = {
-        "Accept":               "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-
-    async with httpx.AsyncClient() as http:
-        token_resp = await http.post(
-            "https://github.com/login/oauth/access_token",
-            data={
-                "code":          code,
-                "client_id":     GITHUB_CLIENT_ID,
-                "client_secret": GITHUB_CLIENT_SECRET,
-                "redirect_uri":  GITHUB_REDIRECT_URI,
-            },
-            headers={"Accept": "application/json"},
-        )
-
-    if token_resp.status_code != 200:
-        return RedirectResponse(f"{FRONTEND_URL}/login?error=oauth_failed")
-
-    access_tok = token_resp.json().get("access_token")
-    if not access_tok:
-        return RedirectResponse(f"{FRONTEND_URL}/login?error=oauth_failed")
-
-    gh_headers["Authorization"] = f"Bearer {access_tok}"
-
-    async with httpx.AsyncClient() as http:
-        profile_resp = await http.get("https://api.github.com/user", headers=gh_headers)
-
-    if profile_resp.status_code != 200:
-        return RedirectResponse(f"{FRONTEND_URL}/login?error=oauth_failed")
-
-    profile     = profile_resp.json()
-    provider_id = str(profile.get("id", ""))
-    email: Optional[str] = profile.get("email")
-
-    # GitHub sometimes hides the email — fetch from the emails endpoint.
-    if not email:
-        async with httpx.AsyncClient() as http:
-            emails_resp = await http.get(
-                "https://api.github.com/user/emails", headers=gh_headers
-            )
-        if emails_resp.status_code == 200:
-            for entry in emails_resp.json():
-                if entry.get("primary") and entry.get("verified"):
-                    email = entry["email"]
-                    break
-
-    if not provider_id or not email:
-        return RedirectResponse(f"{FRONTEND_URL}/login?error=oauth_no_email")
-
-    return await _handle_oauth_sign_in(
-        db=db,
-        response=response,
-        request=request,
-        provider="github",
-        provider_id=provider_id,
-        email=email.lower(),
-        company_name=profile.get("name") or profile.get("login") or email.split("@")[0],
-    )
-
-
-# ---------------------------------------------------------------------------
-# Shared OAuth sign-in logic (Google + GitHub share this)
-# ---------------------------------------------------------------------------
-
-async def _handle_oauth_sign_in(
-    db: Session,
-    response: Response,
-    request: Request,
-    provider: str,
-    provider_id: str,
-    email: str,
-    company_name: str,
-) -> RedirectResponse:
-    """
-    Find or create the client row, link the OAuth account if needed,
-    and issue auth cookies. Used by both Google and GitHub callbacks.
-
-    Identity resolution order:
-      1. Match on (provider, provider_id) — stable even if user changes email.
-      2. Match on email — silently link to an existing credentials account.
-      3. Neither found — create a new client + oauth row.
-    """
-    oauth_acc = (
-        db.query(OAuthAccount)
-        .filter(
-            OAuthAccount.provider    == provider,
-            OAuthAccount.provider_id == provider_id,
-        )
-        .first()
-    )
-
-    if oauth_acc:
-        client = db.query(Client).filter(Client.id == oauth_acc.client_id).first()
-        if not client:
-            return RedirectResponse(f"{FRONTEND_URL}/login?error=account_error")
-
-    else:
-        client = db.query(Client).filter(Client.email == email).first()
-
-        if client:
-            # Link this OAuth provider to the existing credentials account.
-            db.add(
-                OAuthAccount(
-                    client_id=client.id,
-                    provider=provider,
-                    provider_id=provider_id,
-                    email=email,
-                )
-            )
-            db.commit()
-            send_oauth_linked_email(client.email, provider)
-
-        else:
-            # Brand-new user — create client and oauth_account together.
-            client = Client(
-                email=email,
-                password_hash=None,   # OAuth-only; password_hash stays NULL
-                company_name=company_name,
-                email_verified=True,  # Provider already verified the email
-            )
-            db.add(client)
-            db.flush()  # populate client.id without committing yet
-            db.add(
-                OAuthAccount(
-                    client_id=client.id,
-                    provider=provider,
-                    provider_id=provider_id,
-                    email=email,
-                )
-            )
-            db.commit()
-
+    # Same precedent as /auth/reset-password (item 7a): revoke every other
+    # active session so a stolen session token can't outlive the change.
+    # Unlike reset-password (an anonymous OTP flow), this is an authenticated
+    # in-session action, reissue a fresh pair so the current device isn't
+    # logged out by its own password change.
+    db.query(RefreshToken).filter(
+        RefreshToken.client_id == client.id
+    ).update({"revoked": True})
+    db.commit()
     _issue_tokens(response, db, client, request)
-    return RedirectResponse(f"{FRONTEND_URL}/dashboard")
+
+    send_password_changed_email(client.email)
+    return {"message": "Password changed. Other sessions have been signed out."}
 
 
 # ---------------------------------------------------------------------------
-# GET /auth/microsoft — redirect to Microsoft Entra consent page
+# POST /auth/delete-account: item 40, DPDP Act right-to-erasure
 #
-# App registration in Azure Portal:
-#   https://portal.azure.com → Entra ID → App registrations → New registration
-#   Supported account types: "Accounts in any organizational directory
-#     (Any Azure AD tenant – Multitenant) and personal Microsoft accounts"
-#   Redirect URI (Web): https://api.clewsec.com/auth/microsoft/callback
+# Soft-delete only: sets deleted_at + anonymizes the email so it can be
+# re-registered. A daily Beat task (purge_deleted_accounts) hard-deletes
+# rows where deleted_at is older than 30 days.
+#
+# If the client owns an organisation, that whole organisation (and every
+# other member's access to it) is soft-deleted too. An owner who wants to
+# keep the org going should use POST /org/members/{id}/transfer-ownership
+# first (org.py); this endpoint itself never transfers ownership, it just
+# takes whatever orgs the caller still owns at deletion time with it.
 # ---------------------------------------------------------------------------
 
-@router.get("/microsoft")
-@limiter.limit("20/hour")
-async def microsoft_login(request: Request):
-    state = secrets.token_urlsafe(32)
-    _redis.setex(f"oauth_state:{state}", 600, "1")
-
-    url = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?" + urlencode(
-        {
-            "client_id":     MICROSOFT_CLIENT_ID,
-            "redirect_uri":  MICROSOFT_REDIRECT_URI,
-            "response_type": "code",
-            "scope":         "openid email profile User.Read",
-            "state":         state,
-            "response_mode": "query",
-        }
-    )
-    return RedirectResponse(url)
-
-
-# ---------------------------------------------------------------------------
-# GET /auth/microsoft/callback
-# ---------------------------------------------------------------------------
-
-@router.get("/microsoft/callback")
-async def microsoft_callback(
-    request: Request,
+@router.post("/delete-account")
+async def delete_account(
+    body: DeleteAccountBody,
     response: Response,
-    code: Optional[str] = None,
-    state: Optional[str] = None,
-    error: Optional[str] = None,
+    client: Client = Depends(get_current_client),
     db: Session = Depends(get_db),
 ):
-    if error or not code or not state:
-        return RedirectResponse(f"{FRONTEND_URL}/login?error=oauth_cancelled")
+    if body.confirmation != "DELETE":
+        raise HTTPException(status_code=400, detail='Type "DELETE" to confirm.')
 
-    state_key = f"oauth_state:{state}"
-    if not _redis.get(state_key):
-        return RedirectResponse(f"{FRONTEND_URL}/login?error=invalid_state")
-    _redis.delete(state_key)
+    now = datetime.now(timezone.utc)
 
-    async with httpx.AsyncClient() as http:
-        token_resp = await http.post(
-            "https://login.microsoftonline.com/common/oauth2/v2.0/token",
-            data={
-                "code":          code,
-                "client_id":     MICROSOFT_CLIENT_ID,
-                "client_secret": MICROSOFT_CLIENT_SECRET,
-                "redirect_uri":  MICROSOFT_REDIRECT_URI,
-                "grant_type":    "authorization_code",
-                "scope":         "openid email profile User.Read",
-            },
+    owned_orgs = (
+        db.query(Organization)
+        .join(OrganizationMember, OrganizationMember.org_id == Organization.id)
+        .filter(
+            OrganizationMember.client_id == client.id,
+            OrganizationMember.role == "owner",
+            Organization.deleted_at.is_(None),
         )
-
-    if token_resp.status_code != 200:
-        return RedirectResponse(f"{FRONTEND_URL}/login?error=oauth_failed")
-
-    access_tok = token_resp.json().get("access_token")
-    if not access_tok:
-        return RedirectResponse(f"{FRONTEND_URL}/login?error=oauth_failed")
-
-    async with httpx.AsyncClient() as http:
-        profile_resp = await http.get(
-            "https://graph.microsoft.com/v1.0/me",
-            headers={"Authorization": f"Bearer {access_tok}"},
-        )
-
-    if profile_resp.status_code != 200:
-        return RedirectResponse(f"{FRONTEND_URL}/login?error=oauth_failed")
-
-    profile = profile_resp.json()
-    provider_id = str(profile.get("id", ""))
-    # Prefer 'mail' (real email) over 'userPrincipalName' which can be a
-    # tenant UPN like user@contoso.onmicrosoft.com for corporate accounts.
-    email: Optional[str] = profile.get("mail") or profile.get("userPrincipalName")
-
-    if not provider_id or not email:
-        return RedirectResponse(f"{FRONTEND_URL}/login?error=oauth_no_email")
-
-    display_name: str = profile.get("displayName") or email.split("@")[0]
-
-    return await _handle_oauth_sign_in(
-        db=db,
-        response=response,
-        request=request,
-        provider="microsoft",
-        provider_id=provider_id,
-        email=email.lower(),
-        company_name=display_name,
+        .all()
     )
+    for org in owned_orgs:
+        cancel_org_subscriptions_for_deletion(org, db)
+        org.deleted_at = now
+
+    client.deleted_at = now
+    client.email = f"deleted-{client.id}@deleted.clew"
+
+    db.query(RefreshToken).filter(
+        RefreshToken.client_id == client.id
+    ).update({"revoked": True})
+    db.commit()
+
+    clear_auth_cookies(response)
+    return {"message": "Account deleted."}
 
 
 # ---------------------------------------------------------------------------
@@ -895,12 +857,21 @@ async def login_mfa(
     if not client or not client.mfa_enabled or not client.mfa_secret:
         raise _bad
 
+    # Item 6: same lockout counter as /auth/login — this step still guards
+    # a brute-forceable secret (TOTP/backup code).
+    if _is_login_locked_out(client.email):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many failed login attempts. Try again in 15 minutes.",
+        )
+
     code = body.code.strip().upper()
 
     # Try TOTP first, then backup code
     totp_secret = decrypt_totp_secret(client.mfa_secret)
     totp = pyotp.TOTP(totp_secret)
     if totp.verify(code, valid_window=2):
+        _reset_login_failures(client.email)
         _issue_tokens(response, db, client, request)
         return {"message": "Logged in."}
 
@@ -918,9 +889,28 @@ async def login_mfa(
     if backup:
         backup.used = True
         db.commit()
+        _reset_login_failures(client.email)
         _issue_tokens(response, db, client, request)
         return {"message": "Logged in via backup code."}
 
+    _record_login_failure(client.email)
+    # Item 13: distinguish "wrong code" from "no codes left" only when the
+    # user was explicitly on the backup-code path — TOTP typos shouldn't
+    # trigger this message.
+    if body.is_backup_code:
+        remaining = (
+            db.query(MfaBackupCode)
+            .filter(
+                MfaBackupCode.client_id == client.id,
+                MfaBackupCode.used      == False,  # noqa: E712
+            )
+            .count()
+        )
+        if remaining == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="All recovery codes have been used. Disable and re-enable MFA from your security settings to generate new codes.",
+            )
     raise HTTPException(status_code=401, detail="Invalid authenticator code.")
 
 
@@ -1016,6 +1006,20 @@ async def mfa_disable(
     db.commit()
     send_mfa_enabled_email(client.email, enabled=False)
     return {"message": "MFA disabled."}
+
+
+# ---------------------------------------------------------------------------
+# POST /auth/mfa/nudge-dismiss — item 10 Step 3, dismiss the MFA setup banner
+# ---------------------------------------------------------------------------
+
+@router.post("/mfa/nudge-dismiss")
+async def mfa_nudge_dismiss(
+    client: Client = Depends(get_current_client),
+    db: Session = Depends(get_db),
+):
+    client.mfa_nudge_dismissed_at = datetime.now(timezone.utc)
+    db.commit()
+    return {"message": "Dismissed."}
 
 
 # ---------------------------------------------------------------------------

@@ -3,10 +3,12 @@
 import { useState } from "react";
 import Link from "next/link";
 import { AuthLayout, inputStyle, labelStyle, primaryBtnStyle } from "@/components/auth/AuthLayout";
+import { Turnstile } from "@/components/auth/Turnstile";
 import { API_URL } from "@/lib/api";
 
 export default function ForgotPasswordPage() {
   const [email,     setEmail]     = useState("");
+  const [captchaToken, setCaptchaToken] = useState("");
   const [submitted, setSubmitted] = useState(false);
   const [error,     setError]     = useState("");
   const [loading,   setLoading]   = useState(false);
@@ -14,13 +16,17 @@ export default function ForgotPasswordPage() {
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError("");
+    if (!captchaToken) {
+      setError("Please complete the CAPTCHA.");
+      return;
+    }
     setLoading(true);
     try {
       const res = await fetch(`${API_URL}/auth/forgot-password`, {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email }),
+        body: JSON.stringify({ email, captcha_token: captchaToken }),
       });
       if (!res.ok) {
         const data = await res.json();
@@ -73,6 +79,8 @@ export default function ForgotPasswordPage() {
             style={inputStyle}
           />
         </div>
+
+        <Turnstile onToken={setCaptchaToken} />
 
         {error && (
           <p style={{ fontSize: "13px", color: "#E53E3E", margin: 0 }}>{error}</p>

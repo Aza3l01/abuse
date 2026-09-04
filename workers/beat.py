@@ -30,4 +30,12 @@ celery_app.conf.beat_schedule = {
         "task":     "workers.tasks.process_logs.poll_all_clients",
         "schedule": crontab(minute="*/15"),
     },
+    "send-trial-reminders-daily": {
+        "task":     "workers.tasks.trial_reminders.send_trial_reminders",
+        "schedule": crontab(hour=9, minute=0),
+    },
+    "purge-deleted-accounts-daily": {
+        "task":     "workers.tasks.purge_deleted_accounts.purge_deleted_accounts",
+        "schedule": crontab(hour=3, minute=0),
+    },
 }

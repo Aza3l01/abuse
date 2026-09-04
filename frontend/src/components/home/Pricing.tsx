@@ -1,106 +1,10 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { PRICING_TIERS as TIERS, FEATURE_ROWS } from "@/lib/pricing";
 
 type Currency = "INR" | "USD";
 type BillingPeriod = "monthly" | "annual";
-
-interface Tier {
-  name: string;
-  monthlyINR: string | null;
-  monthlyUSD: string | null;
-  annualINR: string | null;
-  annualUSD: string | null;
-  annualNoteINR: string | null;
-  annualNoteUSD: string | null;
-  volume: string;
-  blocking: boolean;
-  features: string[];
-  cta: string;
-  highlight: boolean;
-}
-
-const TIERS: Tier[] = [
-  {
-    name: "Starter",
-    monthlyINR: "₹2,999/mo",
-    monthlyUSD: "$39/mo",
-    annualINR: "₹2,499/mo",
-    annualUSD: "$32/mo",
-    annualNoteINR: "₹29,988 billed annually",
-    annualNoteUSD: "$384 billed annually",
-    volume: "Up to 10M calls/mo",
-    blocking: false,
-    features: [
-      "Detection + dashboard",
-      "Full threat history",
-      "Email alerts on critical threats",
-      "IP intelligence history",
-      "AWS API Gateway + ALB support",
-    ],
-    cta: "Get started",
-    highlight: false,
-  },
-  {
-    name: "Growth",
-    monthlyINR: "₹4,999/mo",
-    monthlyUSD: "$69/mo",
-    annualINR: "₹4,166/mo",
-    annualUSD: "$57/mo",
-    annualNoteINR: "₹49,992 billed annually",
-    annualNoteUSD: "$684 billed annually",
-    volume: "Up to 50M calls/mo",
-    blocking: true,
-    features: [
-      "Everything in Starter",
-      "Auto WAF rule injection",
-      "Cloudflare blocking",
-      "Priority support",
-    ],
-    cta: "Get started",
-    highlight: true,
-  },
-  {
-    name: "Pro",
-    monthlyINR: "₹9,999/mo",
-    monthlyUSD: "$129/mo",
-    annualINR: "₹8,333/mo",
-    annualUSD: "$107/mo",
-    annualNoteINR: "₹99,996 billed annually",
-    annualNoteUSD: "$1,284 billed annually",
-    volume: "Up to 200M calls/mo",
-    blocking: true,
-    features: [
-      "Everything in Growth",
-      "AI-generated threat explanations",
-      "Custom thresholds",
-      "Dedicated onboarding",
-      "Quarterly business review",
-    ],
-    cta: "Get started",
-    highlight: false,
-  },
-  {
-    name: "Enterprise",
-    monthlyINR: null,
-    monthlyUSD: null,
-    annualINR: null,
-    annualUSD: null,
-    annualNoteINR: null,
-    annualNoteUSD: null,
-    volume: "Beyond 200M calls/mo",
-    blocking: true,
-    features: [
-      "Everything in Pro",
-      "Multi-region support",
-      "Custom integrations",
-      "SLA guarantee",
-      "Dedicated infrastructure",
-    ],
-    cta: "Contact us",
-    highlight: false,
-  },
-];
 
 const AUDIT_PRICE = { INR: "₹49,999", USD: "$599" };
 
@@ -286,38 +190,30 @@ export function Pricing() {
               {tier.volume === "—" && <div className="mb-6" />}
 
               <ul className="flex-1 space-y-2 mb-8">
-                {tier.features.map((f) => (
-                  <li
-                    key={f}
-                    className="text-sm flex items-start gap-2"
-                    style={{ color: "var(--color-text-muted)" }}
-                  >
-                    <span style={{ color: "var(--color-text)", flexShrink: 0 }}>
-                      +
-                    </span>
-                    {f}
-                  </li>
-                ))}
-                <li
-                  className="text-sm flex items-start gap-2"
-                  style={{
-                    color: tier.blocking
-                      ? "var(--color-text-muted)"
-                      : "var(--color-border)",
-                  }}
-                >
-                  <span
-                    style={{
-                      color: tier.blocking
-                        ? "var(--color-text)"
-                        : "var(--color-border)",
-                      flexShrink: 0,
-                    }}
-                  >
-                    {tier.blocking ? "+" : "×"}
-                  </span>
-                  Auto blocking
-                </li>
+                {FEATURE_ROWS.map((row) => {
+                  const value = row.values[i];
+                  const included = value !== false;
+                  return (
+                    <li
+                      key={row.label}
+                      className="text-sm flex items-start gap-2"
+                      style={{
+                        color: included ? "var(--color-text-muted)" : "var(--color-border)",
+                      }}
+                    >
+                      <span
+                        style={{
+                          color: included ? "var(--color-text)" : "var(--color-border)",
+                          flexShrink: 0,
+                        }}
+                      >
+                        {included ? "+" : "×"}
+                      </span>
+                      {row.label}
+                      {typeof value === "string" ? ` (${value})` : ""}
+                    </li>
+                  );
+                })}
               </ul>
 
               <a

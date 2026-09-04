@@ -7,16 +7,16 @@ IAT reference pools) must survive Celery worker restarts.
 
 Architecture:
   - STM : unchanged — in-process sliding window per IP. Correct for the
-          single-client-per-worker model (one Celery worker handles all
-          batches for one client sequentially).
-  - LTM : serialised as JSON to Redis key `clew:ltm:{client_id}` on each
+          single-org-per-worker model (one Celery worker handles all
+          batches for one org sequentially).
+  - LTM : serialised as JSON to Redis key `clew:ltm:{org_id}` on each
           flush; restored from Redis on __init__. TTL = 30 days.
   - Board: unchanged — cleared per batch as normal.
 
 Usage (in the Celery task):
     from engine.memory.product_memory import ProductSharedMemory
 
-    mem = ProductSharedMemory(client_id, redis_client=redis_client)
+    mem = ProductSharedMemory(org_id, redis_client=redis_client)
     orchestrator = MetaAgentOrchestrator(mem)
     verdict = orchestrator.run(records)
     mem.flush()   # persist LTM back to Redis
@@ -46,17 +46,21 @@ class ProductSharedMemory(SharedMemory):
 
     def __init__(
         self,
-        client_id: str,
+        org_id: str,
         redis_client: Optional[Any] = None,
         window_seconds: int = 60,
     ) -> None:
         super().__init__(window_seconds=window_seconds)
-        self._client_id = client_id
+        self._org_id = org_id
         self._redis = redis_client
-        self._redis_key = f"{_LTM_KEY_PREFIX}{client_id}"
+        self._redis_key = f"{_LTM_KEY_PREFIX}{org_id}"
 
         if self._redis is not None:
             self._load_ltm()
+
+    @property
+    def tenant_key(self) -> str:
+        return self._org_id
 
     # ------------------------------------------------------------------
     # LTM serialisation helpers
@@ -82,6 +86,8 @@ class ProductSharedMemory(SharedMemory):
                     name: list(snapshots)
                     for name, snapshots in getattr(ltm, "_batch_stats", {}).items()
                 },
+                "tz_history": list(getattr(ltm, "_tz_history", [])),
+                "robust_locked": dict(getattr(ltm, "_robust_locked", {})),
             }
         return data
 
@@ -121,10 +127,12 @@ class ProductSharedMemory(SharedMemory):
                 list,
                 {k: list(v) for k, v in data.get("batch_stats", {}).items()},
             )
+            ltm._tz_history = list(data.get("tz_history", []))
+            ltm._robust_locked = dict(data.get("robust_locked", {}))
 
         logger.debug(
-            "ProductSharedMemory: loaded LTM for client=%s  batch_count=%d",
-            self._client_id,
+            "ProductSharedMemory: loaded LTM for org=%s  batch_count=%d",
+            self._org_id,
             ltm._batch_count,
         )
 
@@ -139,6 +147,6 @@ class ProductSharedMemory(SharedMemory):
         try:
             payload = json.dumps(self._dump_ltm())
             self._redis.set(self._redis_key, payload, ex=_LTM_TTL_SECONDS)
-            logger.debug("ProductSharedMemory: flushed LTM for client=%s", self._client_id)
+            logger.debug("ProductSharedMemory: flushed LTM for org=%s", self._org_id)
         except Exception as exc:
             logger.error("ProductSharedMemory: failed to flush LTM to Redis: %s", exc)

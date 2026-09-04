@@ -31,12 +31,12 @@ def add_ip_to_set(
     waf_ip_set_id: str,
     waf_ip_set_name: str,
     region: str,
-) -> bool:
+) -> tuple[bool, str | None]:
     """
     Add a single IP (CIDR notation) to the WAF IP set.
 
     WAF requires CIDR — bare IPs are auto-suffixed with /32 (IPv4) or /128 (IPv6).
-    Returns True on success, False on any error.
+    Returns (True, None) on success, (False, error_message) on any error.
     """
     cidr = _to_cidr(ip)
     try:
@@ -47,7 +47,7 @@ def add_ip_to_set(
 
         if cidr in addresses:
             logger.debug("aws_waf: %s already in IP set %s", cidr, waf_ip_set_id)
-            return True
+            return True, None
 
         addresses.append(cidr)
         waf.update_ip_set(
@@ -58,11 +58,11 @@ def add_ip_to_set(
             LockToken=current["LockToken"],
         )
         logger.info("aws_waf: added %s to IP set %s", cidr, waf_ip_set_id)
-        return True
+        return True, None
 
     except ClientError as exc:
         logger.error("aws_waf: failed to add %s to IP set %s: %s", cidr, waf_ip_set_id, exc)
-        return False
+        return False, str(exc)
 
 
 def remove_ip_from_set(
@@ -70,8 +70,8 @@ def remove_ip_from_set(
     waf_ip_set_id: str,
     waf_ip_set_name: str,
     region: str,
-) -> bool:
-    """Remove a single IP from the WAF IP set. Returns True on success."""
+) -> tuple[bool, str | None]:
+    """Remove a single IP from the WAF IP set. Returns (True, None) on success."""
     cidr = _to_cidr(ip)
     try:
         waf = _client(region)
@@ -80,7 +80,7 @@ def remove_ip_from_set(
 
         if cidr not in addresses:
             logger.debug("aws_waf: %s not in IP set %s — nothing to remove", cidr, waf_ip_set_id)
-            return True
+            return True, None
 
         addresses.remove(cidr)
         waf.update_ip_set(
@@ -91,11 +91,11 @@ def remove_ip_from_set(
             LockToken=current["LockToken"],
         )
         logger.info("aws_waf: removed %s from IP set %s", cidr, waf_ip_set_id)
-        return True
+        return True, None
 
     except ClientError as exc:
         logger.error("aws_waf: failed to remove %s from IP set %s: %s", cidr, waf_ip_set_id, exc)
-        return False
+        return False, str(exc)
 
 
 # ---------------------------------------------------------------------------

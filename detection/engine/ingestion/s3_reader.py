@@ -18,6 +18,7 @@ from __future__ import annotations
 import gzip
 import io
 import logging
+from datetime import datetime
 from typing import Generator, Optional
 
 import boto3
@@ -99,6 +100,38 @@ class S3Reader:
                 )
 
         return all_objects[:self.max_objects]
+
+    def list_objects_since(self, cutoff: datetime) -> list[dict]:
+        """
+        Return object metadata for everything under this prefix with
+        LastModified >= cutoff, sorted oldest first. Ignores
+        last_processed_key entirely — used by item 45 Gap A's one-off
+        calibration pass (last 24h of logs), which is a separate read from
+        the normal incremental last_processed_key cursor and must not
+        disturb it.
+
+        No max_objects cap here: calibration reads a fixed, bounded time
+        window rather than "everything since last cursor", so an unbounded
+        backlog can't accumulate the way it could for list_new_objects().
+        """
+        paginator = self._s3.get_paginator("list_objects_v2")
+        all_objects: list[dict] = []
+
+        try:
+            for page in paginator.paginate(Bucket=self.bucket, Prefix=self.prefix):
+                for obj in page.get("Contents", []):
+                    if obj["LastModified"] >= cutoff:
+                        all_objects.append({
+                            "Key": obj["Key"],
+                            "LastModified": obj["LastModified"],
+                            "Size": obj["Size"],
+                        })
+        except ClientError as exc:
+            logger.error("S3Reader.list_objects_since failed: %s", exc)
+            raise
+
+        all_objects.sort(key=lambda o: o["LastModified"])
+        return all_objects
 
     def iter_lines(
         self, objects: Optional[list[dict]] = None

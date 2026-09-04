@@ -20,6 +20,8 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
+from engine.ingestion.endpoint_template import template_endpoint
+
 logger = logging.getLogger(__name__)
 
 # The ALB log format is complex — simplest robust approach is to split on
@@ -119,8 +121,11 @@ def parse_line(line: str) -> Optional[dict]:
         "ip":            ip,
         "method":        method,
         "endpoint":      endpoint,
+        "endpoint_template": template_endpoint(endpoint),
         "status":        status,
         "response_size": sent_bytes,
         "latency":       round(latency_ms, 3),
         "user_agent":    user_agent,
+        # Item 19: raw log sample on the verdict detail page.
+        "raw_line":      line,
     }

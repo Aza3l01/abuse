@@ -66,7 +66,7 @@ function LoginForm() {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mfa_token: mfaToken, code: mfaCode }),
+        body: JSON.stringify({ mfa_token: mfaToken, code: mfaCode, is_backup_code: useBackupCode }),
       });
       const data = await res.json();
       if (!res.ok) {

@@ -1,9 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { apiFetch } from "@/lib/api";
 import Link from "next/link";
-import { API_URL } from "@/lib/api";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -21,6 +20,10 @@ interface TopIp {
   ip: string;
   count: number;
   risk_score: number;
+  highest_severity: string | null;
+  geo_country: string | null;
+  geo_asn_org: string | null;
+  blocked: boolean;
 }
 
 interface Summary {
@@ -32,6 +35,10 @@ interface Summary {
   cost_prevented: number;
   ips_flagged: number;
   trend: TrendDay[];
+  s3_configured: boolean;
+  s3_connected_at: string | null;
+  s3_status: string | null;
+  s3_status_message: string | null;
 }
 
 interface Verdict {
@@ -95,57 +102,55 @@ function StatCard({ label, value, sub }: { label: string; value: string; sub?: s
   );
 }
 
-// Inline SVG stacked bar chart — no external dependency
+// CSS flexbox stacked bar chart (no SVG scaling): bars/labels stay a fixed
+// small pixel size; with few days the columns grow to fill the available
+// width, with many days they shrink to a floor width and the row scrolls
+// horizontally instead of clipping.
 function TrendChart({ trend }: { trend: TrendDay[] }) {
   if (!trend.length) return null;
 
-  const W = 420;
-  const H = 80;
-  const slotW = W / trend.length;
-  const barW = slotW * 0.6;
-  const barOffset = slotW * 0.2;
+  const H = 64;
   const SEV_ORDER = ["low", "medium", "high", "critical"] as const;
   const COLORS = { critical: "#E53E3E", high: "#DD6B20", medium: "#D69E2E", low: "#38A169" };
   const maxTotal = Math.max(1, ...trend.map(d =>
     SEV_ORDER.reduce((s, k) => s + (d[k] || 0), 0)
   ));
+  // Bars always render for every day; date labels are thinned to a max of
+  // ~8 visible so a 30/90-day window stays readable instead of packing a
+  // label under every single bar. Hidden labels keep their layout space
+  // (visibility, not display) so column widths/alignment stay identical.
+  const labelStep = Math.max(1, Math.ceil(trend.length / 8));
 
   return (
-    <svg viewBox={`0 0 ${W} ${H + 18}`} style={{ width: "100%", height: "auto", display: "block" }}>
-      {trend.map((day, i) => {
-        const barX = i * slotW + barOffset;
-        let yBottom = H;
-        return (
-          <g key={day.date}>
-            {SEV_ORDER.map(sev => {
-              const count = day[sev] || 0;
-              if (!count) return null;
-              const barH = Math.max(1, (count / maxTotal) * H);
-              yBottom -= barH;
-              return (
-                <rect
-                  key={sev}
-                  x={barX}
-                  y={yBottom}
-                  width={barW}
-                  height={barH}
-                  fill={COLORS[sev]}
-                />
-              );
-            })}
-            <text
-              x={i * slotW + slotW / 2}
-              y={H + 14}
-              textAnchor="middle"
-              fontSize="9"
-              fill="var(--color-text-muted)"
+    <div style={{ overflowX: "auto" }}>
+      <div style={{ display: "flex", alignItems: "flex-end", gap: "4px" }}>
+        {trend.map((day, i) => (
+          <div
+            key={day.date}
+            style={{ flex: "1 1 0%", minWidth: "22px", display: "flex", flexDirection: "column", alignItems: "center", gap: "6px" }}
+          >
+            <div style={{ width: "10px", height: `${H}px`, display: "flex", flexDirection: "column-reverse" }}>
+              {SEV_ORDER.map(sev => {
+                const count = day[sev] || 0;
+                if (!count) return null;
+                const barH = Math.max(1, (count / maxTotal) * H);
+                return <div key={sev} style={{ width: "100%", height: `${barH}px`, background: COLORS[sev] }} />;
+              })}
+            </div>
+            <span
+              style={{
+                fontSize: "10px",
+                color: "var(--color-text-muted)",
+                whiteSpace: "nowrap",
+                visibility: i % labelStep === 0 ? "visible" : "hidden",
+              }}
             >
               {day.date.slice(5)}
-            </text>
-          </g>
-        );
-      })}
-    </svg>
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -156,36 +161,87 @@ function fmtTime(iso: string) {
   });
 }
 
+// ISO 3166-1 alpha-2 → flag emoji (regional indicator symbols)
+function flagEmoji(code: string | null): string {
+  if (!code || code.length !== 2) return "";
+  const base = 0x1F1E6;
+  const chars = [...code.toUpperCase()].map(c => base + (c.charCodeAt(0) - 65));
+  return String.fromCodePoint(...chars);
+}
+
+function NotConfiguredBox() {
+  return (
+    <div style={{
+      border: "1px dashed var(--color-border)",
+      padding: "48px 24px",
+      textAlign: "center",
+      marginBottom: "28px",
+    }}>
+      <p style={{ fontSize: "13px", color: "var(--color-text-muted)", marginBottom: "16px" }}>
+        Connect your S3 bucket to start monitoring
+      </p>
+      <Link href="/dashboard/settings#s3" style={{
+        display: "inline-block",
+        padding: "8px 20px",
+        fontSize: "13px",
+        border: "1px solid var(--color-text)",
+        background: "var(--color-text)",
+        color: "var(--color-bg)",
+        textDecoration: "none",
+      }}>
+        Connect S3 → Settings
+      </Link>
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
 
 export default function DashboardOverview() {
-  const router = useRouter();
   const [days,     setDays]     = useState(7);
   const [summary,  setSummary]  = useState<Summary | null>(null);
   const [recent,   setRecent]   = useState<Verdict[]>([]);
   const [loading,  setLoading]  = useState(true);
   const [error,    setError]    = useState<string | null>(null);
+  const [lastChecked, setLastChecked] = useState<Date | null>(null);
 
-  useEffect(() => {
-    setLoading(true);
-    setError(null);
-
-    Promise.all([
-      fetch(`${API_URL}/dashboard/summary?days=${days}`, { credentials: "include" }),
-      fetch(`${API_URL}/verdicts?limit=10`,              { credentials: "include" }),
+  const load = () => {
+    return Promise.all([
+      apiFetch(`/dashboard/summary?days=${days}`),
+      apiFetch(`/verdicts?limit=10`),
     ])
       .then(async ([sr, vr]) => {
-        if (sr.status === 401 || vr.status === 401) { router.push("/login"); return; }
         if (!sr.ok || !vr.ok) throw new Error("API error");
         const [s, v] = await Promise.all([sr.json(), vr.json()]);
         setSummary(s);
         setRecent(v.items ?? []);
+        setLastChecked(new Date());
       })
-      .catch(() => setError("Failed to load dashboard data."))
-      .finally(() => setLoading(false));
-  }, [days, router]);
+      .catch(() => setError("Failed to load dashboard data."));
+  };
+
+  useEffect(() => {
+    setLoading(true);
+    setError(null);
+    load().finally(() => setLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [days]);
+
+  // Item 15's auto-polling window: every 30s for the first 30 minutes after
+  // s3_connected_at, only while there are still zero verdicts. Stops itself
+  // once data arrives or the window elapses. Never polls indefinitely.
+  useEffect(() => {
+    if (!summary?.s3_configured || !summary.s3_connected_at) return;
+    if (summary.total_threats > 0) return;
+    const connectedAt = new Date(summary.s3_connected_at).getTime();
+    if (Date.now() - connectedAt >= 30 * 60 * 1000) return;
+
+    const id = setInterval(() => { load(); }, 30000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [summary?.s3_connected_at, summary?.total_threats, summary?.s3_configured]);
 
   if (loading) {
     return (
@@ -203,57 +259,104 @@ export default function DashboardOverview() {
   }
 
   const s = summary;
+  const noDataYet = s.s3_configured && s.total_threats === 0;
+  // lastChecked is always set by the time summary is (both come from the same
+  // load() resolution) — use it as "now" instead of calling Date.now() in render.
+  const now = lastChecked?.getTime() ?? 0;
+  const withinScanWindow = !!s.s3_connected_at && now > 0 && (now - new Date(s.s3_connected_at).getTime()) < 30 * 60 * 1000;
+  const scanning = noDataYet && withinScanWindow;
 
   return (
     <main style={{ padding: "32px", width: "100%" }}>
+
+      {/* Item 15: persistent scanning banner. Dismissed automatically once
+          the first verdict arrives (noDataYet flips false) or the 30-min
+          window elapses (replaced by the manual refresh button below). */}
+      {scanning && (
+        <div style={{
+          padding: "10px 16px",
+          marginBottom: "20px",
+          border: "1px solid var(--color-border)",
+          background: "var(--color-surface)",
+          fontSize: "12px",
+          color: "var(--color-text-muted)",
+        }}>
+          Scanning in progress. Your first results will appear here within 15 minutes.
+        </div>
+      )}
 
       {/* Title + period selector */}
       <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: "28px" }}>
         <h1 style={{ fontFamily: "var(--font-brand)", fontSize: "22px", fontWeight: 700 }}>
           Overview
         </h1>
-        <div style={{ display: "flex", gap: "4px" }}>
-          {[7, 30].map(d => (
-            <button
-              key={d}
-              onClick={() => setDays(d)}
-              style={{
-                padding: "4px 12px",
-                fontSize: "12px",
-                border: "1px solid var(--color-border)",
-                background: days === d ? "var(--color-text)" : "transparent",
-                color:      days === d ? "var(--color-bg)"   : "var(--color-text-muted)",
-                cursor: "pointer",
-              }}
-            >
-              {d}d
-            </button>
-          ))}
+        <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+          {!scanning && s.s3_configured && lastChecked && (
+            <>
+              <span style={{ fontSize: "11px", color: "var(--color-text-muted)" }}>
+                Checked {lastChecked.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}
+              </span>
+              <button
+                onClick={() => load()}
+                style={{
+                  padding: "4px 12px", fontSize: "12px",
+                  border: "1px solid var(--color-border)",
+                  background: "transparent", color: "var(--color-text)", cursor: "pointer",
+                }}
+              >
+                Refresh
+              </button>
+            </>
+          )}
+          <div style={{ display: "flex", gap: "4px" }}>
+            {[7, 30].map(d => (
+              <button
+                key={d}
+                onClick={() => setDays(d)}
+                style={{
+                  padding: "4px 12px",
+                  fontSize: "12px",
+                  border: "1px solid var(--color-border)",
+                  background: days === d ? "var(--color-text)" : "transparent",
+                  color:      days === d ? "var(--color-bg)"   : "var(--color-text-muted)",
+                  cursor: "pointer",
+                }}
+              >
+                {d}d
+              </button>
+            ))}
+          </div>
         </div>
       </div>
+
+      {!s.s3_configured && <NotConfiguredBox />}
 
       {/* Stat cards */}
       <div style={{ display: "flex", gap: "12px", marginBottom: "28px" }}>
         <StatCard
           label="Total threats"
-          value={s.total_threats.toLocaleString()}
-          sub={`+${s.new_threats_today} today`}
+          value={s.s3_configured ? s.total_threats.toLocaleString() : "—"}
+          sub={s.s3_configured ? (noDataYet ? "No data yet" : `+${s.new_threats_today} today`) : undefined}
         />
         <StatCard
           label="Critical"
-          value={s.by_severity.critical.toLocaleString()}
+          value={s.s3_configured ? s.by_severity.critical.toLocaleString() : "—"}
+          sub={noDataYet ? "No data yet" : undefined}
         />
         <StatCard
           label="IPs flagged"
-          value={s.ips_flagged.toLocaleString()}
+          value={s.s3_configured ? s.ips_flagged.toLocaleString() : "—"}
+          sub={noDataYet ? "No data yet" : undefined}
         />
         <StatCard
           label="Cost prevented"
-          value={`$${s.cost_prevented.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+          value={s.s3_configured ? `$${s.cost_prevented.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : "—"}
+          sub={noDataYet ? "No data yet" : undefined}
         />
       </div>
 
       {/* Trend chart + top IPs */}
+      {s.s3_configured && (
       <div style={{ display: "flex", gap: "12px", marginBottom: "28px" }}>
         {/* Chart */}
         <div style={{
@@ -263,9 +366,13 @@ export default function DashboardOverview() {
           padding: "20px",
         }}>
           <p style={{ fontSize: "11px", textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--color-text-muted)", marginBottom: "16px" }}>
-            Threat trend — {days}d
+            Threat trend, {days}d
           </p>
-          {s.trend.every(d => d.critical + d.high + d.medium + d.low === 0) ? (
+          {noDataYet ? (
+            <p style={{ fontSize: "13px", color: "var(--color-text-muted)", padding: "24px 0", textAlign: "center" }}>
+              No threats detected yet. Your first scan runs within 15 minutes.
+            </p>
+          ) : s.trend.every(d => d.critical + d.high + d.medium + d.low === 0) ? (
             <p style={{ fontSize: "13px", color: "var(--color-text-muted)", padding: "24px 0", textAlign: "center" }}>
               No threats detected in this period
             </p>
@@ -296,7 +403,7 @@ export default function DashboardOverview() {
             Top threat IPs
           </p>
           {s.top_ips.length === 0 ? (
-            <p style={{ fontSize: "13px", color: "var(--color-text-muted)" }}>No data</p>
+            <p style={{ fontSize: "13px", color: "var(--color-text-muted)", textAlign: "center" }}>No IPs flagged yet</p>
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
               {s.top_ips.map(tip => (
@@ -308,8 +415,19 @@ export default function DashboardOverview() {
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                     <span style={{ fontFamily: "var(--font-mono)", fontSize: "12px" }}>{tip.ip}</span>
                     <span style={{ fontSize: "11px", color: "var(--color-text-muted)" }}>
-                      {tip.count} hits · {(tip.risk_score * 100).toFixed(0)}%
+                      {flagEmoji(tip.geo_country)} {tip.geo_country ?? "—"} · {tip.geo_asn_org ?? "—"}
                     </span>
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "2px" }}>
+                    <span style={{ fontSize: "11px", color: "var(--color-text-muted)" }}>
+                      {tip.count} hits
+                    </span>
+                    <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                      {tip.highest_severity && <SeverityBadge severity={tip.highest_severity} />}
+                      {tip.blocked && (
+                        <span style={{ fontSize: "10px", color: "var(--color-low)", textTransform: "uppercase", letterSpacing: "0.05em" }}>Blocked</span>
+                      )}
+                    </div>
                   </div>
                   {/* Risk bar */}
                   <div style={{ height: "2px", background: "var(--color-border)", marginTop: "4px" }}>
@@ -328,8 +446,10 @@ export default function DashboardOverview() {
           )}
         </div>
       </div>
+      )}
 
       {/* Recent verdicts */}
+      {s.s3_configured && (
       <div style={{
         border: "1px solid var(--color-border)",
         background: "var(--color-surface)",
@@ -349,9 +469,14 @@ export default function DashboardOverview() {
           </Link>
         </div>
         {recent.length === 0 ? (
-          <p style={{ padding: "32px 20px", fontSize: "13px", color: "var(--color-text-muted)", textAlign: "center" }}>
-            No threats detected yet. Once your S3 logs are processed, detections appear here.
-          </p>
+          <div style={{ padding: "32px 20px", textAlign: "center" }}>
+            <p style={{ fontSize: "13px", color: "var(--color-text-muted)", marginBottom: "12px" }}>
+              No threats detected yet. Your first scan runs within 15 minutes of connecting S3.
+            </p>
+            <Link href="/dashboard/settings#s3" style={{ fontSize: "12px", color: "var(--color-text)", textDecoration: "none" }}>
+              Check Settings →
+            </Link>
+          </div>
         ) : (
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
             <thead>
@@ -402,6 +527,7 @@ export default function DashboardOverview() {
           </table>
         )}
       </div>
+      )}
     </main>
   );
 }

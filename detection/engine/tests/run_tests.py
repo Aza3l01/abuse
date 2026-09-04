@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from datetime import datetime, timedelta
 from engine.agents.auth_agent import AuthAgent
+from engine.agents.base_agent import AgentContext
 from engine.agents.temporal_agent import TemporalAgent
 from engine.agents.volume_agent import VolumeAgent
 from engine.coordinator.meta_agent import MetaAgentOrchestrator
@@ -88,6 +89,63 @@ def t_ltm_baseline():
     mem.ltm.record_rate("/port_80", 200.0)
     assert abs(mem.ltm.get_baseline_rate("/port_80") - 150.0) < 0.01
 test("LTM baseline rate", t_ltm_baseline)
+
+def t_ltm_batch_distribution_robust():
+    """Item 45 Gap B: get_batch_distribution_robust() floors its (center,
+    spread) at whatever plain mean/std would give, so it can never produce a
+    tighter (more sensitive) threshold band than the classic estimator would
+    have — median+MAD alone regressed the CICIDS harness by doing exactly
+    that, since MAD deliberately discounts the outlier/spike batches that
+    real bursty traffic treats as genuine signal."""
+    mem,_ = fresh()
+    for v in [0.05, 0.06, 0.05, 0.07, 0.06, 0.05, 0.06, 0.05, 0.9]:
+        mem.ltm.record_batch_stats("VolumeAgent", {"dom_ratio": v})
+    mean, std = mem.ltm.get_batch_distribution("VolumeAgent", "dom_ratio")
+    center, spread = mem.ltm.get_batch_distribution_robust("VolumeAgent", "dom_ratio")
+    assert mean is not None and center is not None
+    # Floored at the plain mean/std — never narrower than the classic estimator.
+    assert center >= mean - 1e-9
+    assert spread >= std - 1e-9
+test("LTM get_batch_distribution_robust floors at plain mean/std", t_ltm_batch_distribution_robust)
+
+def t_ltm_batch_stats_count():
+    mem,_ = fresh()
+    assert mem.ltm.get_batch_stats_count("VolumeAgent") == 0
+    for _ in range(3):
+        mem.ltm.record_batch_stats("VolumeAgent", {"dom_ratio": 0.1})
+    assert mem.ltm.get_batch_stats_count("VolumeAgent") == 3
+test("LTM get_batch_stats_count tracks snapshots", t_ltm_batch_stats_count)
+
+def t_product_memory_persists_tz_and_robust_lock():
+    """Regression test for a real production bug (found by an external
+    review, not caught by any existing test): ProductSharedMemory's
+    _dump_ltm()/_load_ltm() round-trip through Redis silently dropped
+    _tz_history and _robust_locked. In production a fresh
+    ProductSharedMemory is built per run_pipeline() call, so this made item
+    5d's off-hours timezone inference and item 45 Gap B's sticky robust-mode
+    lock both no-ops outside the offline harness (which reuses one
+    in-process SharedMemory across all batches, masking the bug)."""
+    import os
+    from engine.memory.product_memory import ProductSharedMemory
+    import redis as redis_lib
+
+    redis_conn = redis_lib.Redis.from_url(
+        os.environ.get("REDIS_URL", "redis://localhost:6379/0"), decode_responses=True
+    )
+    org_id = "test-product-memory-roundtrip"
+    redis_conn.delete(f"clew:ltm:{org_id}")
+
+    mem1 = ProductSharedMemory(org_id=org_id, redis_client=redis_conn)
+    mem1.ltm.record_batch_timezone("America/New_York")
+    mem1.ltm.lock_robust_mode("VolumeAgent")
+    mem1.flush()
+
+    mem2 = ProductSharedMemory(org_id=org_id, redis_client=redis_conn)
+    assert getattr(mem2.ltm, "_tz_history", []) == ["America/New_York"]
+    assert mem2.ltm.is_robust_locked("VolumeAgent") is True
+
+    redis_conn.delete(f"clew:ltm:{org_id}")
+test("ProductSharedMemory persists tz_history and robust_locked across Redis round-trip", t_product_memory_persists_tz_and_robust_lock)
 
 def t_board_post_read():
     mem,_ = fresh()
@@ -172,6 +230,32 @@ def t_vol_baseline_update():
     agent.run([rec(endpoint="/port_80", offset=i) for i in range(20)])
     assert mem.ltm.get_baseline_rate("/port_80") is not None
 test("LTM baseline updated after run", t_vol_baseline_update)
+
+def t_vol_robust_fallback():
+    """Item 45 Gap B: if is_distribution_stable() never fires (bursty traffic
+    whose variance keeps swinging >5% batch to batch), VolumeAgent must still
+    adapt its thresholds via median/MAD after ROBUST_FALLBACK_BATCHES(50)
+    batches, rather than staying on cold-start defaults forever."""
+    import random
+    mem, tools = fresh()
+    agent = VolumeAgent(mem, tools)
+    rng = random.Random(42)
+    # Genuinely bursty/noisy values (no fixed period) so the last-10-batches
+    # variance never settles within 5% batch-window to batch-window.
+    for i in range(60):
+        mem.ltm.increment_batch_count()
+        dom = rng.choice([0.02, 0.05, 0.08, 0.5, 0.9, 0.03])
+        top = rng.choice([50.0, 90.0, 120.0, 400.0, 800.0, 60.0])
+        mem.ltm.record_batch_stats("VolumeAgent", {
+            "dom_ratio": dom, "top_count": top, "avg_latency": 500.0,
+        })
+    assert mem.ltm.is_distribution_stable("VolumeAgent") is False
+    assert mem.ltm.get_batch_stats_count("VolumeAgent") >= agent.ROBUST_FALLBACK_BATCHES
+    ctx = AgentContext(records=[rec(offset=i) for i in range(5)])
+    agent.orient(ctx)
+    # Cold-start default is 450.0 — robust calibration must have moved it.
+    assert agent.HIGH_RATE_ABSOLUTE != 450.0
+test("Robust median/MAD fallback activates after 50 unstable batches", t_vol_robust_fallback)
 
 # ── TemporalAgent ─────────────────────────────────────────────────────────────
 print("\n[TemporalAgent]")

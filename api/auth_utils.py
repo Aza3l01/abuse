@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import bcrypt as _bcrypt
+import httpx
 import resend
 from cryptography.fernet import Fernet, InvalidToken as _FernetInvalidToken
 from dotenv import load_dotenv
@@ -33,8 +34,18 @@ JWT_ALGORITHM = os.environ.get("JWT_ALGORITHM", "HS256")
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.environ.get("ACCESS_TOKEN_EXPIRE_MINUTES", "15"))
 REFRESH_TOKEN_EXPIRE_DAYS = int(os.environ.get("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
-FROM_ADDRESS   = "Clew <noreply@email.clewsec.com>"
+# Item 25 — five sending identities, all on the email.clewsec.com subdomain
+# (isolates transactional sending reputation from the root clewsec.com domain).
+FROM_ADDRESS  = "Clew <noreply@email.clewsec.com>"
+FROM_ALERTS   = "Clew Alerts <alerts@email.clewsec.com>"
+FROM_BILLING  = "Clew Billing <billing@email.clewsec.com>"
+FROM_TEAM     = "Clew Team <team@email.clewsec.com>"
+REPLY_TO_ALERTS  = "alerts@email.clewsec.com"
+REPLY_TO_BILLING = "billing@email.clewsec.com"
+REPLY_TO_TEAM    = "team@email.clewsec.com"
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
+TURNSTILE_SECRET_KEY = os.environ.get("TURNSTILE_SECRET_KEY", "")
+_TURNSTILE_VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
 
 # Fernet key for encrypting TOTP secrets at rest.
 # Must be a 32-byte URL-safe base64 key — generate with:
@@ -171,6 +182,26 @@ def clear_auth_cookies(response: Response) -> None:
         kwargs["domain"] = COOKIE_DOMAIN
     response.delete_cookie("access_token", **kwargs)  # type: ignore[arg-type]
     response.delete_cookie("refresh_token", **kwargs)  # type: ignore[arg-type]
+    response.delete_cookie("last_org_id", **kwargs)  # type: ignore[arg-type]
+
+
+# Phase 2: remembers which org was last active so a returning multi-org user
+# skips the /select-org screen. Not httponly — the frontend org switcher UI
+# reads it directly. It is never trusted for authorization: get_current_org()
+# always re-verifies against a live OrganizationMember row.
+def set_last_org_cookie(response: Response, org_id: str | None) -> None:
+    kwargs: dict = dict(httponly=False, secure=_IS_PROD, samesite="lax")
+    if COOKIE_DOMAIN:
+        kwargs["domain"] = COOKIE_DOMAIN
+    if org_id:
+        response.set_cookie(
+            key="last_org_id",
+            value=org_id,
+            max_age=REFRESH_TOKEN_EXPIRE_DAYS * 86400,
+            **kwargs,  # type: ignore[arg-type]
+        )
+    else:
+        response.delete_cookie("last_org_id", **{k: v for k, v in kwargs.items() if k == "domain"})  # type: ignore[arg-type]
 
 
 # ------------------------------------------------------------------
@@ -179,6 +210,28 @@ def clear_auth_cookies(response: Response) -> None:
 def generate_otp() -> str:
     """Return a cryptographically random 6-digit string."""
     return "".join(random.SystemRandom().choices(string.digits, k=6))
+
+
+# ------------------------------------------------------------------
+# CAPTCHA (Cloudflare Turnstile) — item 38 spec, wired up early for item 10
+# ------------------------------------------------------------------
+def verify_turnstile_token(token: str, remote_ip: str | None = None) -> bool:
+    """Server-side verification of a Turnstile widget response token.
+
+    Fails closed: any missing config, network error, or non-success
+    response is treated as a failed CAPTCHA.
+    """
+    if not TURNSTILE_SECRET_KEY or not token:
+        return False
+    payload: dict[str, Any] = {"secret": TURNSTILE_SECRET_KEY, "response": token}
+    if remote_ip:
+        payload["remoteip"] = remote_ip
+    try:
+        resp = httpx.post(_TURNSTILE_VERIFY_URL, data=payload, timeout=10.0)
+        resp.raise_for_status()
+        return bool(resp.json().get("success"))
+    except httpx.HTTPError:
+        return False
 
 
 # ------------------------------------------------------------------
@@ -202,7 +255,14 @@ def generate_backup_codes(n: int = 10) -> list[str]:
 # ------------------------------------------------------------------
 # Email via Resend
 # ------------------------------------------------------------------
-def send_email(to: str, subject: str, body_text: str, body_html: str | None = None) -> bool:
+def send_email(
+    to: str,
+    subject: str,
+    body_text: str,
+    body_html: str | None = None,
+    from_address: str | None = None,
+    reply_to: str | None = None,
+) -> bool:
     """
     Send a transactional email via Resend.
     Returns True on success, False on failure (caller logs + continues).
@@ -218,12 +278,14 @@ def send_email(to: str, subject: str, body_text: str, body_html: str | None = No
             return True
         resend.api_key = RESEND_API_KEY
         params: resend.Emails.SendParams = {
-            "from":    FROM_ADDRESS,
+            "from":    from_address or FROM_ADDRESS,
             "to":      [to],
             "subject": subject,
             "text":    body_text,
             "html":    body_html or f"<pre>{body_text}</pre>",
         }
+        if reply_to:
+            params["reply_to"] = reply_to
         resend.Emails.send(params)
         return True
     except Exception:
@@ -327,6 +389,28 @@ def send_password_reset_email(to: str, code: str) -> bool:
     return send_email(to=to, subject="Reset your Clew password", body_text=body_text, body_html=body_html)
 
 
+def send_login_lockout_email(to: str) -> bool:
+    body_text = (
+        "Someone is attempting to log in to your Clew account.\n\n"
+        "Your account has been temporarily locked for 15 minutes.\n\n"
+        "If this wasn't you, no action is needed — the lock will expire "
+        "automatically and your password has not been changed."
+    )
+    body_html = _email_html(
+        heading="Account temporarily locked",
+        body_html=(
+            _p("Someone is attempting to log in to your Clew account.")
+            + _p("Your account has been temporarily locked for 15 minutes.")
+            + _p(
+                "If this wasn't you, no action is needed — the lock will expire "
+                "automatically and your password has not been changed."
+            )
+        ),
+        footer_note="This is a security notice for your Clew account.",
+    )
+    return send_email(to=to, subject="Your Clew account was temporarily locked", body_text=body_text, body_html=body_html)
+
+
 def send_password_changed_email(to: str) -> bool:
     body_text = (
         "Your Clew account password was just changed.\n\n"
@@ -346,33 +430,6 @@ def send_password_changed_email(to: str) -> bool:
         footer_note="This is a security notice for your Clew account.",
     )
     return send_email(to=to, subject="Your Clew password was changed", body_text=body_text, body_html=body_html)
-
-
-def send_oauth_linked_email(to: str, provider: str) -> bool:
-    provider_name = provider.capitalize()
-    body_text = (
-        f"{provider_name} sign-in has been linked to your Clew account.\n\n"
-        f"You can now sign in with {provider_name} or your email and password.\n\n"
-        "If you did not do this, contact support immediately."
-    )
-    body_html = _email_html(
-        heading=f"{provider_name} sign-in linked",
-        body_html=(
-            _p(f"{provider_name} sign-in has been linked to your Clew account.")
-            + _p(f"You can now sign in with {provider_name} or your email and password.")
-            + _p(
-                'If you did not authorise this, '
-                '<a href="mailto:support@clewsec.com" style="color:#0D0D0D;">contact support</a> immediately.'
-            )
-        ),
-        footer_note="This is a security notice for your Clew account.",
-    )
-    return send_email(
-        to=to,
-        subject=f"{provider_name} sign-in linked to your Clew account",
-        body_text=body_text,
-        body_html=body_html,
-    )
 
 
 def send_mfa_enabled_email(to: str, enabled: bool) -> bool:
@@ -397,4 +454,121 @@ def send_mfa_enabled_email(to: str, enabled: bool) -> bool:
         subject=f"Two-factor authentication {action} on your Clew account",
         body_text=body_text,
         body_html=body_html,
+    )
+
+
+def send_trial_reminder_email(to: str, days_remaining: int, trial_days_total: int) -> bool:
+    """Item 11 trial-expiry schedule. Sent from billing@ rather than noreply@."""
+    body_text = (
+        f"Your Clew {trial_days_total}-day trial ends in {days_remaining} day"
+        f"{'s' if days_remaining != 1 else ''}.\n\n"
+        "Add a payment method to keep scanning your logs without interruption.\n"
+        f"{FRONTEND_URL}/dashboard/settings#billing"
+    )
+    body_html = _email_html(
+        heading="Your Clew trial is ending soon",
+        body_html=(
+            _p(
+                f"Your Clew {trial_days_total}-day trial ends in "
+                f"<strong>{days_remaining} day{'s' if days_remaining != 1 else ''}</strong>."
+            )
+            + _p("Add a payment method to keep scanning your logs without interruption.")
+            + _p(
+                f'<a href="{FRONTEND_URL}/dashboard/settings#billing" style="color:#0D0D0D;">Add payment method &rarr;</a>'
+            )
+        ),
+        footer_note="You are receiving this because your organisation has an active Clew trial.",
+    )
+    return send_email(
+        to=to,
+        subject=f"Your Clew trial ends in {days_remaining} day{'s' if days_remaining != 1 else ''}",
+        body_text=body_text,
+        body_html=body_html,
+        from_address=FROM_BILLING,
+        reply_to=REPLY_TO_BILLING,
+    )
+
+
+def send_payment_failed_email(to: str) -> bool:
+    """Item 29: immediate Clew-branded notice on a Razorpay/Stripe payment
+    failure, beyond whatever auto-retry the provider itself does."""
+    body_text = (
+        "A recent payment on your Clew subscription did not go through.\n\n"
+        "Please update your payment method to avoid an interruption to your service.\n"
+        f"{FRONTEND_URL}/dashboard/settings#billing"
+    )
+    body_html = _email_html(
+        heading="Your Clew payment failed",
+        body_html=(
+            _p("A recent payment on your Clew subscription did not go through.")
+            + _p("Please update your payment method to avoid an interruption to your service.")
+            + _p(
+                f'<a href="{FRONTEND_URL}/dashboard/settings#billing" style="color:#0D0D0D;">Update payment method &rarr;</a>'
+            )
+        ),
+        footer_note="You are receiving this because your organisation has an active Clew subscription.",
+    )
+    return send_email(
+        to=to,
+        subject="Action needed: your Clew payment failed",
+        body_text=body_text,
+        body_html=body_html,
+        from_address=FROM_BILLING,
+        reply_to=REPLY_TO_BILLING,
+    )
+
+
+# ------------------------------------------------------------------
+# Item 9 — organisation invite email
+# ------------------------------------------------------------------
+def send_org_invite_email(
+    to: str,
+    inviter_name: str,
+    company_name: str,
+    role: str,
+    accept_url: str,
+    existing_account: bool = False,
+) -> bool:
+    role_label = role.capitalize()
+    existing_note = (
+        f"You already have a Clew account with this email. Clicking accept will "
+        f"add {company_name} to your organisations."
+        if existing_account else ""
+    )
+    body_text = (
+        f"{inviter_name} has invited you to join {company_name}'s security "
+        f"dashboard on Clew as a {role_label}.\n\n"
+        f"Accept the invitation: {accept_url}\n\n"
+        "This invitation expires in 7 days.\n\n"
+        + (existing_note + "\n\n" if existing_note else "")
+        + "If you don't recognise this invitation, ignore this email — no "
+        "account will be created."
+    )
+    body_html = _email_html(
+        heading="You've been invited to Clew",
+        body_html=(
+            _p(
+                f"<strong>{inviter_name}</strong> has invited you to join "
+                f"<strong>{company_name}</strong>'s security dashboard on Clew "
+                f"as a <strong>{role_label}</strong>."
+            )
+            + (_p(existing_note) if existing_note else "")
+            + f'<div style="text-align:center;margin:24px 0;">'
+              f'<a href="{accept_url}" style="display:inline-block;background:#0D0D0D;'
+              f'color:#F5F5F5;padding:12px 24px;'
+              f'font-family:system-ui,-apple-system,BlinkMacSystemFont,sans-serif;'
+              f'font-size:14px;font-weight:600;text-decoration:none;">Accept Invitation</a>'
+              f'</div>'
+            + _p("This invitation expires in 7 days.")
+            + _p("If you don't recognise this invitation, ignore this email — no account will be created.")
+        ),
+        footer_note="This invitation expires in 7 days and can only be used once.",
+    )
+    return send_email(
+        to=to,
+        subject=f"{inviter_name} invited you to join {company_name} on Clew",
+        body_text=body_text,
+        body_html=body_html,
+        from_address=FROM_TEAM,
+        reply_to=REPLY_TO_TEAM,
     )

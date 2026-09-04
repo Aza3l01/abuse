@@ -31,6 +31,8 @@ import re
 from datetime import datetime, timezone
 from typing import Optional
 
+from engine.ingestion.endpoint_template import template_endpoint
+
 logger = logging.getLogger(__name__)
 
 # CLF-style format that API Gateway emits with the default log format.
@@ -71,11 +73,13 @@ def _parse_json_line(line: str) -> Optional[dict]:
     except (ValueError, OSError):
         return None
 
+    endpoint = str(d.get("path") or d.get("endpoint") or "/")
     return {
         "timestamp": ts.isoformat(),
         "ip":            str(d.get("ip") or d.get("sourceIp") or ""),
         "method":        str(d.get("method") or d.get("httpMethod") or "GET").upper(),
-        "endpoint":      str(d.get("path") or d.get("endpoint") or "/"),
+        "endpoint":      endpoint,
+        "endpoint_template": template_endpoint(endpoint),
         "status":        int(d.get("status") or d.get("statusCode") or 0),
         "response_size": int(d.get("responseLength") or d.get("responseSize") or 0),
         "latency":       float(d.get("latencyMs") or d.get("latency") or 0.0),
@@ -96,12 +100,14 @@ def _parse_clf_line(line: str) -> Optional[dict]:
 
     size_raw = m.group("size")
     latency_raw = m.group("latency")
+    endpoint = m.group("path")
 
     return {
         "timestamp":     ts.isoformat(),
         "ip":            m.group("ip"),
         "method":        m.group("method").upper(),
-        "endpoint":      m.group("path"),
+        "endpoint":      endpoint,
+        "endpoint_template": template_endpoint(endpoint),
         "status":        int(m.group("status")),
         "response_size": 0 if size_raw == "-" else int(size_raw),
         "latency":       0.0 if not latency_raw or latency_raw == "-" else float(latency_raw),
@@ -124,5 +130,10 @@ def parse_line(line: str) -> Optional[dict]:
 
     if result and not result.get("ip"):
         return None  # can't do anything without an IP
+
+    # Item 19: keep the original line so the product can show a raw log
+    # sample on the verdict detail page. Truncated at the DB layer, not here.
+    if result is not None:
+        result["raw_line"] = line
 
     return result

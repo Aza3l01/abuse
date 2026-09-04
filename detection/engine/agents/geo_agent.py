@@ -56,6 +56,8 @@ _MMDB_PATH = os.environ.get(
 
 # Per-process IP → country cache
 _ip_country_cache: Dict[str, str] = {}
+# Per-process IP → IANA timezone cache (e.g. "America/Chicago"), item 5d
+_ip_timezone_cache: Dict[str, str] = {}
 
 # Human travel time floor: fastest one can change country (e.g. 30-minute flight edge case)
 _MIN_TRAVEL_MINUTES = 20
@@ -105,6 +107,42 @@ def _lookup_country(ip: str) -> str:
     return ""
 
 
+def _lookup_timezone(ip: str) -> str:
+    """
+    Resolve an IP to an IANA timezone string (e.g. "America/Chicago").
+    Returns "" for unresolvable or private IPs. Caches results in a
+    module-level dict, mirroring _lookup_country().
+    """
+    if ip in _ip_timezone_cache:
+        return _ip_timezone_cache[ip]
+    if _is_private(ip):
+        _ip_timezone_cache[ip] = ""
+        return ""
+
+    global _geoip_reader
+    if not _MAXMIND_AVAILABLE:
+        return ""
+
+    if _geoip_reader is None:
+        if not os.path.exists(_MMDB_PATH):
+            return ""
+        try:
+            _geoip_reader = _maxminddb.open_database(_MMDB_PATH)
+        except Exception:
+            return ""
+
+    try:
+        record = _geoip_reader.get(ip)
+        if record and "location" in record:
+            tz = record["location"].get("time_zone", "")
+            _ip_timezone_cache[ip] = tz
+            return tz
+    except Exception:
+        pass
+    _ip_timezone_cache[ip] = ""
+    return ""
+
+
 class GeoIPAgent(BaseAgent):
 
     FOREIGN_CONCENTRATION_THRESHOLD = 0.40   # >40% of batch from single non-home country
@@ -113,8 +151,32 @@ class GeoIPAgent(BaseAgent):
     # Botnet spatial spread: many unique IPs from many countries (distributed C2)
     BOTNET_SPREAD_MIN_UNIQUE_IPS    = 10     # at least N distinct IPs in the batch
     BOTNET_SPREAD_MIN_COUNTRIES     = 5      # spanning at least N distinct countries
+    # Cold-start fallback — replaced by the tenant's own historical baseline once
+    # stable. Ordinary traffic to globally distributed CDNs/cloud regions can have
+    # naturally high geographic IP diversity that has nothing to do with a botnet;
+    # a fixed ratio flags that as an anomaly forever for such tenants.
     BOTNET_SPREAD_DIVERSITY_RATIO   = 0.10   # countries/unique_IPs ratio >= 10%
     MIN_TRAVEL_MINUTES              = _MIN_TRAVEL_MINUTES
+    ROBUST_FALLBACK_BATCHES         = 50     # item 45 Gap B: if distribution never stabilizes, use median/MAD after this many batches
+
+    def _update_adaptive_thresholds(self, robust: bool = False) -> None:
+        """Adapt the botnet spatial-spread diversity threshold from the tenant's
+        own historical baseline, the same pattern VolumeAgent/PayloadAgent/
+        TemporalAgent already use. Floored at the original cold-start constant
+        so sensitivity to a genuine spike never drops below what shipped originally.
+
+        Args:
+          robust: item 45 Gap B — use median/MAD instead of mean/std once
+                  is_distribution_stable() has failed to fire for
+                  ROBUST_FALLBACK_BATCHES batches.
+        """
+        get_dist = (
+            self.memory.ltm.get_batch_distribution_robust if robust
+            else self.memory.ltm.get_batch_distribution
+        )
+        div_mean, div_std = get_dist("GeoIPAgent", "diversity_ratio")
+        if div_mean is not None and div_std is not None:
+            self.BOTNET_SPREAD_DIVERSITY_RATIO = max(0.10, div_mean + 2.0 * div_std)
 
     def observe(self, ctx: AgentContext) -> None:
         """Geolocate each IP; build country distribution and IP→country map."""
@@ -137,6 +199,17 @@ class GeoIPAgent(BaseAgent):
         ctx.raw_metrics["country_counts"]   = dict(country_counts)
         ctx.raw_metrics["geo_coverage"]     = geo_coverage
         ctx.raw_metrics["resolved_total"]   = resolved_total
+
+        # Item 5d: feed this batch's majority resolved timezone into the LTM
+        # baseline (historical, not live) so TemporalAgent can convert its
+        # UTC off-hours window to the tenant's actual local time.
+        tz_counts: Counter = Counter()
+        for r in ctx.records:
+            tz = _lookup_timezone(r.ip)
+            if tz:
+                tz_counts[tz] += 1
+        if tz_counts:
+            self.memory.ltm.record_batch_timezone(tz_counts.most_common(1)[0][0])
 
         ctx.log(
             f"OBSERVE: geo_coverage={geo_coverage:.0%} | "
@@ -162,6 +235,31 @@ class GeoIPAgent(BaseAgent):
                     break
 
         ctx.raw_metrics["home_country"] = home_country
+
+        # Botnet spatial-spread diversity: compute now, record for the tenant's
+        # historical baseline, and replace the cold-start constant once stable.
+        ip_country_map: Dict[str, str] = ctx.raw_metrics.get("ip_country", {})
+        n_unique_ips = len(ip_country_map)
+        n_resolved_countries = len({c for c in ip_country_map.values() if c})
+        diversity_ratio = (n_resolved_countries / n_unique_ips) if n_unique_ips > 0 else 0.0
+        ctx.raw_metrics["n_unique_ips"]         = n_unique_ips
+        ctx.raw_metrics["n_resolved_countries"] = n_resolved_countries
+        ctx.raw_metrics["diversity_ratio"]      = diversity_ratio
+
+        self.memory.ltm.record_batch_stats("GeoIPAgent", {"diversity_ratio": diversity_ratio})
+        if self.memory.ltm.is_robust_locked("GeoIPAgent"):
+            self._update_adaptive_thresholds(robust=True)
+        elif self.memory.ltm.is_distribution_stable("GeoIPAgent"):
+            self._update_adaptive_thresholds()
+        elif self.memory.ltm.get_batch_stats_count("GeoIPAgent") >= self.ROBUST_FALLBACK_BATCHES:
+            # Item 45 Gap B: distribution never stabilized — robust fallback.
+            self.memory.ltm.lock_robust_mode("GeoIPAgent")
+            self._update_adaptive_thresholds(robust=True)
+            ctx.log(
+                f"ORIENT: distribution never stabilized after "
+                f"{self.memory.ltm.get_batch_stats_count('GeoIPAgent')} batches — "
+                f"robust (median/MAD) calibration now locked in"
+            )
 
         # Check board for TOR/VPN evidence posted by KnowledgeAgent
         tor_evidence = self.tools.call(
@@ -201,8 +299,11 @@ class GeoIPAgent(BaseAgent):
             ctx.confidence_score = max(ctx.confidence_score, 0.75)
 
         # ── Foreign concentration (single-country) ───────────────────────
+        # Requires a known home_country — an empty home_country would make
+        # every resolved country "foreign", firing on the tenant's own
+        # normal traffic. Skip entirely rather than emit a false positive.
         total_resolved = ctx.raw_metrics.get("resolved_total", 0)
-        if total_resolved > 0:
+        if home_country and total_resolved > 0:
             foreign_counts = {
                 c: n for c, n in country_counts.items() if c != home_country
             }
@@ -271,16 +372,14 @@ class GeoIPAgent(BaseAgent):
         # the home-country (CZ) is still dominant. We catch it by measuring
         # how many unique IPs are spread across how many distinct countries.
         # High IP-to-country diversity = coordinated multi-region traffic.
-        ip_country_map: Dict[str, str] = ctx.raw_metrics.get("ip_country", {})
-        n_unique_ips = len(ip_country_map)
-        resolved_countries = {c for c in ip_country_map.values() if c}
-        n_resolved_countries = len(resolved_countries)
+        n_unique_ips = ctx.raw_metrics.get("n_unique_ips", 0)
+        n_resolved_countries = ctx.raw_metrics.get("n_resolved_countries", 0)
+        diversity_ratio = ctx.raw_metrics.get("diversity_ratio", 0.0)
 
         if (
             n_unique_ips >= self.BOTNET_SPREAD_MIN_UNIQUE_IPS
             and n_resolved_countries >= self.BOTNET_SPREAD_MIN_COUNTRIES
         ):
-            diversity_ratio = n_resolved_countries / n_unique_ips
             if diversity_ratio >= self.BOTNET_SPREAD_DIVERSITY_RATIO:
                 # Scale confidence: more countries per unique IP → more suspicious
                 spread_conf = round(min(0.55 + diversity_ratio * 0.60, 0.80), 2)
