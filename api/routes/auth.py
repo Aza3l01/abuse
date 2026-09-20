@@ -43,8 +43,8 @@ from api.auth_utils import (
     create_access_token,
     create_refresh_token,
     decode_refresh_token,
-    decrypt_totp_secret,
-    encrypt_totp_secret,
+    decrypt_secret,
+    encrypt_secret,
     generate_backup_codes,
     generate_otp,
     hash_password,
@@ -868,7 +868,7 @@ async def login_mfa(
     code = body.code.strip().upper()
 
     # Try TOTP first, then backup code
-    totp_secret = decrypt_totp_secret(client.mfa_secret)
+    totp_secret = decrypt_secret(client.mfa_secret)
     totp = pyotp.TOTP(totp_secret)
     if totp.verify(code, valid_window=2):
         _reset_login_failures(client.email)
@@ -936,7 +936,7 @@ async def mfa_setup(
         name=client.email, issuer_name="Clew"
     )
     # Store encrypted; plaintext is only returned here so the UI can show QR
-    client.mfa_secret = encrypt_totp_secret(secret)
+    client.mfa_secret = encrypt_secret(secret)
     db.commit()
     return {"secret": secret, "uri": uri}
 
@@ -946,7 +946,9 @@ async def mfa_setup(
 # ---------------------------------------------------------------------------
 
 @router.post("/mfa/verify")
+@limiter.limit("10/15minutes")
 async def mfa_verify(
+    request: Request,
     body: MfaVerifyBody,
     client: Client = Depends(get_current_client),
     db: Session = Depends(get_db),
@@ -956,7 +958,7 @@ async def mfa_verify(
     if not client.mfa_secret:
         raise HTTPException(status_code=400, detail="Run /mfa/setup first.")
 
-    totp_secret = decrypt_totp_secret(client.mfa_secret)
+    totp_secret = decrypt_secret(client.mfa_secret)
     totp = pyotp.TOTP(totp_secret)
     if not totp.verify(body.code.strip(), valid_window=2):
         raise HTTPException(status_code=400, detail="Invalid authenticator code.")

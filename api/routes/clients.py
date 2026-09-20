@@ -21,6 +21,7 @@ from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
 
 from api.deps import CurrentOrg, get_current_org, get_db, require_role
+from api.auth_utils import encrypt_secret
 from db.models import Organization
 
 router = APIRouter()
@@ -231,8 +232,12 @@ async def update_me(
         org.s3_bucket, org.s3_prefix, org.log_format,
     )
     for field, value in update_data.items():
-        if field in _ALLOWED_FIELDS:
-            setattr(org, field, value)
+        if field not in _ALLOWED_FIELDS:
+            continue
+        # Item 57: encrypt at rest, same primitive as TOTP secrets.
+        if field == "cloudflare_token":
+            value = encrypt_secret(value)
+        setattr(org, field, value)
 
     # Changing ingestion config resets progress so we don't skip new logs
     s3_fields_touched = any(f in update_data for f in ("s3_bucket", "s3_prefix", "log_format", "aws_region"))

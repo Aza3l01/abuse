@@ -17,10 +17,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from api.deps import CurrentOrg, require_role
+from api.auth_utils import decrypt_secret
+from api.tiers import AUTO_BLOCK_TIERS
 
 router = APIRouter(prefix="/settings", tags=["settings"])
-
-_BLOCKING_TIERS = {"growth", "pro"}
 
 
 class TestResultOut(BaseModel):
@@ -29,7 +29,7 @@ class TestResultOut(BaseModel):
 
 
 def _require_blocking_tier(current_org: CurrentOrg) -> None:
-    if current_org.organization.tier not in _BLOCKING_TIERS:
+    if current_org.organization.tier not in AUTO_BLOCK_TIERS:
         raise HTTPException(status_code=403, detail="Blocking requires Growth or Pro plan.")
 
 
@@ -85,7 +85,7 @@ def test_cloudflare(current_org: CurrentOrg = Depends(require_role("owner", "adm
     try:
         r = httpx.get(
             url,
-            headers={"Authorization": f"Bearer {org.cloudflare_token}"},
+            headers={"Authorization": f"Bearer {decrypt_secret(org.cloudflare_token)}"},
             timeout=10.0,
         )
         data = r.json()

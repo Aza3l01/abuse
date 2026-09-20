@@ -36,11 +36,12 @@ for _p in [str(_REPO_ROOT)]:
 
 from db.models import IpMemory, Organization, Verdict
 from db.session import SessionLocal
+from api.auth_utils import decrypt_secret
+from api.tiers import AUTO_BLOCK_TIERS
 
 logger = logging.getLogger(__name__)
 
 BLOCK_CONFIDENCE_THRESHOLD = 0.75
-_BLOCKING_TIERS = {"growth", "pro"}
 
 
 @celery_app.task(
@@ -74,9 +75,9 @@ def push_block(self, verdict_id: str, org_id: str) -> dict:
             return {"status": "skipped", "reason": "org_not_found"}
 
         # --- Tier gate ---
-        if org.tier not in _BLOCKING_TIERS:
+        if org.tier not in AUTO_BLOCK_TIERS:
             logger.debug(
-                "push_block: org %s on tier %s — blocking not available",
+                "push_block: org %s on tier %s, blocking not available",
                 org_id, org.tier,
             )
             return {"status": "skipped", "reason": "tier_not_eligible"}
@@ -128,7 +129,7 @@ def push_block(self, verdict_id: str, org_id: str) -> dict:
             ok, error = block_ip(
                 ip=ip,
                 zone_id=org.cloudflare_zone_id,
-                token=org.cloudflare_token,
+                token=decrypt_secret(org.cloudflare_token),
             )
             if ok:
                 blocked_by.append("cloudflare")
@@ -218,13 +219,27 @@ def push_unblock(self, verdict_id: str, org_id: str) -> dict:
             ok, error = unblock_ip(
                 ip=ip,
                 zone_id=org.cloudflare_zone_id,
-                token=org.cloudflare_token,
+                token=decrypt_secret(org.cloudflare_token),
             )
             if ok:
                 unblocked_by.append("cloudflare")
             if ip_memory is not None:
                 ip_memory.cloudflare_blocked = not ok
                 ip_memory.cloudflare_block_error = None if ok else error
+
+        # Item 56: mirror push_block's "no integration succeeded" guard. Only
+        # treat this as a failure when at least one integration was actually
+        # configured and attempted, an org with no integration configured at
+        # all has nothing to unblock, that is a clean clear, not a failure.
+        integration_configured = bool(org.waf_ip_set_id) or bool(
+            org.cloudflare_zone_id and org.cloudflare_token
+        )
+        if integration_configured and not unblocked_by:
+            db.commit()  # persist per-integration error fields even on total failure
+            logger.warning(
+                "push_unblock: no integration succeeded for org %s", org_id
+            )
+            return {"status": "failed", "reason": "no_integration_succeeded"}
 
         db.query(Verdict).filter(Verdict.id == verdict_id).update({"blocked": False})
         db.commit()

@@ -19,6 +19,7 @@ from sqlalchemy import case
 from sqlalchemy.orm import Session
 
 from api.deps import CurrentOrg, get_current_org, get_db, require_role
+from api.tiers import MANUAL_BLOCK_TIERS
 from db.models import IpMemory, Verdict
 
 router = APIRouter()
@@ -203,7 +204,7 @@ def manual_block_ip(
     triggers the normal block flow, so it appears in both the verdicts
     list (labeled "Manual block") and the blocked IPs tab.
     """
-    if current_org.organization.tier not in ("growth", "pro"):
+    if current_org.organization.tier not in MANUAL_BLOCK_TIERS:
         raise HTTPException(status_code=403, detail="Blocking requires Growth or Pro plan.")
     if current_org.organization.blocking_tos_accepted_at is None:
         raise HTTPException(status_code=403, detail="Accept the Growth Subscription Agreement before blocking IPs.")
@@ -264,7 +265,7 @@ def manual_block(
     )
     if v is None:
         raise HTTPException(status_code=404, detail="Verdict not found")
-    if current_org.organization.tier not in ("growth", "pro"):
+    if current_org.organization.tier not in MANUAL_BLOCK_TIERS:
         raise HTTPException(status_code=403, detail="Blocking requires Growth or Pro plan.")
     if current_org.organization.blocking_tos_accepted_at is None:
         raise HTTPException(status_code=403, detail="Accept the Growth Subscription Agreement before blocking IPs.")
@@ -287,8 +288,8 @@ def manual_unblock(
     )
     if v is None:
         raise HTTPException(status_code=404, detail="Verdict not found")
-    if current_org.organization.tier not in ("growth", "pro"):
-        raise HTTPException(status_code=403, detail="Blocking requires Growth or Pro plan.")
+    # Item 55: unblocking is not tier-gated. An org that has since downgraded
+    # must still be able to remove blocks it created while on a higher tier.
     from workers.tasks.push_blocks import push_unblock
     push_unblock.delay(verdict_id, current_org.id)
     return v

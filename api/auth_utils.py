@@ -47,8 +47,9 @@ FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
 TURNSTILE_SECRET_KEY = os.environ.get("TURNSTILE_SECRET_KEY", "")
 _TURNSTILE_VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
 
-# Fernet key for encrypting TOTP secrets at rest.
-# Must be a 32-byte URL-safe base64 key — generate with:
+# Fernet key for encrypting secrets at rest (TOTP secrets, third-party API
+# tokens such as the Cloudflare blocking token, item 57).
+# Must be a 32-byte URL-safe base64 key, generate with:
 #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 # Store in TOTP_ENCRYPTION_KEY env var.  If absent we raise loudly so it can't
 # be silently skipped in production.
@@ -56,24 +57,30 @@ _TOTP_KEY_RAW = os.environ.get("TOTP_ENCRYPTION_KEY", "")
 if _TOTP_KEY_RAW:
     _fernet = Fernet(_TOTP_KEY_RAW.encode())
 else:
-    _fernet = None  # dev fallback — encrypt/decrypt will raise if called
+    _fernet = None  # dev fallback, encrypt/decrypt will raise if called
 
 
-def encrypt_totp_secret(secret: str) -> str:
-    """Encrypt a plaintext TOTP Base32 secret for storage."""
+def encrypt_secret(secret: str) -> str:
+    """Encrypt a plaintext secret string for storage."""
     if _fernet is None:
-        raise RuntimeError("TOTP_ENCRYPTION_KEY is not set. Cannot encrypt TOTP secret.")
+        raise RuntimeError("TOTP_ENCRYPTION_KEY is not set. Cannot encrypt secret.")
     return _fernet.encrypt(secret.encode()).decode()
 
 
-def decrypt_totp_secret(ciphertext: str) -> str:
-    """Decrypt a stored TOTP secret ciphertext back to the Base32 string."""
+def decrypt_secret(ciphertext: str) -> str:
+    """Decrypt a stored secret ciphertext back to the plaintext string.
+
+    Tolerates a plaintext (non-Fernet-token) value once during the item 57
+    migration window, returning it unchanged instead of raising, so a
+    partially migrated table does not break blocking. Remove this tolerance
+    once the migration has run in production.
+    """
     if _fernet is None:
-        raise RuntimeError("TOTP_ENCRYPTION_KEY is not set. Cannot decrypt TOTP secret.")
+        raise RuntimeError("TOTP_ENCRYPTION_KEY is not set. Cannot decrypt secret.")
     try:
         return _fernet.decrypt(ciphertext.encode()).decode()
-    except _FernetInvalidToken as exc:
-        raise ValueError("TOTP secret decryption failed — key mismatch or corrupted data.") from exc
+    except _FernetInvalidToken:
+        return ciphertext
 
 # ------------------------------------------------------------------
 # Password hashing (bcrypt cost-12, SHA-256 pre-hash)

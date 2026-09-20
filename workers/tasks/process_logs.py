@@ -55,6 +55,7 @@ for _p in [str(_REPO_ROOT), str(_ENGINE_ROOT)]:
 
 from db.models import AlertSent, IpMemory, Organization, ScanRun, Verdict
 from db.session import SessionLocal
+from api.tiers import AUTO_BLOCK_TIERS
 
 from engine.ingestion.s3_reader import S3Reader
 from engine.ingestion.normalizer import chunk, group_by_ip, parse_lines
@@ -390,9 +391,10 @@ def process_logs(self, org_id: str) -> dict:
             if v and org.alert_email:
                 from workers.tasks.send_alerts import send_alert_email
                 send_alert_email.delay(verdict_id, org_id)
-            # Push block for high/critical on growth/pro tiers only — blocking
-            # is a separate, more conservative gate than the alert threshold.
-            if v and v.severity in ("high", "critical") and org.tier in ("growth", "pro"):
+            # Push block for high/critical on Growth+ tiers only, item 55's
+            # AUTO_BLOCK_TIERS, a separate, more conservative gate than the
+            # alert threshold.
+            if v and v.severity in ("high", "critical") and org.tier in AUTO_BLOCK_TIERS:
                 from workers.tasks.push_blocks import push_block
                 push_block.delay(verdict_id, org_id)
 

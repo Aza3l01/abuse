@@ -216,7 +216,9 @@ async def list_invites(
 # ---------------------------------------------------------------------------
 
 @router.post("/org/invites/{invite_id}/resend")
+@limiter.limit("20/hour")
 async def resend_invite(
+    request: Request,
     invite_id: str,
     current_org: CurrentOrg = Depends(require_role("owner", "admin")),
     client: Client = Depends(get_current_client),
@@ -255,7 +257,9 @@ async def resend_invite(
 # ---------------------------------------------------------------------------
 
 @router.delete("/org/invites/{invite_id}")
+@limiter.limit("30/hour")
 async def cancel_invite(
+    request: Request,
     invite_id: str,
     current_org: CurrentOrg = Depends(require_role("owner", "admin")),
     db: Session = Depends(get_db),
@@ -309,7 +313,9 @@ class RoleChangeBody(BaseModel):
 
 
 @router.patch("/org/members/{member_id}")
+@limiter.limit("30/hour")
 async def change_member_role(
+    request: Request,
     member_id: str,
     body: RoleChangeBody,
     current_org: CurrentOrg = Depends(require_role("owner")),
@@ -344,7 +350,9 @@ async def change_member_role(
 # ---------------------------------------------------------------------------
 
 @router.delete("/org/members/{member_id}")
+@limiter.limit("30/hour")
 async def remove_member(
+    request: Request,
     member_id: str,
     current_org: CurrentOrg = Depends(require_role("owner")),
     db: Session = Depends(get_db),
@@ -375,7 +383,9 @@ async def remove_member(
 # ---------------------------------------------------------------------------
 
 @router.post("/org/members/{member_id}/transfer-ownership")
+@limiter.limit("10/hour")
 async def transfer_ownership(
+    request: Request,
     member_id: str,
     client: Client = Depends(get_current_client),
     current_org: CurrentOrg = Depends(require_role("owner")),

@@ -65,6 +65,22 @@ blocking. Growth and Pro add WAF/Cloudflare blocking, gated behind a one-time
 blocking Terms of Service acceptance since it's an active security action,
 not passive monitoring.
 
+**Not everything in that table is real yet.** A landing-page and pricing
+audit (2026-09-02, tracked in `TODO.md`'s section 1) checked every advertised
+feature against the actual code and found several that are sold but not
+built: the History column (90 days / 1 year / 3 years / unlimited) has no
+purge or cutoff logic anywhere, every org keeps everything forever regardless
+of tier; Pro's "lower detection confidence threshold" and "custom thresholds"
+don't exist, nothing in the engine is tier-aware on confidence; Pro's
+"AI-generated threat explanations" are actually the same rule-based template
+string every tier gets, the engine's real LLM-fusion path is never wired into
+production (that's Groq integration, item 33, still post-MVP). None of the
+volume caps (10M / 50M / 200M calls/month) are enforced either, there is no
+usage metering at all yet (item 30). If you're using this file to reason
+about pricing or tier changes, read `TODO.md`'s section 1 alongside it,
+this file describes the architecture and history, not which marketing claims
+are currently true.
+
 ---
 
 ## Current Build Status (as of Phase 8, 2026-08-11)

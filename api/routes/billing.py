@@ -300,7 +300,10 @@ _RAZORPAY_PLAN_ENV: dict[tuple[str, str], str] = {
 
 # Upgrade/downgrade decision (item 29): no plan-change endpoint exists on
 # Razorpay subscriptions, so a tier change is always cancel-old + create-new.
-_TIER_RANK = {"free": 0, "starter": 1, "growth": 2, "pro": 3}
+# "enterprise" (item 55) is contract-delivered, not reachable through this
+# self-serve create-subscription flow, but still needs a rank so it is never
+# misclassified as an upgrade relative to a lower self-serve tier.
+_TIER_RANK = {"free": 0, "starter": 1, "growth": 2, "pro": 3, "enterprise": 4}
 
 
 def _init_razorpay() -> "razorpay.Client":
@@ -400,7 +403,11 @@ def razorpay_create_subscription(
     org = current_org.organization
     tier = body.tier.lower()
     period = body.period.lower()
-    if tier not in _TIER_RANK or tier == "free":
+    # Item 55: "enterprise" is contract-delivered, never self-serve checkout.
+    # Checked explicitly (not via _TIER_RANK membership) so adding enterprise
+    # to _TIER_RANK for billing-comparison purposes can't accidentally open
+    # this endpoint up to it.
+    if tier not in ("starter", "growth", "pro"):
         raise HTTPException(400, f"Unknown tier: {body.tier}")
     if period not in ("monthly", "annual"):
         raise HTTPException(400, f"Unknown period: {body.period}")
@@ -508,9 +515,21 @@ def razorpay_verify_payment(
         subscription = rp.subscription.fetch(body.razorpay_subscription_id)
     except Exception:
         logger.exception("billing: failed to fetch Razorpay subscription %s", body.razorpay_subscription_id)
-        subscription = {}
+        raise HTTPException(502, "Could not verify subscription with Razorpay. Please retry shortly.")
 
-    org.tier = body.tier.lower()
+    notes_tier = (subscription.get("notes") or {}).get("tier")
+    if not notes_tier:
+        logger.error(
+            "billing: Razorpay subscription %s has no tier in notes", body.razorpay_subscription_id
+        )
+        raise HTTPException(502, "Could not verify subscription with Razorpay. Please retry shortly.")
+    if notes_tier != body.tier.lower():
+        logger.warning(
+            "billing: verify-payment tier mismatch for org %s, body.tier=%s notes.tier=%s, using notes",
+            org.id, body.tier, notes_tier,
+        )
+
+    org.tier = notes_tier
     org.billing_provider = "razorpay"
     org.payment_method_display = _payment_method_display(payment) or org.payment_method_display
     if payment.get("customer_id"):
