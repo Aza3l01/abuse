@@ -83,7 +83,7 @@ export function TeamMembersSection({ myRole, onOwnershipTransferred }: { myRole:
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok) {
-        setInviteErr(data?.detail ?? "Could not send invite.");
+        setInviteErr(typeof data?.detail === "string" ? data.detail : "Could not send invite.");
         return;
       }
       setInviteMsg("Invite sent.");

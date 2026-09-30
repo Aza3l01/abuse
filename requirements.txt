@@ -26,7 +26,7 @@ redis==5.2.1
 boto3==1.38.22
 
 # Email
-resend==2.10.0
+resend==2.49.0
 
 # Billing
 stripe==15.1.0
@@ -37,6 +37,9 @@ slowapi==0.1.9
 
 # Environment
 python-dotenv==1.1.0
+
+# LLM client (Phase 3/item 33, Groq threat explanations)
+openai==3.22.1
 
 # GeoIP
 maxminddb==2.6.3

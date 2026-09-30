@@ -2,10 +2,13 @@
 
 import { useEffect, useState } from "react";
 import { useRouter }           from "next/navigation";
+import Link                    from "next/link";
 import { apiFetch }            from "@/lib/api";
 import { TeamMembersSection }  from "@/components/dashboard/TeamMembers";
+import { GuidedOnboardingButton } from "@/components/dashboard/GuidedOnboardingButton";
 import { loadRazorpayCheckout } from "@/lib/razorpay";
-import { PRICING_TIERS, FEATURE_ROWS } from "@/lib/pricing";
+import { PRICING_TIERS, FEATURE_ROWS, tierDisplayName } from "@/lib/pricing";
+import { NewsletterForm } from "@/components/layout/NewsletterForm";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -33,6 +36,10 @@ interface ClientConfig {
   waf_ip_set_id: string | null;
   cloudflare_zone_id: string | null;
   blocking_tos_accepted_at: string | null;
+  home_country: string | null;
+  aws_role_arn: string | null;
+  aws_external_id: string | null;
+  clew_aws_account_id: string;
 }
 
 interface BillingStatus {
@@ -67,6 +74,25 @@ const AWS_REGIONS = [
   "ap-south-1", "ap-southeast-1", "ap-southeast-2", "ap-northeast-1",
 ];
 
+// Item 61: common countries for the home-country select. Not an exhaustive
+// ISO 3166-1 list, covers the markets this product actually serves today;
+// extend as new customer countries come up.
+const HOME_COUNTRIES: [string, string][] = [
+  ["IN", "India"],
+  ["US", "United States"],
+  ["GB", "United Kingdom"],
+  ["CA", "Canada"],
+  ["AU", "Australia"],
+  ["DE", "Germany"],
+  ["FR", "France"],
+  ["NL", "Netherlands"],
+  ["IE", "Ireland"],
+  ["SG", "Singapore"],
+  ["AE", "United Arab Emirates"],
+  ["JP", "Japan"],
+  ["BR", "Brazil"],
+];
+
 // ---------------------------------------------------------------------------
 // Section header helper
 // ---------------------------------------------------------------------------
@@ -99,6 +125,11 @@ function FieldRow({ label, children }: { label: string; children: React.ReactNod
   );
 }
 
+// Mirrors api/tiers.py's MANUAL_BLOCK_TIERS (item 55/69): which tiers get
+// the manual block/unblock button and therefore need the Blocking
+// Subscription Agreement accepted before checkout.
+const MANUAL_BLOCK_TIERS = ["starter", "growth", "pro", "enterprise"];
+
 const inputStyle: React.CSSProperties = {
   width: "100%",
   padding: "7px 10px",
@@ -115,22 +146,76 @@ const selectStyle: React.CSSProperties = {
 };
 
 // ---------------------------------------------------------------------------
-// IAM Policy snippet
+// IAM Policy snippet: phase 2, cross-account sts:AssumeRole
 // ---------------------------------------------------------------------------
 
-function IamPolicyGuide({ bucket }: { bucket: string }) {
+const preStyle: React.CSSProperties = {
+  fontFamily: "var(--font-mono)",
+  fontSize: "11px",
+  background: "transparent",
+  margin: 0,
+  padding: 0,
+  whiteSpace: "pre-wrap",
+  wordBreak: "break-all",
+  color: "var(--color-text)",
+  lineHeight: "1.6",
+};
+
+function IamPolicyGuide({
+  bucket,
+  externalId,
+  clewAccountId,
+  roleArn,
+  setRoleArn,
+  onSaveRole,
+  savingRole,
+  roleTestResult,
+}: {
+  bucket: string;
+  externalId: string | null;
+  clewAccountId: string;
+  roleArn: string;
+  setRoleArn: (v: string) => void;
+  onSaveRole: (e: React.FormEvent) => void;
+  savingRole: boolean;
+  roleTestResult: { status: string; message: string } | null;
+}) {
+  const [includeBlocking, setIncludeBlocking] = useState(false);
+  const [copied, setCopied] = useState(false);
   const bucketName = bucket || "<YOUR-BUCKET-NAME>";
-  const policy = JSON.stringify({
+  const accountId = clewAccountId || "<CLEW_AWS_ACCOUNT_ID not yet configured, contact support@clewsec.com>";
+
+  const trustPolicy = JSON.stringify({
     Version: "2012-10-17",
     Statement: [{
       Effect: "Allow",
-      Action: ["s3:GetObject", "s3:ListBucket"],
-      Resource: [
-        `arn:aws:s3:::${bucketName}`,
-        `arn:aws:s3:::${bucketName}/*`,
-      ],
+      Principal: { AWS: `arn:aws:iam::${accountId}:root` },
+      Action: "sts:AssumeRole",
+      Condition: { StringEquals: { "sts:ExternalId": externalId || "<YOUR-EXTERNAL-ID>" } },
     }],
   }, null, 2);
+
+  const permissionsStatements: Record<string, unknown>[] = [{
+    Effect: "Allow",
+    Action: ["s3:GetObject", "s3:ListBucket"],
+    Resource: [`arn:aws:s3:::${bucketName}`, `arn:aws:s3:::${bucketName}/*`],
+  }];
+  if (includeBlocking) {
+    permissionsStatements.push({
+      Effect: "Allow",
+      Action: ["wafv2:GetIPSet", "wafv2:UpdateIPSet"],
+      Resource: "*",
+    });
+  }
+  const permissionsPolicy = JSON.stringify({ Version: "2012-10-17", Statement: permissionsStatements }, null, 2);
+
+  function copyExternalId() {
+    if (!externalId) return;
+    navigator.clipboard.writeText(externalId).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  }
 
   return (
     <div style={{
@@ -138,23 +223,92 @@ function IamPolicyGuide({ bucket }: { bucket: string }) {
       background: "var(--color-bg)",
       padding: "16px",
     }}>
-      <p style={{ fontSize: "12px", color: "var(--color-text-muted)", marginBottom: "12px" }}>
-        Create an IAM user with the policy below and provide its Access Key ID and
-        Secret Access Key in your <code style={{ fontFamily: "var(--font-mono)", fontSize: "11px" }}>AWS_ACCESS_KEY_ID</code> / <code style={{ fontFamily: "var(--font-mono)", fontSize: "11px" }}>AWS_SECRET_ACCESS_KEY</code> environment variables on your Celery worker host.
+      <p style={{ fontSize: "12px", color: "var(--color-text-muted)", marginBottom: "16px" }}>
+        Clew reads your logs by assuming an IAM role inside your own AWS
+        account, not by holding a long-lived access key. Create the role
+        below with the two policies shown, then paste its ARN back in.
       </p>
-      <pre style={{
-        fontFamily: "var(--font-mono)",
-        fontSize: "11px",
-        background: "transparent",
-        margin: 0,
-        padding: 0,
-        whiteSpace: "pre-wrap",
-        wordBreak: "break-all",
-        color: "var(--color-text)",
-        lineHeight: "1.6",
-      }}>
-        {policy}
-      </pre>
+
+      <FieldRow label="Your External ID">
+        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+          <code style={{
+            fontFamily: "var(--font-mono)", fontSize: "12px", padding: "6px 10px",
+            border: "1px solid var(--color-border)", background: "var(--color-surface)",
+            flex: 1, wordBreak: "break-all",
+          }}>
+            {externalId || "Not yet generated"}
+          </code>
+          <button
+            type="button"
+            onClick={copyExternalId}
+            disabled={!externalId}
+            style={{ padding: "6px 10px", fontSize: "12px", border: "1px solid var(--color-border)", background: "var(--color-bg)", cursor: externalId ? "pointer" : "default" }}
+          >
+            {copied ? "Copied" : "Copy"}
+          </button>
+        </div>
+      </FieldRow>
+      <p style={{ fontSize: "11px", color: "var(--color-text-muted)", marginBottom: "16px" }}>
+        This is a secret shared only between you and Clew, generated once for
+        your organisation. Never share it outside this page.
+      </p>
+
+      <p style={{ fontSize: "12px", color: "var(--color-text-muted)", margin: "0 0 6px" }}>
+        1. Create an IAM role in your AWS account with this trust policy:
+      </p>
+      <pre style={preStyle}>{trustPolicy}</pre>
+
+      <p style={{ fontSize: "12px", color: "var(--color-text-muted)", margin: "16px 0 6px" }}>
+        2. Attach this permissions policy to the same role:
+      </p>
+      <label style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "12px", color: "var(--color-text-muted)", marginBottom: "6px" }}>
+        <input type="checkbox" checked={includeBlocking} onChange={e => setIncludeBlocking(e.target.checked)} />
+        Also include WAF blocking permissions
+      </label>
+      <p style={{ fontSize: "11px", color: "var(--color-text-muted)", marginBottom: "6px" }}>
+        Required for both manual and automatic blocking, not just automatic.
+        Completing the setup above with only the S3 statement gives Clew read
+        access to your logs but does not enable blocking. If you already
+        created a role using the S3-only policy, tick this box, copy the
+        updated policy, and update that same role&apos;s existing permissions
+        policy, you do not need a second role.
+      </p>
+      <pre style={preStyle}>{permissionsPolicy}</pre>
+
+      <form onSubmit={onSaveRole} style={{ marginTop: "20px" }}>
+        <FieldRow label="Your Role ARN">
+          <input
+            type="text"
+            value={roleArn}
+            onChange={e => setRoleArn(e.target.value)}
+            placeholder="arn:aws:iam::123456789012:role/ClewAccessRole"
+            style={inputStyle}
+          />
+        </FieldRow>
+        <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+          <button
+            type="submit"
+            disabled={savingRole}
+            style={{
+              padding: "8px 20px", fontSize: "13px", border: "1px solid var(--color-text)",
+              background: "var(--color-text)", color: "var(--color-bg)",
+              cursor: savingRole ? "default" : "pointer", opacity: savingRole ? 0.6 : 1,
+            }}
+          >
+            {savingRole ? "Testing…" : "Save & Test Connection"}
+          </button>
+          {roleTestResult && (
+            <span style={{
+              fontSize: "12px",
+              color: roleTestResult.status === "connected" ? "var(--color-low)"
+                : roleTestResult.status === "saved" ? "var(--color-text-muted)"
+                : "var(--color-critical)",
+            }}>
+              {roleTestResult.message}
+            </span>
+          )}
+        </div>
+      </form>
     </div>
   );
 }
@@ -177,6 +331,7 @@ export default function SettingsPage() {
   const [awsRegion,    setAwsRegion]    = useState("");
   const [alertEmail,   setAlertEmail]   = useState("");
   const [alertSeverityThreshold, setAlertSeverityThreshold] = useState("all");
+  const [homeCountry,  setHomeCountry]  = useState("");
 
   // Item 22: WAF / Cloudflare config (Growth+ only)
   const [wafIpSetId,       setWafIpSetId]       = useState("");
@@ -186,6 +341,11 @@ export default function SettingsPage() {
   const [wafTestResult,     setWafTestResult]     = useState<{ status: string; message: string } | null>(null);
   const [testingCloudflare, setTestingCloudflare] = useState(false);
   const [cfTestResult,      setCfTestResult]      = useState<{ status: string; message: string } | null>(null);
+
+  // Phase 2: cross-account AWS IAM role (S3 read + WAF blocking)
+  const [awsRoleArn,     setAwsRoleArn]     = useState("");
+  const [savingRole,     setSavingRole]     = useState(false);
+  const [roleTestResult, setRoleTestResult] = useState<{ status: string; message: string } | null>(null);
 
   // Item 22: change password (Security section)
   const [currentPassword, setCurrentPassword] = useState("");
@@ -253,6 +413,8 @@ export default function SettingsPage() {
         setAlertSeverityThreshold(c.alert_severity_threshold || "all");
         setWafIpSetId(c.waf_ip_set_id ?? "");
         setCloudflareZoneId(c.cloudflare_zone_id ?? "");
+        setHomeCountry(c.home_country ?? "");
+        setAwsRoleArn(c.aws_role_arn ?? "");
       });
   }
 
@@ -323,12 +485,13 @@ export default function SettingsPage() {
   function handlePlanClick(tier: string) {
     setBillingError(null);
     if (currency !== "INR") {
-      setBillingError("USD billing isn't self-serve yet, we'll set up your invoice manually. Contact billing@clewsec.com.");
+      setBillingError("USD billing isn't self-serve yet, we'll set up your invoice manually. Contact support@clewsec.com.");
       return;
     }
-    // Item 28: Growth is an active-blocking plan, the TOS modal must be
-    // accepted before the payment flow opens, and only once ever.
-    if (tier === "growth" && !config?.blocking_tos_accepted_at) {
+    // Item 28/69: any tier that gets manual blocking (see MANUAL_BLOCK_TIERS
+    // in api/tiers.py) requires the Blocking Subscription Agreement accepted
+    // before the payment flow opens, and only once ever.
+    if (MANUAL_BLOCK_TIERS.includes(tier) && !config?.blocking_tos_accepted_at) {
       setBlockingTosPendingTier(tier);
       return;
     }
@@ -372,45 +535,106 @@ export default function SettingsPage() {
         setUpgrading(null);
         return;
       }
-      const { subscription_id, key_id } = await r.json();
-      const rzp = new window.Razorpay({
-        key: key_id,
-        subscription_id,
-        name: "Clew",
-        description: `${tier.charAt(0).toUpperCase()}${tier.slice(1)} plan`,
-        theme: { color: "#0D0D0D" },
-        config: { display: { sequence: ["block.upi", "block.card", "block.netbanking", "block.wallet"] } },
-        handler: async (response: {
-          razorpay_payment_id: string;
-          razorpay_subscription_id: string;
-          razorpay_signature: string;
-        }) => {
-          try {
-            const vr = await apiFetch(`/billing/razorpay/verify-payment`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ tier, ...response }),
-            });
-            if (vr.ok) {
-              const status: BillingStatus = await vr.json();
-              setBillingStatus(status);
-              setConfig(c => c ? { ...c, tier: status.tier } : c);
-              setShowUpgraded(true);
-            } else {
-              const d = await vr.json().catch(() => ({}));
-              setBillingError(d?.detail ?? "Payment verification failed. Contact support if you were charged.");
-            }
-          } finally {
-            setUpgrading(null);
-          }
-        },
-        modal: { ondismiss: () => setUpgrading(null) },
-      });
-      rzp.open();
+      const { subscription_id, key_id, upgrade_order_id, upgrade_order_amount } = await r.json();
+
+      // Item 53 (section 4): an upgrade from an existing paid tier on/before
+      // the 15th charges only the price difference right now, via a
+      // separate one-time Razorpay order, before the subscription checkout
+      // below. Downgrades, first-ever subscriptions, and upgrades placed
+      // after the 15th never get an order here, go straight to the
+      // subscription checkout as before.
+      if (upgrade_order_id) {
+        openUpgradeOrderCheckout(tier, key_id, upgrade_order_id, upgrade_order_amount, () =>
+          openSubscriptionCheckout(tier, key_id, subscription_id)
+        );
+      } else {
+        openSubscriptionCheckout(tier, key_id, subscription_id);
+      }
     } catch {
       setBillingError("Network error. Please try again.");
       setUpgrading(null);
     }
+  }
+
+  function openUpgradeOrderCheckout(
+    tier: string,
+    key_id: string,
+    order_id: string,
+    order_amount: number,
+    onVerified: () => void
+  ) {
+    const rzp = new window.Razorpay({
+      key: key_id,
+      order_id,
+      amount: order_amount,
+      currency: "INR",
+      name: "Clew",
+      description: `Upgrade to ${tier.charAt(0).toUpperCase()}${tier.slice(1)}, price difference`,
+      theme: { color: "#0D0D0D" },
+      config: { display: { sequence: ["block.upi", "block.card", "block.netbanking", "block.wallet"] } },
+      handler: async (response: {
+        razorpay_payment_id: string;
+        razorpay_order_id: string;
+        razorpay_signature: string;
+      }) => {
+        try {
+          const vr = await apiFetch(`/billing/razorpay/verify-upgrade-order`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(response),
+          });
+          if (vr.ok) {
+            onVerified();
+          } else {
+            const d = await vr.json().catch(() => ({}));
+            setBillingError(d?.detail ?? "Payment verification failed. Contact support if you were charged.");
+            setUpgrading(null);
+          }
+        } catch {
+          setBillingError("Network error verifying payment. Contact support if you were charged.");
+          setUpgrading(null);
+        }
+      },
+      modal: { ondismiss: () => setUpgrading(null) },
+    });
+    rzp.open();
+  }
+
+  function openSubscriptionCheckout(tier: string, key_id: string, subscription_id: string) {
+    const rzp = new window.Razorpay({
+      key: key_id,
+      subscription_id,
+      name: "Clew",
+      description: `${tier.charAt(0).toUpperCase()}${tier.slice(1)} plan`,
+      theme: { color: "#0D0D0D" },
+      config: { display: { sequence: ["block.upi", "block.card", "block.netbanking", "block.wallet"] } },
+      handler: async (response: {
+        razorpay_payment_id: string;
+        razorpay_subscription_id: string;
+        razorpay_signature: string;
+      }) => {
+        try {
+          const vr = await apiFetch(`/billing/razorpay/verify-payment`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ tier, ...response }),
+          });
+          if (vr.ok) {
+            const status: BillingStatus = await vr.json();
+            setBillingStatus(status);
+            setConfig(c => c ? { ...c, tier: status.tier } : c);
+            setShowUpgraded(true);
+          } else {
+            const d = await vr.json().catch(() => ({}));
+            setBillingError(d?.detail ?? "Payment verification failed. Contact support if you were charged.");
+          }
+        } finally {
+          setUpgrading(null);
+        }
+      },
+      modal: { ondismiss: () => setUpgrading(null) },
+    });
+    rzp.open();
   }
 
   async function openCancelModal() {
@@ -561,6 +785,7 @@ export default function SettingsPage() {
       aws_region:  awsRegion  || null,
       alert_email: alertEmail || null,
       alert_severity_threshold: alertSeverityThreshold,
+      home_country: homeCountry || null,
     };
 
     try {
@@ -582,6 +807,43 @@ export default function SettingsPage() {
       setError("Network error. Please try again.");
     } finally {
       setSaving(false);
+    }
+  }
+
+  // Phase 2: cross-account IAM role ARN, own Save-and-Test button, same
+  // pattern as WAF/Cloudflare below. The connection test itself runs
+  // server-side (api/routes/clients.py's update_me), triggered by
+  // aws_role_arn being present in the PATCH body, so this handler only
+  // needs to read the result back off the updated org, not call a
+  // separate /settings/test-* endpoint.
+  async function handleSaveAwsRole(e: React.FormEvent) {
+    e.preventDefault();
+    setSavingRole(true);
+    setRoleTestResult(null);
+    try {
+      const r = await apiFetch(`/clients/me`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ aws_role_arn: awsRoleArn || null }),
+      });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        setRoleTestResult({ status: "error", message: d?.detail ?? "Save failed." });
+        return;
+      }
+      const updated: ClientConfig = await r.json();
+      setConfig(updated);
+      if (!updated.s3_bucket) {
+        setRoleTestResult({ status: "saved", message: "Role saved. Set your S3 bucket below to test the connection." });
+      } else if (updated.s3_status === "connected") {
+        setRoleTestResult({ status: "connected", message: "Connected." });
+      } else {
+        setRoleTestResult({ status: "error", message: updated.s3_status_message ?? "Could not verify the connection yet." });
+      }
+    } catch {
+      setRoleTestResult({ status: "error", message: "Network error. Please try again." });
+    } finally {
+      setSavingRole(false);
     }
   }
 
@@ -688,8 +950,11 @@ export default function SettingsPage() {
   return (
     <main style={{ padding: "32px", width: "100%" }}>
 
-      <h1 style={{ fontFamily: "var(--font-brand)", fontSize: "22px", fontWeight: 700, marginBottom: "32px" }}>
+      <h1 style={{ fontFamily: "var(--font-brand)", fontSize: "22px", fontWeight: 700, marginBottom: "32px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "16px" }}>
         Settings
+        <span style={{ fontSize: "13px", fontWeight: 400 }}>
+          <GuidedOnboardingButton label="Reopen guided onboarding" />
+        </span>
       </h1>
 
       {/* ------------------------------------------------------------------ */}
@@ -740,8 +1005,8 @@ export default function SettingsPage() {
               <p style={{ fontSize: "11px", color: "var(--color-text-muted)", textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: "4px" }}>
                 Current plan
               </p>
-              <p style={{ fontSize: "18px", fontFamily: "var(--font-brand)", fontWeight: 700, textTransform: "capitalize" }}>
-                {config?.tier ?? "—"}
+              <p style={{ fontSize: "18px", fontFamily: "var(--font-brand)", fontWeight: 700 }}>
+                {tierDisplayName(config?.tier)}
               </p>
               {billingStatus?.payment_method_display && (
                 <p style={{ fontSize: "12px", color: "var(--color-text-muted)", marginTop: "4px" }}>
@@ -789,7 +1054,7 @@ export default function SettingsPage() {
               <p style={{ fontSize: "12px", color: "var(--color-text-muted)", marginBottom: "16px" }}>
                 {billingStatus?.billing_provider === "razorpay"
                   ? "Upgrades start immediately; downgrades take effect at the end of the current billing cycle."
-                  : "Add a payment method to unlock full threat history, email alerts, and auto-blocking."}
+                  : "You're on the free Starter plan. Upgrade to unlock longer threat history retention, email alerts, and automatic blocking."}
               </p>
 
               {currency === "INR" && (
@@ -817,118 +1082,161 @@ export default function SettingsPage() {
                         </button>
                       ))}
                     </div>
-                    <input
-                      type="text"
-                      placeholder="GSTIN (optional)"
-                      value={gstin}
-                      onChange={e => setGstin(e.target.value)}
-                      style={{ ...inputStyle, width: "180px", padding: "6px 10px", fontSize: "11px" }}
-                    />
+                    <div>
+                      <input
+                        type="text"
+                        placeholder="GSTIN (optional)"
+                        value={gstin}
+                        onChange={e => setGstin(e.target.value)}
+                        style={{ ...inputStyle, width: "180px", padding: "6px 10px", fontSize: "11px" }}
+                      />
+                      <p style={{ fontSize: "10px", color: "var(--color-text-muted)", marginTop: "4px", maxWidth: "220px" }}>
+                        Add your GSTIN to claim input tax credit on your invoices.
+                      </p>
+                    </div>
                   </div>
                 </div>
               )}
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-0">
-                {PRICING_TIERS
-                  .filter(p => p.tier !== config?.tier || billingStatus?.billing_provider !== "razorpay")
-                  .map((p, i) => (
-                  <div
-                    key={p.tier}
-                    style={{
-                      padding: "24px 20px",
-                      borderTop: "1px solid var(--color-border)",
-                      borderBottom: "1px solid var(--color-border)",
-                      borderRight: "1px solid var(--color-border)",
-                      borderLeft: i === 0 ? "1px solid var(--color-border)" : "none",
-                      background: p.highlight ? "var(--color-surface)" : "var(--color-bg)",
-                      display: "flex",
-                      flexDirection: "column",
-                    }}
-                  >
-                    {p.highlight ? (
-                      <p style={{ fontFamily: "var(--font-mono)", fontSize: "11px", textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--color-text-muted)", marginBottom: "12px" }}>
-                        Most popular
+              {currency === "INR" ? (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-0">
+                  {PRICING_TIERS
+                    .map((p, tierIdx) => ({ p, tierIdx }))
+                    // Item 53 (section 4): "free" is the permanent Starter
+                    // plan every org defaults to, never a purchasable card.
+                    .filter(({ p }) => p.tier !== "free")
+                    .filter(({ p }) => p.tier !== config?.tier || billingStatus?.billing_provider !== "razorpay")
+                    .map(({ p, tierIdx }, renderIdx) => (
+                    <div
+                      key={p.tier}
+                      style={{
+                        padding: "24px 20px",
+                        borderTop: "1px solid var(--color-border)",
+                        borderBottom: "1px solid var(--color-border)",
+                        borderRight: "1px solid var(--color-border)",
+                        borderLeft: renderIdx === 0 ? "1px solid var(--color-border)" : "none",
+                        background: p.highlight ? "var(--color-surface)" : "var(--color-bg)",
+                        display: "flex",
+                        flexDirection: "column",
+                      }}
+                    >
+                      {p.highlight ? (
+                        <p style={{ fontFamily: "var(--font-mono)", fontSize: "11px", textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--color-text-muted)", marginBottom: "12px" }}>
+                          Most popular
+                        </p>
+                      ) : (
+                        <div style={{ height: "17px" }} />
+                      )}
+                      <p style={{ fontFamily: "var(--font-brand)", fontWeight: 700, fontSize: "18px", marginBottom: "6px" }}>
+                        {p.name}
                       </p>
-                    ) : (
-                      <div style={{ height: "17px" }} />
-                    )}
-                    <p style={{ fontFamily: "var(--font-brand)", fontWeight: 700, fontSize: "18px", marginBottom: "6px" }}>
-                      {p.name}
-                    </p>
-                    <p style={{ fontFamily: "var(--font-brand)", fontWeight: 700, fontSize: "22px", marginBottom: "4px" }}>
-                      {p.contactOnly
-                        ? "Custom pricing"
-                        : (currency === "INR" ? (period === "monthly" ? p.monthlyINR : p.annualINR) : (period === "monthly" ? p.monthlyUSD : p.annualUSD))}
-                    </p>
-                    <p style={{ fontSize: "12px", color: "var(--color-text-muted)", marginBottom: "20px" }}>
-                      {p.volume}
-                    </p>
-                    <ul style={{ margin: 0, padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: "8px", flex: 1, marginBottom: "20px" }}>
-                      {FEATURE_ROWS.map((row) => {
-                        const value = row.values[i];
-                        const included = value !== false;
-                        return (
-                          <li
-                            key={row.label}
-                            style={{
-                              fontSize: "12px",
-                              color: included ? "var(--color-text-muted)" : "var(--color-border)",
-                              display: "flex",
-                              alignItems: "flex-start",
-                              gap: "8px",
-                            }}
-                          >
-                            <span style={{ color: included ? "var(--color-text)" : "var(--color-border)", flexShrink: 0 }}>
-                              {included ? "+" : "×"}
-                            </span>
-                            {row.label}
-                            {typeof value === "string" ? ` (${value})` : ""}
-                          </li>
-                        );
-                      })}
-                    </ul>
-                    {p.contactOnly ? (
-                      <a
-                        href="mailto:jeff@clewsec.com"
+                      <p style={{ fontFamily: "var(--font-brand)", fontWeight: 700, fontSize: "22px", marginBottom: "4px" }}>
+                        {p.contactOnly
+                          ? "Custom pricing"
+                          : (period === "monthly" ? p.monthlyINR : p.annualINR)}
+                      </p>
+                      {p.contactOnly && (
+                        <p style={{ fontSize: "11px", color: "var(--color-text-muted)", marginBottom: "8px" }}>
+                          Multi-region, dedicated infrastructure, and SLA terms are configured per contract, not self-serve.
+                        </p>
+                      )}
+                      <p style={{ fontSize: "12px", color: "var(--color-text-muted)", marginBottom: "20px" }}>
+                        {p.volume}
+                      </p>
+                      <ul style={{ margin: 0, padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: "8px", flex: 1, marginBottom: "20px" }}>
+                        {FEATURE_ROWS.map((row) => {
+                          const value = row.values[tierIdx];
+                          const included = value !== false;
+                          return (
+                            <li
+                              key={row.label}
+                              style={{
+                                fontSize: "12px",
+                                color: included ? "var(--color-text-muted)" : "var(--color-border)",
+                                display: "flex",
+                                alignItems: "flex-start",
+                                gap: "8px",
+                              }}
+                            >
+                              <span style={{ color: included ? "var(--color-text)" : "var(--color-border)", flexShrink: 0 }}>
+                                {included ? "+" : "×"}
+                              </span>
+                              {typeof value === "string" ? value : row.label}
+                            </li>
+                          );
+                        })}
+                      </ul>
+                      {p.contactOnly ? (
+                        <a
+                          href="mailto:support@clewsec.com"
+                          style={{
+                            padding: "10px 0",
+                            fontSize: "13px",
+                            fontWeight: 500,
+                            textAlign: "center",
+                            border: "1px solid var(--color-border)",
+                            background: "transparent",
+                            color: "var(--color-text)",
+                            textDecoration: "none",
+                            display: "block",
+                          }}
+                        >
+                          Contact us
+                        </a>
+                      ) : (
+                      <button
+                        onClick={() => handlePlanClick(p.tier)}
+                        disabled={!!upgrading}
                         style={{
                           padding: "10px 0",
                           fontSize: "13px",
                           fontWeight: 500,
-                          textAlign: "center",
-                          border: "1px solid var(--color-border)",
-                          background: "transparent",
-                          color: "var(--color-text)",
-                          textDecoration: "none",
-                          display: "block",
+                          width: "100%",
+                          border: p.highlight ? "none" : "1px solid var(--color-border)",
+                          background: p.highlight ? "var(--color-text)" : "transparent",
+                          color: p.highlight ? "var(--color-bg)" : "var(--color-text)",
+                          cursor: upgrading ? "default" : "pointer",
+                          opacity: upgrading ? 0.6 : 1,
                         }}
                       >
-                        Contact us
-                      </a>
-                    ) : (
-                    <button
-                      onClick={() => handlePlanClick(p.tier)}
-                      disabled={!!upgrading}
-                      style={{
-                        padding: "10px 0",
-                        fontSize: "13px",
-                        fontWeight: 500,
-                        width: "100%",
-                        border: p.highlight ? "none" : "1px solid var(--color-border)",
-                        background: p.highlight ? "var(--color-text)" : "transparent",
-                        color: p.highlight ? "var(--color-bg)" : "var(--color-text)",
-                        cursor: upgrading ? "default" : "pointer",
-                        opacity: upgrading ? 0.6 : 1,
-                      }}
-                    >
-                      {upgrading === p.tier ? "Working…" : "Select"}
-                    </button>
-                    )}
+                        {upgrading === p.tier ? "Working…" : "Select"}
+                      </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                // Item 6c: non-INR visitors can't complete a purchase (USD
+                // self-serve checkout doesn't exist), so show a clean panel
+                // instead of plan cards that lead nowhere.
+                <div style={{ border: "1px solid var(--color-border)", padding: "28px 24px", textAlign: "center" }}>
+                  <p style={{ fontSize: "13px", color: "var(--color-text-muted)", marginBottom: "20px", lineHeight: 1.5 }}>
+                    Clew is currently available to customers in India. We are
+                    working on international billing.
+                  </p>
+                  <div style={{ maxWidth: "380px", margin: "0 auto 20px" }}>
+                    <NewsletterForm />
                   </div>
-                ))}
-              </div>
+                  <p style={{ fontSize: "12px", color: "var(--color-text-muted)" }}>
+                    <a
+                      href="https://www.linkedin.com/company/117823996"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{ color: "var(--color-text)" }}
+                    >
+                      Follow us on LinkedIn
+                    </a>
+                    {" "}·{" "}
+                    <a href="mailto:support@clewsec.com" style={{ color: "var(--color-text)" }}>
+                      Email support@clewsec.com
+                    </a>
+                    {" "}to talk now, manual invoicing is available.
+                  </p>
+                </div>
+              )}
 
               <p style={{ fontSize: "11px", color: "var(--color-text-muted)", marginTop: "16px" }}>
-                {currency === "INR" ? "Payments by Razorpay. UPI, cards, netbanking, and wallets accepted." : "USD billing is invoiced manually for now, Stripe self-serve checkout is coming soon."}{" "}
+                {currency === "INR" ? "Payments by Razorpay. UPI, cards, netbanking, and wallets accepted." : "Manual invoicing is available for customers outside India."}{" "}
                 Viewing prices in {currency}.{" "}
                 <button
                   onClick={() => setCurrency(c => c === "INR" ? "USD" : "INR")}
@@ -942,7 +1250,7 @@ export default function SettingsPage() {
         </div>
       </section>
 
-      {/* Item 28: Growth blocking TOS modal */}
+      {/* Item 28/69: Blocking Subscription Agreement modal */}
       {blockingTosPendingTier && (
         <div style={{
           position: "fixed", inset: 0, background: "rgba(13,13,13,0.6)",
@@ -950,16 +1258,17 @@ export default function SettingsPage() {
         }}>
           <div style={{ background: "var(--color-bg)", border: "1px solid var(--color-border)", padding: "24px", maxWidth: "460px", width: "90%" }}>
             <p style={{ fontSize: "14px", fontWeight: 600, marginBottom: "12px" }}>
-              Growth subscription includes active IP blocking
+              This plan includes active IP blocking
             </p>
             <p style={{ fontSize: "12px", color: "var(--color-text-muted)", marginBottom: "10px", lineHeight: 1.5 }}>
-              Clew will automatically add malicious IPs to your AWS WAF and Cloudflare account.
-              This is an active security action, not just monitoring.
+              Clew will add malicious IPs to your AWS WAF and Cloudflare account
+              when you block them, whether manually or automatically depending
+              on your plan. This is an active security action, not just monitoring.
             </p>
             <p style={{ fontSize: "12px", color: "var(--color-text-muted)", marginBottom: "20px", lineHeight: 1.5 }}>
               By continuing, you accept the{" "}
               <a href="/legal/subscription-agreement" target="_blank" style={{ color: "var(--color-text)" }}>
-                Growth Subscription Agreement ↗
+                Blocking Subscription Agreement ↗
               </a>.
             </p>
             <div style={{ display: "flex", gap: "8px", justifyContent: "flex-end" }}>
@@ -1038,6 +1347,11 @@ export default function SettingsPage() {
           title="S3 Log Ingestion"
           sub="Clew reads logs from your S3 bucket every 15 minutes. Configure the bucket and log format below."
         />
+        <p style={{ fontSize: "12px", marginBottom: "16px" }}>
+          <Link href="/docs#connecting-your-log-source" style={{ color: "var(--color-text-muted)" }}>
+            Full setup guide, including API Gateway and ALB logging, in the docs →
+          </Link>
+        </p>
 
         <form onSubmit={handleSave}>
 
@@ -1084,6 +1398,23 @@ export default function SettingsPage() {
                 <option key={r} value={r}>{r}</option>
               ))}
             </select>
+          </FieldRow>
+
+          <FieldRow label="Home country">
+            <select
+              value={homeCountry}
+              onChange={e => setHomeCountry(e.target.value)}
+              style={selectStyle}
+            >
+              <option value="">Not set</option>
+              {HOME_COUNTRIES.map(([code, name]) => (
+                <option key={code} value={code}>{name}</option>
+              ))}
+            </select>
+            <p style={{ fontSize: "11px", color: "var(--color-text-muted)", marginTop: "6px" }}>
+              Where your traffic normally comes from. Helps detection tell foreign
+              concentration apart from your own normal traffic.
+            </p>
           </FieldRow>
 
           {/* Item 16: S3 connection status badge */}
@@ -1180,23 +1511,37 @@ export default function SettingsPage() {
       {/* ------------------------------------------------------------------ */}
       <section style={{ marginBottom: "40px" }}>
         <SectionTitle
-          title="IAM Policy"
-          sub="Attach this policy to the AWS IAM user whose credentials your Celery worker uses."
+          title="AWS Access"
+          sub="Grant Clew read access to your S3 bucket via a cross-account IAM role. No access keys are ever shared."
         />
-        <IamPolicyGuide bucket={s3Bucket} />
+        <IamPolicyGuide
+          bucket={s3Bucket}
+          externalId={config?.aws_external_id ?? null}
+          clewAccountId={config?.clew_aws_account_id ?? ""}
+          roleArn={awsRoleArn}
+          setRoleArn={setAwsRoleArn}
+          onSaveRole={handleSaveAwsRole}
+          savingRole={savingRole}
+          roleTestResult={roleTestResult}
+        />
       </section>
 
       {/* ------------------------------------------------------------------ */}
-      {/* WAF Configuration (Growth+ only), items 22/23                       */}
+      {/* WAF Configuration (any MANUAL_BLOCK_TIERS org), items 22/23         */}
       {/* ------------------------------------------------------------------ */}
-      {config && (config.tier === "growth" || config.tier === "pro") && (
+      {config && MANUAL_BLOCK_TIERS.includes(config.tier) && (
       <section id="waf" style={{ marginBottom: "40px" }}>
         <SectionTitle
           title="WAF Configuration"
           sub="Push a block rule to your AWS WAF IP set when a high-confidence threat is detected."
         />
+        <p style={{ fontSize: "12px", marginBottom: "16px" }}>
+          <Link href="/docs#blocking-ips" style={{ color: "var(--color-text-muted)" }}>
+            How manual and automatic blocking work →
+          </Link>
+        </p>
         <form onSubmit={handleSaveWaf}>
-          <FieldRow label="WAF IP set ARN">
+          <FieldRow label="WAF IP set (name::id)">
             <input
               type="text"
               value={wafIpSetId}
@@ -1224,9 +1569,9 @@ export default function SettingsPage() {
       )}
 
       {/* ------------------------------------------------------------------ */}
-      {/* Cloudflare Configuration (Growth+ only), items 22/23                 */}
+      {/* Cloudflare Configuration (any MANUAL_BLOCK_TIERS org), items 22/23  */}
       {/* ------------------------------------------------------------------ */}
-      {config && (config.tier === "growth" || config.tier === "pro") && (
+      {config && MANUAL_BLOCK_TIERS.includes(config.tier) && (
       <section id="cloudflare" style={{ marginBottom: "40px" }}>
         <SectionTitle
           title="Cloudflare Configuration"
@@ -1269,15 +1614,15 @@ export default function SettingsPage() {
       </section>
       )}
 
-      {config && config.tier !== "growth" && config.tier !== "pro" && (
+      {config && !MANUAL_BLOCK_TIERS.includes(config.tier) && (
       <section style={{ marginBottom: "40px" }}>
         <SectionTitle
           title="Blocking Integrations"
-          sub="Automatically push block rules to your WAF or Cloudflare zone when a high-confidence threat is detected."
+          sub="Push block rules to your WAF or Cloudflare zone when a high-confidence threat is detected."
         />
         <div style={{ border: "1px solid var(--color-border)", padding: "20px", background: "var(--color-surface)" }}>
           <p style={{ fontSize: "13px", color: "var(--color-text-muted)" }}>
-            Available on Growth and Pro plans. Upgrade above to configure WAF and Cloudflare blocking.
+            Available on any paid plan. Upgrade above to configure WAF and Cloudflare blocking.
           </p>
         </div>
       </section>
@@ -1670,11 +2015,16 @@ export default function SettingsPage() {
       {/* ------------------------------------------------------------------ */}
       {/* Team Members (item 9)                                              */}
       {/* ------------------------------------------------------------------ */}
-      <section style={{ marginBottom: "40px" }}>
+      <section id="team" style={{ marginBottom: "40px" }}>
         <SectionTitle
           title="Team Members"
           sub="Invite teammates to your organisation. Owners can change roles or remove members."
         />
+        <p style={{ fontSize: "12px", marginBottom: "16px" }}>
+          <Link href="/docs#team-and-roles" style={{ color: "var(--color-text-muted)" }}>
+            What each role can do →
+          </Link>
+        </p>
         <TeamMembersSection myRole={config?.role ?? null} onOwnershipTransferred={loadConfig} />
       </section>
 

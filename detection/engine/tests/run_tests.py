@@ -147,6 +147,36 @@ def t_product_memory_persists_tz_and_robust_lock():
     redis_conn.delete(f"clew:ltm:{org_id}")
 test("ProductSharedMemory persists tz_history and robust_locked across Redis round-trip", t_product_memory_persists_tz_and_robust_lock)
 
+def t_product_memory_persists_knowledge_agent_state():
+    """Regression test for the same bug class as the test above, found in the
+    2026-09-30 audit: _knowledge_ip_history and _knowledge_known_bad were also
+    missing from _dump_ltm()/_load_ltm(), so per-customer IP reputation was
+    discarded at the end of every Celery task. Uses a second, fresh
+    ProductSharedMemory (not the same object) so this fails without the fix."""
+    import os
+    from engine.memory.product_memory import ProductSharedMemory
+    import redis as redis_lib
+
+    redis_conn = redis_lib.Redis.from_url(
+        os.environ.get("REDIS_URL", "redis://localhost:6379/0"), decode_responses=True
+    )
+    org_id = "test-product-memory-knowledge-roundtrip"
+    redis_conn.delete(f"clew:ltm:{org_id}")
+
+    mem1 = ProductSharedMemory(org_id=org_id, redis_client=redis_conn)
+    mem1.ltm._knowledge_ip_history = {"1.2.3.4": [{"ts": "2026-09-30T00:00:00+00:00", "outcome": True, "confidence": 0.9}]}
+    mem1.ltm._knowledge_known_bad = {"1.2.3.4", "5.6.7.8"}
+    mem1.flush()
+
+    mem2 = ProductSharedMemory(org_id=org_id, redis_client=redis_conn)
+    assert isinstance(mem2.ltm._knowledge_ip_history, dict)
+    assert mem2.ltm._knowledge_ip_history == {"1.2.3.4": [{"ts": "2026-09-30T00:00:00+00:00", "outcome": True, "confidence": 0.9}]}
+    assert isinstance(mem2.ltm._knowledge_known_bad, set)
+    assert mem2.ltm._knowledge_known_bad == {"1.2.3.4", "5.6.7.8"}
+
+    redis_conn.delete(f"clew:ltm:{org_id}")
+test("ProductSharedMemory persists KnowledgeAgent ip_history and known_bad across Redis round-trip", t_product_memory_persists_knowledge_agent_state)
+
 def t_board_post_read():
     mem,_ = fresh()
     mem.board.post(EvidenceEntry(posted_by="A", key="dos:x", value=1, confidence=0.9))

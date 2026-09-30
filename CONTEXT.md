@@ -46,40 +46,59 @@ blocked").
 
 ## Tiers and Pricing
 
-All prices are marked **EARLY ACCESS**, valid until 2027, and every tier
-starts with a no-card trial (7 days self-serve, 30 days with a valid promo
-code). Annual billing is 2 months free (about 17% off). Currency is
-auto-detected from the browser's timezone (India, Kolkata, gets INR;
-everywhere else gets USD), with a manual toggle on the pricing page.
+Rewritten 2026-09-20 after the tier-restructuring rollout (TODO.md sections 4
+and 5) shipped. Prices are marked **EARLY ACCESS**, valid until 2027. Annual
+billing is 2 months free (about 17% off). Currency is auto-detected from the
+browser's timezone (India, Kolkata, gets INR; everywhere else gets USD), with
+a manual toggle on the pricing page and in the dashboard's billing section.
 
-| Tier | Price | Blocking | History |
-|---|---|---|---|
-| Starter | $39 / Rs.2,999 per month | No | 90 days |
-| Growth | $69 / Rs.4,999 per month | WAF + Cloudflare | 1 year |
-| Pro | $129 / Rs.9,999 per month | WAF + Cloudflare, lower confidence threshold | 3 years |
-| Enterprise | Custom | WAF + Cloudflare + inline proxy (future) | Unlimited |
-| Clew Audit | $599 / Rs.49,999 one-time (early access) | n/a | n/a |
+| Tier | Marketing name | Internal tier code | Price | Blocking | Retention | Volume cap |
+|---|---|---|---|---|---|---|
+| Free | Starter | `free` | $0, no card, no trial, no expiry | None | 7 days | 2M calls/mo |
+| Basic | Basic | `starter` | $39 / Rs.2,999 per month | Manual only (dashboard button) | 30 days | 10M calls/mo |
+| Growth | Growth | `growth` | $69 / Rs.4,999 per month | Manual + automatic (WAF/Cloudflare) | 3 months | 50M calls/mo |
+| Pro | Pro | `pro` | $129 / Rs.9,999 per month | Manual + automatic | 1 year | 200M calls/mo |
+| Enterprise | Enterprise | `enterprise` | Custom | Manual + automatic + inline proxy (future) | Unlimited | Beyond 200M calls/mo, uncapped |
+| Clew Audit | n/a | n/a | $599 / Rs.49,999 one-time | n/a | n/a | n/a |
 
-Starter is the "does it work" tier: monitoring and email alerts only, no
-blocking. Growth and Pro add WAF/Cloudflare blocking, gated behind a one-time
-blocking Terms of Service acceptance since it's an active security action,
-not passive monitoring.
+The internal tier code intentionally still says `starter` for the Basic
+plan and reuses `free` for the permanent no-card plan: both predate the
+marketing rename, and keeping them unchanged avoided touching billing
+logic, Razorpay Plan ID env vars, and every tier-gated constant across the
+backend. Don't rename these strings without a real reason, `api/tiers.py`'s
+`MANUAL_BLOCK_TIERS`/`AUTO_BLOCK_TIERS`/`CALL_VOLUME_CAPS`/`RETENTION_DAYS`/
+`LTM_TTL_DAYS` and `billing.py`'s `_TIER_RANK` all key off these exact values.
 
-**Not everything in that table is real yet.** A landing-page and pricing
-audit (2026-09-02, tracked in `TODO.md`'s section 1) checked every advertised
-feature against the actual code and found several that are sold but not
-built: the History column (90 days / 1 year / 3 years / unlimited) has no
-purge or cutoff logic anywhere, every org keeps everything forever regardless
-of tier; Pro's "lower detection confidence threshold" and "custom thresholds"
-don't exist, nothing in the engine is tier-aware on confidence; Pro's
-"AI-generated threat explanations" are actually the same rule-based template
-string every tier gets, the engine's real LLM-fusion path is never wired into
-production (that's Groq integration, item 33, still post-MVP). None of the
-volume caps (10M / 50M / 200M calls/month) are enforced either, there is no
-usage metering at all yet (item 30). If you're using this file to reason
-about pricing or tier changes, read `TODO.md`'s section 1 alongside it,
-this file describes the architecture and history, not which marketing claims
-are currently true.
+Free (Starter) is what every self-serve signup lands on directly: no trial,
+no countdown, no card ever. The only way onto a paid tier as a trial is a
+promo code, which grants a 30-day trial of Growth (not an extended free
+tier, since the free tier never expires anyway). If that trial ends unpaid,
+the org reverts to free Starter and keeps scanning within the free cap,
+it is not a lockout.
+
+Basic is the "you can see it and act on it yourself" tier: monitoring,
+email alerts, and manual one-click blocking, but no unattended automatic
+blocking. Growth and Pro add automatic WAF/Cloudflare blocking on top of
+that, gated behind a one-time Blocking Subscription Agreement acceptance
+since it's an active security action, not passive monitoring. Growth also
+adds "Threat explanations" (the existing rule-based `Verdict.explanation`
+field, surfaced in the dashboard; real live LLM analysis is a separate,
+still-unbuilt item, see below).
+
+**What's real as of this rewrite, and what still isn't:** call-volume
+metering and tiered retention purge both actually run now (TODO.md section
+5), so the cap and retention columns above are enforced, not aspirational.
+Two gaps from the original 2026-09-02 audit are still open and unbuilt:
+Pro's "lower detection confidence threshold" and "custom thresholds" don't
+exist anywhere in the engine, nothing is tier-aware on confidence. "Threat
+explanations" is real as a feature gate, but the text itself is still the
+same rule-based template every tier always got, not a live LLM call, the
+engine's real LLM-fusion path (Groq, item 33) is still never wired into
+production. If you're using this file to reason about pricing or tier
+changes, read `TODO.md`'s section 1 alongside it for the current, code-
+verified state of every marketing claim, this file describes the
+architecture and history, not a live audit.
+
 
 ---
 

@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, IPvAnyAddress, field_validator
 from sqlalchemy import case
 from sqlalchemy.orm import Session
 
@@ -89,8 +89,21 @@ class VerdictDetailOut(VerdictOut):
 
 
 class ManualBlockBody(BaseModel):
-    ip:     str
+    ip:     IPvAnyAddress
     reason: Optional[str] = None
+
+    @field_validator("ip")
+    @classmethod
+    def reject_unsafe_ip(cls, v: IPvAnyAddress) -> IPvAnyAddress:
+        """Item 64: reject loopback/link-local/private/reserved ranges, e.g.
+        0.0.0.0 or 127.0.0.1, so a mistyped entry can't take the customer's
+        own API offline via a bogus WAF/Cloudflare block.
+        """
+        if v.is_loopback or v.is_link_local or v.is_private or v.is_reserved:
+            raise ValueError(
+                "IP must be a public address, not loopback, link-local, private, or reserved."
+            )
+        return v
 
 
 # ---------------------------------------------------------------------------
@@ -205,15 +218,17 @@ def manual_block_ip(
     list (labeled "Manual block") and the blocked IPs tab.
     """
     if current_org.organization.tier not in MANUAL_BLOCK_TIERS:
-        raise HTTPException(status_code=403, detail="Blocking requires Growth or Pro plan.")
+        raise HTTPException(status_code=403, detail="Blocking requires an active paid plan.")
     if current_org.organization.blocking_tos_accepted_at is None:
-        raise HTTPException(status_code=403, detail="Accept the Growth Subscription Agreement before blocking IPs.")
+        raise HTTPException(status_code=403, detail="Accept the Blocking Subscription Agreement before blocking IPs.")
+
+    ip_str = str(body.ip)
 
     v = Verdict(
         id=str(uuid.uuid4()),
         org_id=current_org.id,
         timestamp=datetime.now(timezone.utc),
-        ip=body.ip,
+        ip=ip_str,
         method=None,
         endpoint=None,
         threat_type="manual",
@@ -228,7 +243,7 @@ def manual_block_ip(
 
     ip_memory = (
         db.query(IpMemory)
-        .filter(IpMemory.org_id == current_org.id, IpMemory.ip == body.ip)
+        .filter(IpMemory.org_id == current_org.id, IpMemory.ip == ip_str)
         .first()
     )
     if ip_memory is None:
@@ -236,7 +251,7 @@ def manual_block_ip(
         db.add(IpMemory(
             id=str(uuid.uuid4()),
             org_id=current_org.id,
-            ip=body.ip,
+            ip=ip_str,
             first_seen=now,
             last_seen=now,
             total_requests=0,
@@ -266,9 +281,9 @@ def manual_block(
     if v is None:
         raise HTTPException(status_code=404, detail="Verdict not found")
     if current_org.organization.tier not in MANUAL_BLOCK_TIERS:
-        raise HTTPException(status_code=403, detail="Blocking requires Growth or Pro plan.")
+        raise HTTPException(status_code=403, detail="Blocking requires an active paid plan.")
     if current_org.organization.blocking_tos_accepted_at is None:
-        raise HTTPException(status_code=403, detail="Accept the Growth Subscription Agreement before blocking IPs.")
+        raise HTTPException(status_code=403, detail="Accept the Blocking Subscription Agreement before blocking IPs.")
     from workers.tasks.push_blocks import push_block
     push_block.delay(verdict_id, current_org.id)
     return v

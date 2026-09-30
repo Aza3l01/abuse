@@ -42,8 +42,8 @@ module.exports = {
       args: 'start --port 3000',
       env: {
         NODE_ENV: 'production',
-        NEXT_PUBLIC_API_URL: 'https://api.yourdomain.com',
-        NEXT_PUBLIC_SITE_URL: 'https://yourdomain.com',
+        NEXT_PUBLIC_API_URL: 'https://api.clewsec.com',
+        NEXT_PUBLIC_SITE_URL: 'https://clewsec.com',
       },
       autorestart: true,
       restart_delay: 5000,

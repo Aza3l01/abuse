@@ -20,6 +20,7 @@ from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
 from api.deps import CurrentOrg, get_current_org, get_db
+from api.tiers import CALL_VOLUME_CAPS
 from db.models import IpMemory, Verdict
 
 router = APIRouter()
@@ -73,6 +74,17 @@ class DashboardSummary(BaseModel):
     last_scan_completed_at: Optional[datetime]
     last_scan_status:       Optional[str]
     last_scan_error:        Optional[str]
+    # Item 30 (section 5): usage banner data. monthly_requests_cap is None
+    # for enterprise (no fixed cap), in which case the frontend never shows
+    # the banner regardless of monthly_requests_processed.
+    monthly_requests_processed: int
+    monthly_requests_cap:       Optional[int]
+    # Phase 4 (section 4c): guided onboarding state. Exposed here (not just
+    # /clients/me) because viewers can't call /clients/me at all (owner/admin
+    # only) but still need to know whether onboarding is pending, to show
+    # "your administrator is still setting this up" instead of a 403.
+    onboarding_completed_at:    Optional[datetime]
+    onboarding_dismissed_at:    Optional[datetime]
 
 
 # ---------------------------------------------------------------------------
@@ -249,4 +261,8 @@ def get_summary(
         last_scan_completed_at=org.last_scan_completed_at,
         last_scan_status=org.last_scan_status,
         last_scan_error=org.last_scan_error,
+        monthly_requests_processed=org.monthly_requests_processed or 0,
+        monthly_requests_cap=CALL_VOLUME_CAPS.get(org.tier),
+        onboarding_completed_at=org.onboarding_completed_at,
+        onboarding_dismissed_at=org.onboarding_dismissed_at,
     )

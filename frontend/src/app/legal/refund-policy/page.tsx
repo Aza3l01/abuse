@@ -11,9 +11,10 @@ export default function RefundPolicyPage() {
     <LegalLayout title="Refund Policy" lastUpdated="August 10, 2026">
       <h2 style={legalH2Style}>1. Cancelling before your first charge</h2>
       <p style={legalPStyle}>
-        You can cancel a trial at any time before it converts to a paid
-        subscription at no cost. No charge occurs, so there is nothing to
-        refund.
+        If you were onboarded with a promotional Growth trial, you can
+        cancel it at any time before it would convert to a paid subscription
+        at no cost: your account simply reverts to the free Starter plan.
+        No charge occurs, so there is nothing to refund.
       </p>
 
       <h2 style={legalH2Style}>2. First payment — 72-hour remorse window</h2>
@@ -36,7 +37,15 @@ export default function RefundPolicyPage() {
       <h2 style={legalH2Style}>4. How to cancel</h2>
       <p style={legalPStyle}>
         Cancel any time from your account settings, or by emailing{" "}
-        <a href="mailto:billing@clewsec.com" style={{ color: "var(--color-text)" }}>billing@clewsec.com</a>.
+        <a href="mailto:support@clewsec.com" style={{ color: "var(--color-text)" }}>support@clewsec.com</a>.
+      </p>
+
+      <h2 style={legalH2Style}>5. Legal entity</h2>
+      <p style={legalPStyle}>
+        This policy is issued by Clew Technologies Private Limited (CIN
+        U62090KL2026PTC104122), a private limited company incorporated in
+        India. Registered office: Idukki, Kerala, India; the full registered
+        address is available on request.
       </p>
     </LegalLayout>
   );

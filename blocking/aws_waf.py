@@ -22,8 +22,8 @@ logger = logging.getLogger(__name__)
 _SCOPE = "REGIONAL"
 
 
-def _client(region: str):
-    return boto3.client("wafv2", region_name=region)
+def _client(region: str, session: boto3.Session | None = None):
+    return (session or boto3).client("wafv2", region_name=region)
 
 
 def add_ip_to_set(
@@ -31,16 +31,20 @@ def add_ip_to_set(
     waf_ip_set_id: str,
     waf_ip_set_name: str,
     region: str,
+    session: boto3.Session | None = None,
 ) -> tuple[bool, str | None]:
     """
     Add a single IP (CIDR notation) to the WAF IP set.
 
     WAF requires CIDR — bare IPs are auto-suffixed with /32 (IPv4) or /128 (IPv6).
     Returns (True, None) on success, (False, error_message) on any error.
+
+    session: phase 2's cross-account boto3 Session (see api/aws.py), or the
+    shared fallback credential when not provided.
     """
     cidr = _to_cidr(ip)
     try:
-        waf = _client(region)
+        waf = _client(region, session)
         # Must read the current set first to get the lock token
         current = waf.get_ip_set(Name=waf_ip_set_name, Scope=_SCOPE, Id=waf_ip_set_id)
         addresses: list[str] = current["IPSet"]["Addresses"]
@@ -70,11 +74,12 @@ def remove_ip_from_set(
     waf_ip_set_id: str,
     waf_ip_set_name: str,
     region: str,
+    session: boto3.Session | None = None,
 ) -> tuple[bool, str | None]:
     """Remove a single IP from the WAF IP set. Returns (True, None) on success."""
     cidr = _to_cidr(ip)
     try:
-        waf = _client(region)
+        waf = _client(region, session)
         current = waf.get_ip_set(Name=waf_ip_set_name, Scope=_SCOPE, Id=waf_ip_set_id)
         addresses: list[str] = current["IPSet"]["Addresses"]
 

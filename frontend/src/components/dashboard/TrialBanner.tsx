@@ -11,9 +11,13 @@ interface BillingStatus {
 }
 
 /**
- * Item 11: persistent (non-dismissible) trial banner. Owner-only, since
- * GET /billing/status is owner-only (item 8: admin/viewer have no billing
- * visibility at all). Hidden once a payment method is on file.
+ * Item 53 (section 4): Growth-pilot-only now. Only an org onboarded with a
+ * promo code ever has trial_ends_at set (self-serve signups land directly
+ * on the free Starter tier, no trial at all), so this banner is naturally
+ * hidden for every org that never had one. Persistent (non-dismissible),
+ * owner-only, since GET /billing/status is owner-only (item 8: admin/viewer
+ * have no billing visibility at all). Hidden once a payment method is on
+ * file.
  */
 export function TrialBanner() {
   const [status, setStatus] = useState<BillingStatus | null>(null);
@@ -28,7 +32,6 @@ export function TrialBanner() {
   if (!status || !status.trial_ends_at) return null;
   if (status.billing_provider === "stripe" || status.billing_provider === "razorpay") return null;
 
-  const trialDaysTotal = status.trial_source === "manual_outreach" ? 30 : 7;
   const endsAt = new Date(status.trial_ends_at);
   const daysRemaining = Math.ceil((endsAt.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
   const expired = daysRemaining <= 0;
@@ -49,8 +52,8 @@ export function TrialBanner() {
     >
       <span>
         {expired
-          ? "Your trial has ended. Add a payment method to continue with Starter."
-          : `${trialDaysTotal}-day trial: ${daysRemaining} day${daysRemaining === 1 ? "" : "s"} remaining.`}
+          ? "Your Growth trial has ended. You've been moved to the free Starter plan, add a payment method to get Growth back."
+          : `Growth trial: ${daysRemaining} day${daysRemaining === 1 ? "" : "s"} remaining.`}
       </span>
       <Link
         href="/dashboard/settings#billing"

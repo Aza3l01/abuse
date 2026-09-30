@@ -33,7 +33,6 @@ import ipaddress
 import httpx
 import redis as redis_lib
 
-from sqlalchemy import and_, or_
 from sqlalchemy.exc import IntegrityError
 
 try:
@@ -55,7 +54,8 @@ for _p in [str(_REPO_ROOT), str(_ENGINE_ROOT)]:
 
 from db.models import AlertSent, IpMemory, Organization, ScanRun, Verdict
 from db.session import SessionLocal
-from api.tiers import AUTO_BLOCK_TIERS
+from api.aws import aws_session_for_org
+from api.tiers import AUTO_BLOCK_TIERS, CALL_VOLUME_CAPS, LLM_EXPLANATION_TIERS, LTM_TTL_DAYS
 
 from engine.ingestion.s3_reader import S3Reader
 from engine.ingestion.normalizer import chunk, group_by_ip, parse_lines
@@ -81,6 +81,37 @@ def _get_redis() -> redis_lib.Redis:
     if _redis_client is None:
         _redis_client = redis_lib.Redis.from_url(os.environ["REDIS_URL"], decode_responses=True)
     return _redis_client
+
+
+# Item 2's per-org lock TTL. Item 60 reuses this same value as the staleness
+# threshold for the in_progress sweep below, they represent the same "how
+# long can one scan run before something is wrong" budget and must stay in
+# sync if the lock TTL at the bottom of this module is ever changed.
+_LOCK_TTL_SECONDS = 1200
+
+
+def _sweep_stale_in_progress(org_id: str) -> None:
+    """Item 60: self-heal a scan that never reached its except/finally block
+    (worker OOM, PM2 restart, mid-scan deploy). Runs before the Redis lock is
+    acquired so a stuck row clears on the very next poll cycle instead of
+    showing "in progress" forever on the dashboard.
+    """
+    db = SessionLocal()
+    try:
+        org: Organization | None = db.query(Organization).filter(Organization.id == org_id).first()
+        if org is None or org.last_scan_status != "in_progress" or org.last_scan_started_at is None:
+            return
+        started_at = org.last_scan_started_at
+        if started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=timezone.utc)
+        age = datetime.now(timezone.utc) - started_at
+        if age > timedelta(seconds=_LOCK_TTL_SECONDS):
+            org.last_scan_status = "error"
+            org.last_scan_error = "Scan interrupted (worker did not complete within the expected window)."
+            db.commit()
+            logger.warning("process_logs: org %s stale in_progress scan swept to error", org_id)
+    finally:
+        db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -171,32 +202,28 @@ def _lookup_geo(ip: str) -> tuple[str | None, int | None, str | None]:
 def poll_all_clients() -> dict:
     """Dispatch one process_logs task per org with a configured S3 bucket.
 
-    Item 11: an org whose trial has ended with no payment method on file
-    (trial_ends_at in the past, billing_provider still pilot/null) is
-    skipped here — no new scans, but existing data/dashboard access is
-    untouched (that's an API-layer concern, not this dispatcher's).
+    Item 53 (section 4): there is no longer a "stop scanning" tier state.
+    Before this, an org whose Growth-pilot trial had ended unpaid was
+    excluded here entirely (trial_ends_at in the past, billing_provider
+    still pilot/null). Section 4 replaced that lockout with a revert to the
+    permanent free Starter tier (tier = "free"), which must keep scanning
+    within CALL_VOLUME_CAPS["free"] (enforced in-band by this task's own
+    metering, not by this dispatcher). A self-serve free-tier org never had
+    a trial_ends_at at all and was never excluded either way. So there is no
+    remaining trial/tier state that should skip a poll here, only s3
+    configuration and account deletion still do.
 
     Item 40: an org whose owner has deleted their account (deleted_at set)
     is skipped too, for the whole 30-day grace window before hard delete.
     """
     db = SessionLocal()
     try:
-        now = datetime.now(timezone.utc)
-        expired_unpaid = and_(
-            Organization.trial_ends_at.isnot(None),
-            Organization.trial_ends_at < now,
-            or_(
-                Organization.billing_provider.is_(None),
-                Organization.billing_provider == "pilot",
-            ),
-        )
         orgs = (
             db.query(Organization)
             .filter(
                 Organization.s3_bucket.isnot(None),
                 Organization.log_format.isnot(None),
                 Organization.deleted_at.is_(None),
-                ~expired_unpaid,
             )
             .all()
         )
@@ -242,9 +269,13 @@ def process_logs(self, org_id: str) -> dict:
     before a large first-connection backlog finishes doesn't double-process
     the same S3 objects from a second worker.
     """
+    # Item 60: sweep this org's own row for a stale in_progress status before
+    # even attempting the lock.
+    _sweep_stale_in_progress(org_id)
+
     redis_conn = _get_redis()
     lock_key = f"clew:lock:process:{org_id}"
-    if not redis_conn.set(lock_key, 1, ex=1200, nx=True):
+    if not redis_conn.set(lock_key, 1, ex=_LOCK_TTL_SECONDS, nx=True):
         logger.info("process_logs: org %s already running — skipping", org_id)
         return {"status": "skipped", "reason": "already_running"}
 
@@ -261,7 +292,10 @@ def process_logs(self, org_id: str) -> dict:
 
         # Item 17: this is the primary "Clew is running" trust signal, set
         # in_progress before any work starts, success/error on every exit path.
+        # Item 60: last_scan_started_at is what the next poll's stale sweep
+        # measures staleness against.
         org.last_scan_status = "in_progress"
+        org.last_scan_started_at = datetime.now(timezone.utc)
         db.commit()
 
         # ------------------------------------------------------------------
@@ -273,6 +307,7 @@ def process_logs(self, org_id: str) -> dict:
             prefix=org.s3_prefix or "",
             aws_region=org.aws_region or "us-east-1",
             last_processed_key=org.last_processed_key,
+            session=aws_session_for_org(org),
         )
         is_first_connection = org.last_processed_key is None
         if is_first_connection:
@@ -332,13 +367,21 @@ def process_logs(self, org_id: str) -> dict:
             _mark_scan_success(db, org)
             return {"status": "ok", "records": len(lines), "verdicts": 0, "note": "all_unparseable"}
 
+        total_records = sum(len(b) for b in batches)
+        ltm_ttl_seconds = _ltm_ttl_seconds_for_tier(org.tier)
+        enable_llm_explanations = _enable_llm_explanations_for_tier(org.tier)
+
         # ------------------------------------------------------------------
         # 5. Pass A — mixed-IP window batches (unchanged semantics, writes LTM)
         # ------------------------------------------------------------------
         verdicts_written: list[str] = []
 
         for batch in batches:
-            verdict_dict = run_pipeline(batch, org_id, redis_conn, home_country=org.home_country or "")
+            verdict_dict = run_pipeline(
+                batch, org_id, redis_conn,
+                home_country=org.home_country or "", ltm_ttl_seconds=ltm_ttl_seconds,
+                enable_llm_explanations=enable_llm_explanations,
+            )
 
             # Item 5e: only actual detections go into `verdicts`. Clean
             # batches write a ScanRun row instead (the "we scanned and found
@@ -364,12 +407,21 @@ def process_logs(self, org_id: str) -> dict:
         for ip, ip_records in group_by_ip(records, min_requests=20).items():
             focus_verdict = run_pipeline(
                 ip_records, org_id, redis_conn,
-                home_country=org.home_country or "", mode="focus",
+                home_country=org.home_country or "", mode="focus", ltm_ttl_seconds=ltm_ttl_seconds,
+                enable_llm_explanations=enable_llm_explanations,
             )
             if focus_verdict.get("is_attack"):
                 verdict_id = _persist_verdict(db, org_id, ip_records, focus_verdict)
                 if verdict_id is not None:
                     verdicts_written.append(verdict_id)
+
+        # Item 30: meter call volume in the same transaction as the scan's
+        # other writes below, so a rolled-back poll never inflates the
+        # counter. Counts every parsed record, including ones whose verdict
+        # was skipped as a source_key duplicate (item 3), since the
+        # customer's API still served that traffic either way.
+        org.monthly_requests_processed = (org.monthly_requests_processed or 0) + total_records
+        _check_quota_thresholds(org)
 
         # Commit everything before advancing the S3 cursor
         db.commit()
@@ -398,7 +450,6 @@ def process_logs(self, org_id: str) -> dict:
                 from workers.tasks.push_blocks import push_block
                 push_block.delay(verdict_id, org_id)
 
-        total_records = sum(len(b) for b in batches)
         logger.info(
             "process_logs: org=%s records=%d batches=%d verdicts=%d",
             org_id, total_records, len(batches), len(verdicts_written),
@@ -476,6 +527,7 @@ def calibrate_client(self, org_id: str) -> dict:
             bucket=org.s3_bucket,
             prefix=org.s3_prefix or "",
             aws_region=org.aws_region or "us-east-1",
+            session=aws_session_for_org(org),
         )
         cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
         objects = reader.list_objects_since(cutoff)
@@ -491,11 +543,16 @@ def calibrate_client(self, org_id: str) -> dict:
         batches = chunk(records)
 
         redis_conn = _get_redis()
+        ltm_ttl_seconds = _ltm_ttl_seconds_for_tier(org.tier)
         for batch in batches:
             # Window mode writes LTM exactly like Pass A does; the verdict
             # dict is discarded on purpose — no _persist_verdict/_persist_scan_run/
             # _upsert_ip_memory calls, and last_processed_key is never touched.
-            run_pipeline(batch, org_id, redis_conn, home_country=org.home_country or "")
+            # enable_llm_explanations is deliberately False here: this pass
+            # only warms thresholds, it never produces a customer-facing
+            # verdict, so calling an LLM across a 7-day backfill would be
+            # slow and expensive for no visible benefit.
+            run_pipeline(batch, org_id, redis_conn, home_country=org.home_country or "", ltm_ttl_seconds=ltm_ttl_seconds, enable_llm_explanations=False)
 
         org.calibration_status = "done"
         db.commit()
@@ -774,6 +831,49 @@ def _update_last_key(db, org: Organization, new_last_key: str | None) -> None:
     if new_last_key:
         org.last_processed_key = new_last_key
         db.commit()
+
+
+def _ltm_ttl_seconds_for_tier(tier: str) -> int | None:
+    """Item 30's ProductSharedMemory decision: free-tier orgs get their
+    learned calibration memory capped at 7 days (LTM_TTL_DAYS in
+    api/tiers.py) instead of the engine's normal 30-day default. Returns
+    None for every other tier, which run_pipeline treats as "use the
+    engine's own default, don't override it."
+    """
+    days = LTM_TTL_DAYS.get(tier)
+    return days * 86400 if days is not None else None
+
+
+def _enable_llm_explanations_for_tier(tier: str) -> bool:
+    """Phase 3/item 33: only Growth and above get a real Groq-generated
+    explanation (matches LLM_EXPLANATION_TIERS/FEATURE_ROWS/the verdict
+    detail page's gate). run_pipeline itself still no-ops this to False
+    if GROQ_API_KEY isn't set, this is just the tier-eligibility half.
+    """
+    return tier in LLM_EXPLANATION_TIERS
+
+
+def _check_quota_thresholds(org: Organization) -> None:
+    """Item 30 soft limits: never hard-cut a security tool, only warn.
+    80% of the tier's monthly call-volume cap sends one amber-banner email,
+    100% sends one red-banner email, both idempotent per billing month via
+    quota_warning_sent_at/quota_exceeded_sent_at (cleared monthly by
+    reset_monthly_counters). Scanning is never paused by this check.
+    """
+    cap = CALL_VOLUME_CAPS.get(org.tier)
+    if not cap:
+        return  # enterprise or an unrecognised tier: no fixed cap to warn against
+    used = org.monthly_requests_processed or 0
+    if used >= cap and org.quota_exceeded_sent_at is None:
+        org.quota_exceeded_sent_at = datetime.now(timezone.utc)
+        if org.alert_email:
+            from workers.tasks.send_alerts import send_quota_warning_email
+            send_quota_warning_email.delay(org.id, "exceeded")
+    elif used >= cap * 0.8 and org.quota_warning_sent_at is None:
+        org.quota_warning_sent_at = datetime.now(timezone.utc)
+        if org.alert_email:
+            from workers.tasks.send_alerts import send_quota_warning_email
+            send_quota_warning_email.delay(org.id, "warning")
 
 
 def _mark_scan_success(db, org: Organization) -> None:

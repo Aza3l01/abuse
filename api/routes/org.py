@@ -18,11 +18,10 @@ POST   /org/members/{member_id}/transfer-ownership : hand ownership to an
 GET    /org/invite/{token}           — public: validate an invite token
 POST   /org/invite/{token}/accept    — public: accept an invite
 """
-from __future__ import annotations
-
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Literal, Optional
 
 import redis as redis_lib
@@ -34,7 +33,7 @@ from api.auth_utils import hash_password, hash_token, send_org_invite_email
 from api.deps import CurrentOrg, get_current_client, get_current_org, get_db, require_role
 from api.limiter import limiter
 from api.routes.auth import _issue_tokens
-from db.models import Client, Organization, OrganizationMember, OrgInvite
+from db.models import Client, Organization, OrganizationMember, OrgInvite, PromoCode
 
 router = APIRouter(tags=["org"])
 
@@ -46,20 +45,142 @@ _INVITE_EXPIRE_DAYS = 7
 _ROLES = {"owner", "admin", "viewer"}
 _INVITABLE_ROLES = {"admin", "viewer"}  # owner is never assigned via invite
 
+try:
+    import maxminddb as _maxminddb
+    _MAXMIND_AVAILABLE = True
+except ImportError:
+    _MAXMIND_AVAILABLE = False
+
+_GEOIP_CITY_PATH = os.environ.get(
+    "GEOIP_MMDB_PATH",
+    str(Path(__file__).resolve().parent.parent.parent / "detection" / "datasets" / "GeoLite2-City.mmdb"),
+)
+_geoip_reader = None
+
 
 def _email_domain(email: str) -> str:
     return email.rsplit("@", 1)[-1].lower()
 
 
+def _geolocate_country(ip: Optional[str]) -> Optional[str]:
+    """Best-effort ISO 3166-1 alpha-2 country for a signup's remote IP.
+    Not currently used to default Organization.home_country (left None
+    until the client sets it in Settings); kept available for other
+    potential uses. Never raises, returns None on any failure (missing IP,
+    no maxminddb, no .mmdb file, bad IP).
+    """
+    if not ip or not _MAXMIND_AVAILABLE:
+        return None
+    global _geoip_reader
+    if _geoip_reader is None:
+        if not os.path.exists(_GEOIP_CITY_PATH):
+            return None
+        try:
+            _geoip_reader = _maxminddb.open_database(_GEOIP_CITY_PATH)
+        except Exception:
+            return None
+    try:
+        record = _geoip_reader.get(ip)
+        if record and "country" in record:
+            return record["country"].get("iso_code")
+    except Exception:
+        pass
+    return None
+
+
 # ---------------------------------------------------------------------------
-# POST /org — create an organisation for the current client and become owner
+# create_organization: item 63's one place a new Organization + owner
+# OrganizationMember row gets created. Used by both POST /auth/register and
+# POST /org below so trial dates, tier, and the owner row are always set
+# identically. POST /org previously hardcoded tier="free" with no trial
+# columns at all, diverging from registration's real trial setup.
+# ---------------------------------------------------------------------------
+
+def create_organization(
+    db: Session,
+    company_name: str,
+    owner_client: Client,
+    promo_code: Optional[str] = None,
+    remote_ip: Optional[str] = None,
+) -> Organization:
+    """Create an Organization + owner OrganizationMember row. Caller commits.
+
+    Item 53 (section 4): self-serve signup (no promo code) lands directly on
+    the permanent free Starter tier, no trial, no expiry, no card ever. A
+    promo code instead grants a 30-day trial of Growth tier (full blocking),
+    the founder's manual-outreach pilot mechanism. Item 26/27: pilot codes
+    are validated against the promo_codes table (exists AND unredeemed) and
+    marked redeemed here, in the same transaction that creates the
+    Organization.
+
+    remote_ip: currently unused (home_country is left None at creation and
+    filled in by the client in Settings), kept as a parameter in case a
+    future default is reintroduced.
+    """
+    company_name = company_name.strip()
+    if not company_name:
+        raise HTTPException(status_code=422, detail="Company name is required.")
+
+    now = datetime.now(timezone.utc)
+    pilot_code = promo_code.strip().upper() if promo_code else None
+    promo: Optional[PromoCode] = None
+    if pilot_code:
+        promo = (
+            db.query(PromoCode)
+            .filter(PromoCode.code == pilot_code, PromoCode.redeemed_at.is_(None))
+            .first()
+        )
+        if promo is None:
+            raise HTTPException(status_code=400, detail="This promo code is no longer available.")
+        tier = "growth"
+        trial_source = "manual_outreach"
+        trial_ends_at = now + timedelta(days=30)
+        billing_provider = "pilot"
+    else:
+        # Item 53: no trial at all for self-serve, the free Starter tier
+        # never expires so there is nothing to count down.
+        tier = "free"
+        trial_source = None
+        trial_ends_at = None
+        billing_provider = None
+
+    org = Organization(
+        company_name=company_name,
+        domain=_email_domain(owner_client.email),
+        tier=tier,
+        trial_source=trial_source,
+        trial_ends_at=trial_ends_at,
+        pilot_code_used=pilot_code,
+        billing_provider=billing_provider,
+        # No default: left None until the client sets it in Settings
+        # (a geolocation-based guess previously pre-filled this, which
+        # silently marked the onboarding "set your home country" step done
+        # before the user ever touched it).
+        home_country=_geolocate_country(remote_ip),
+        # Phase 2: every org gets its own External ID from the moment it
+        # exists, including orgs that never configure S3/AWS at all, so the
+        # value is stable and can be shown in Settings immediately, never
+        # generated lazily and never chosen by the customer.
+        aws_external_id=secrets.token_urlsafe(32),
+    )
+    db.add(org)
+    db.flush()  # populate org.id without committing yet
+    if promo is not None:
+        promo.redeemed_at = now
+        promo.redeemed_by_org_id = org.id
+    db.add(OrganizationMember(client_id=owner_client.id, org_id=org.id, role="owner"))
+    return org
+
+
+# ---------------------------------------------------------------------------
+# POST /org: create an organisation for the current client and become owner
 #
-# Registration only creates the login (Client); no org exists yet. The
-# dashboard checks GET /auth/me's `orgs` list and, if empty, prompts for a
-# company name and calls this endpoint. Also doubles as the mechanism for a
-# client to create an additional org later (self-serve "+ New organisation",
-# cut to post-MVP for the UI — the endpoint itself costs nothing extra to
-# leave general-purpose).
+# Registration (POST /auth/register) creates Client + Organization together
+# atomically via create_organization() above. This route uses the same
+# helper, so it exists to create an *additional* org for an already-logged-in
+# client (self-serve "+ New organisation", cut to post-MVP for the UI, the
+# endpoint itself costs nothing extra to leave general-purpose) rather than
+# as a first-run fallback.
 # ---------------------------------------------------------------------------
 
 class CreateOrgBody(BaseModel):
@@ -75,18 +196,8 @@ async def create_org(
     client: Client = Depends(get_current_client),
     db: Session = Depends(get_db),
 ):
-    company_name = body.company_name.strip()
-    if not company_name:
-        raise HTTPException(status_code=422, detail="Company name is required.")
-
-    org = Organization(
-        company_name=company_name,
-        domain=_email_domain(client.email),
-        tier="free",
-    )
-    db.add(org)
-    db.flush()  # populate org.id without committing yet
-    db.add(OrganizationMember(client_id=client.id, org_id=org.id, role="owner"))
+    remote_ip = request.client.host if request.client else None
+    org = create_organization(db, body.company_name, client, remote_ip=remote_ip)
     db.commit()
 
     # Select the new org immediately so the client doesn't land on a

@@ -26,6 +26,7 @@ Usage:
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from collections import Counter
 from datetime import datetime, timezone
@@ -40,9 +41,33 @@ if str(_ENGINE_ROOT) not in sys.path:
 
 from engine.coordinator.meta_agent import MetaAgentOrchestrator
 from engine.memory.product_memory import ProductSharedMemory
-from schemas.models import FusionVerdict, LogRecord
+from schemas.models import FusionVerdict, LogRecord, ThreatType
 
 logger = logging.getLogger(__name__)
+
+# Phase 3 (legacy item 33): read at call time, not import time, so tests that
+# monkeypatch os.environ don't need to reimport this module.
+_LLM_CALL_TIMEOUT_SECONDS = 10.0
+
+
+def _build_llm_client():
+    """Construct an LLMClient from env vars, or None if not configured/available.
+
+    The engine itself must not import api.tiers or know about tiers at all
+    (the caller decides enable_llm_explanations). This only decides whether
+    a GROQ_API_KEY is present to actually build a client with.
+    """
+    api_key = os.environ.get("GROQ_API_KEY", "")
+    if not api_key:
+        return None
+    base_url = os.environ.get("LLM_BASE_URL", "https://api.groq.com/openai/v1")
+    model = os.environ.get("LLM_MODEL", "llama-3.3-70b-versatile")
+    try:
+        from engine.llm.client import LLMClient
+        return LLMClient(base_url=base_url, model=model, api_key=api_key, timeout=_LLM_CALL_TIMEOUT_SECONDS)
+    except Exception:
+        logger.warning("run_pipeline: failed to construct LLMClient, falling back to rule-based explanations", exc_info=True)
+        return None
 
 # Severity bands mapped from confidence score.
 # These feed the `verdicts.severity` column used by the dashboard.
@@ -52,6 +77,26 @@ _SEVERITY_BANDS = [
     (0.40, "medium"),
     (0.00, "low"),
 ]
+
+# Cost-prevented estimate, in USD per malicious request in the batch. Mirrors
+# the same base rates `frontend/src/components/home/CostCalculator.tsx` already
+# publishes on the landing page (INR figures there, converted here at the same
+# ~84 rate that component uses), so the dashboard number and the marketing
+# estimate share one set of assumptions instead of two unrelated guesses.
+# Still a rough estimate, not a guarantee.
+_INFRA_COST_PER_REQUEST_USD = 0.9 / 84    # bot/DoS/scan/enumeration traffic
+_ATO_SUCCESS_RATE = 0.003                 # fraction of credential-stuffing/brute-force attempts that would have succeeded
+_ATO_COST_USD = 8_000 / 84                # average cost of one successful account takeover
+_ATO_THREAT_TYPES = frozenset({ThreatType.CREDENTIAL_STUFFING, ThreatType.BRUTE_FORCE})
+
+
+def _estimate_cost_prevented(threat_type: ThreatType, batch_size: int, confidence: float) -> float:
+    """Rough USD estimate of the cost this verdict's detection avoided."""
+    if threat_type in _ATO_THREAT_TYPES:
+        raw = batch_size * _ATO_SUCCESS_RATE * _ATO_COST_USD
+    else:
+        raw = batch_size * _INFRA_COST_PER_REQUEST_USD
+    return round(raw * confidence, 2)
 
 
 def _severity(confidence: float) -> str:
@@ -97,6 +142,8 @@ def run_pipeline(
     redis_client: Optional[Any] = None,
     home_country: str = "",
     mode: str = "window",
+    ltm_ttl_seconds: Optional[int] = None,
+    enable_llm_explanations: bool = False,
 ) -> dict:
     """
     Run the detection engine on a batch of normalised log dicts.
@@ -112,6 +159,15 @@ def run_pipeline(
         mode:         "window" (default, Pass A — mixed-IP batches) or "focus"
                       (item 1's Pass B — a single-IP group). Forwarded to
                       MetaAgentOrchestrator.run().
+        ltm_ttl_seconds: Item 30/section 5's per-tier override for how long the
+                      Redis LTM snapshot survives (ProductSharedMemory's normal
+                      default otherwise). None (default) leaves the engine's
+                      own default untouched.
+        enable_llm_explanations: Phase 3/item 33. Decided by the caller from the
+                      org's tier (this module must not import api.tiers). When
+                      True and GROQ_API_KEY is set, a real LLMClient is built and
+                      wired into the orchestrator, which fails soft to the
+                      rule-based explanation on any LLM error or missing key.
 
     Returns:
         A dict ready to be inserted into the `verdicts` Postgres table.
@@ -128,10 +184,14 @@ def run_pipeline(
         if not lr.org_id:
             lr.org_id = org_id
 
-    memory = ProductSharedMemory(org_id=org_id, redis_client=redis_client)
+    memory_kwargs: dict[str, Any] = {"org_id": org_id, "redis_client": redis_client}
+    if ltm_ttl_seconds is not None:
+        memory_kwargs["ttl_seconds"] = ltm_ttl_seconds
+    memory = ProductSharedMemory(**memory_kwargs)
     if home_country:
         memory.ltm._tenant_home_country = home_country
-    orchestrator = MetaAgentOrchestrator(memory)
+    llm_client = _build_llm_client() if enable_llm_explanations else None
+    orchestrator = MetaAgentOrchestrator(memory, llm_client=llm_client)
 
     verdict: FusionVerdict = orchestrator.run(log_records, mode=mode)
 
@@ -185,7 +245,10 @@ def run_pipeline(
         "agent_scores": agent_scores,
         "explanation": verdict.explanation,
         "blocked": False,          # blocking integrations added in Phase 7
-        "cost_prevented": 0.0,     # cost model added in Phase 6
+        "cost_prevented": (
+            _estimate_cost_prevented(verdict.threat_type, len(log_records), verdict.confidence_score)
+            if verdict.is_attack else 0.0
+        ),
         "timestamp": verdict.timestamp.isoformat(),
         "is_attack": verdict.is_attack,
     }

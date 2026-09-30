@@ -16,7 +16,8 @@ Shared (item 29b):
   POST /billing/cancel             → cancel, refunding only within the 72hr remorse window
 
 Tier lifecycle (sole source of truth is this file + the two webhooks):
-  signup                                    → tier = "starter" (trial, see item 11)
+  self-serve signup (no promo code)                 → tier = "free" (permanent, see item 53/section 4)
+  signup with a promo code                          → tier = "growth" (30-day trial, see item 53/section 4)
   checkout.session.completed (Stripe)       → tier = <purchased tier>
   razorpay verify-payment / subscription.activated → tier = <purchased tier>
   customer.subscription.updated/deleted (non-active) → tier = "free"
@@ -30,17 +31,20 @@ import hmac
 import json
 import logging
 import os
+import re
 from datetime import datetime, timedelta, timezone
 
 import razorpay
 import stripe
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from api.auth_utils import send_payment_failed_email
 from api.deps import CurrentOrg, get_current_client, get_current_org, get_db, require_role
-from db.models import Client, Organization, OrganizationMember
+from api.tiers import MANUAL_BLOCK_TIERS
+from db.models import Client, Organization, OrganizationMember, ProcessedWebhookEvent
 from db.session import SessionLocal
 
 logger = logging.getLogger(__name__)
@@ -223,7 +227,18 @@ async def stripe_webhook(request: Request):
 
     db: Session = SessionLocal()
     try:
+        # Item 62: insert-before-dispatch idempotency guard. A verified
+        # payload can still be replayed, and Stripe itself retries on a
+        # non-2xx response, so re-applying the same event's side effects
+        # (tier change, etc.) more than once is a real risk without this.
+        if not _record_webhook_event(db, "stripe", event.get("id", "")):
+            logger.info("stripe_webhook: duplicate event %s, skipping", event.get("id"))
+            return Response(status_code=200)
         _handle_event(event, db)
+        # Belt-and-suspenders: some event branches take no DB-writing action
+        # of their own (no internal db.commit()), commit here too so the
+        # processed-event row above is never silently rolled back on close.
+        db.commit()
     except Exception:
         db.rollback()
         logger.exception("stripe_webhook: error processing event %s", event.get("type"))
@@ -237,6 +252,32 @@ async def stripe_webhook(request: Request):
 # ---------------------------------------------------------------------------
 # Webhook event handler
 # ---------------------------------------------------------------------------
+
+def _record_webhook_event(db: Session, provider: str, event_id: str) -> bool:
+    """Item 62: replay/idempotency guard, insert-before-dispatch. Returns True
+    if this event has not been processed before (caller should proceed to
+    dispatch its side effects), False if it is a replay (caller should
+    return 200 without re-applying anything). A verified payload can still
+    be replayed verbatim, and both Razorpay and Stripe retry on a non-2xx
+    response, so signature verification alone does not prevent double
+    application of a tier change or other side effect.
+
+    Uses the same db session/transaction the caller's _handle*_event will
+    commit, so the inserted row and that event's side effects land together.
+    """
+    if not event_id:
+        # No id to dedupe on: log and let it through rather than silently
+        # dropping a potentially-real event with a missing identifier.
+        logger.warning("%s webhook: event with no id, cannot dedupe", provider)
+        return True
+    try:
+        db.add(ProcessedWebhookEvent(provider=provider, event_id=event_id))
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        return False
+    return True
+
 
 def _handle_event(event: dict, db: Session) -> None:
     etype = event["type"]
@@ -342,16 +383,29 @@ def _owner_emails(db: Session, org_id: str) -> list[str]:
     return [r[0] for r in rows]
 
 
-def _next_calendar_anchor_start_at(now: datetime) -> int | None:
-    """Item 29b: added on/before the 15th: charge immediately (None). Added
-    after the 15th: defer to the 1st of next calendar month, 00:00 UTC."""
-    if now.day <= 15:
-        return None
+def _first_of_next_month_ts(now: datetime) -> int:
+    """The 1st of next calendar month, 00:00 UTC, as a Unix timestamp."""
     if now.month == 12:
         next_month_start = now.replace(year=now.year + 1, month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
     else:
         next_month_start = now.replace(month=now.month + 1, day=1, hour=0, minute=0, second=0, microsecond=0)
     return int(next_month_start.timestamp())
+
+
+def _next_calendar_anchor_start_at(now: datetime) -> int | None:
+    """Item 29b, generalised by item 53/section 4 to every tier change, not
+    just the first-ever subscription: added on/before the 15th, charge
+    immediately (None). Added after the 15th, defer to the 1st of next
+    calendar month, 00:00 UTC."""
+    if now.day <= 15:
+        return None
+    return _first_of_next_month_ts(now)
+
+
+def _plan_amount_paise(rp: "razorpay.Client", plan_id: str) -> int:
+    """Fetch a Razorpay Plan's per-cycle amount in paise."""
+    plan = rp.plan.fetch(plan_id)
+    return int((plan.get("item") or {}).get("amount", 0))
 
 
 def _payment_method_display(payment: dict) -> str | None:
@@ -383,6 +437,11 @@ def _refund_eligibility(org: Organization) -> tuple[bool, str, datetime | None]:
 # POST /billing/razorpay/create-subscription
 # ---------------------------------------------------------------------------
 
+# Item 6e: two digits (state code), ten characters (PAN), one character
+# (entity number), the letter Z, one character (checksum).
+_GSTIN_RE = re.compile(r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$")
+
+
 class RazorpaySubscriptionBody(BaseModel):
     tier: str      # "starter" | "growth" | "pro"
     period: str    # "monthly" | "annual"
@@ -392,6 +451,14 @@ class RazorpaySubscriptionBody(BaseModel):
 class RazorpaySubscriptionOut(BaseModel):
     subscription_id: str
     key_id: str
+    # Item 53 (section 4): only set for a paid-to-paid upgrade on/before the
+    # 15th of the month, when a one-time Orders API charge for the price
+    # difference is needed alongside the subscription swap. The frontend
+    # must collect this payment (Razorpay Checkout in order mode) and post
+    # it to /billing/razorpay/verify-upgrade-order before finishing the
+    # subscription checkout below.
+    upgrade_order_id: str | None = None
+    upgrade_order_amount: int | None = None
 
 
 @router.post("/razorpay/create-subscription", response_model=RazorpaySubscriptionOut)
@@ -412,46 +479,100 @@ def razorpay_create_subscription(
     if period not in ("monthly", "annual"):
         raise HTTPException(400, f"Unknown period: {body.period}")
 
-    # Item 28: Growth requires the blocking TOS to already be accepted:
-    # the frontend shows the modal and posts acceptance before calling here.
-    if tier == "growth" and org.blocking_tos_accepted_at is None:
-        raise HTTPException(403, "Accept the Growth Subscription Agreement before continuing.")
+    # Item 6e: validate before anything else needs Razorpay configured, so a
+    # malformed GSTIN always gets a clean 400 rather than a 503 from
+    # _init_razorpay() below on a server where Razorpay isn't set up yet.
+    if body.gstin:
+        gstin = body.gstin.strip().upper()
+        if not _GSTIN_RE.match(gstin):
+            raise HTTPException(400, "That doesn't look like a valid GSTIN. It should be 15 characters: state code, PAN, entity number, Z, and a checksum character.")
+        org.gstin = gstin
+
+    # Item 28/69: any tier that can manually block requires the Blocking
+    # Subscription Agreement accepted first, the frontend shows the modal
+    # and posts acceptance before calling here.
+    if tier in MANUAL_BLOCK_TIERS and org.blocking_tos_accepted_at is None:
+        raise HTTPException(403, "Accept the Blocking Subscription Agreement before continuing.")
 
     rp = _init_razorpay()
     plan_id = _razorpay_plan_id(tier, period)
 
-    is_first_payment_method = (
-        org.razorpay_subscription_id is None and org.billing_provider in (None, "pilot")
-    )
-
     old_sub_id = org.razorpay_subscription_id
-    if is_first_payment_method:
-        start_at = _next_calendar_anchor_start_at(datetime.now(timezone.utc))
+    old_sub: dict = {}
+    if old_sub_id:
+        try:
+            old_sub = rp.subscription.fetch(old_sub_id)
+        except Exception:
+            logger.exception("billing: failed to fetch old Razorpay subscription %s", old_sub_id)
+            old_sub = {}
+
+    # Item 53 (section 4): no existing real Razorpay subscription (whether
+    # the org is on free or on a Growth-pilot trial with no real subscription
+    # of its own yet) always counts as an upgrade for anchor purposes, there
+    # is nothing to prorate against. Otherwise, a real tier-rank comparison.
+    is_upgrade = old_sub_id is None or _TIER_RANK.get(tier, 0) > _TIER_RANK.get(org.tier, 0)
+
+    start_at: int | None = None
+    upgrade_order: dict | None = None
+
+    if is_upgrade:
+        # Access always applies immediately once verify-payment runs below,
+        # regardless of the day of month. Only payment timing is affected by
+        # the anchor: reuses item 29b's exact day<=15-vs->15 mechanism now
+        # for every tier change, not only the first-ever subscription.
+        anchor_start_at = _next_calendar_anchor_start_at(datetime.now(timezone.utc))
+        if old_sub_id:
+            # New plan swaps in immediately, old one cancelled outright (no
+            # refund on the old cycle, matches today's behavior).
+            try:
+                rp.subscription.cancel(old_sub_id, {"cancel_at_cycle_end": 0})
+            except Exception:
+                logger.exception("billing: failed to cancel old Razorpay subscription %s", old_sub_id)
+
+        if anchor_start_at is None and old_sub_id:
+            # On/before the 15th, upgrading from an existing paid tier: charge
+            # only the price difference right now via a one-time Orders API
+            # charge, and defer the new subscription's own first invoice to
+            # the 1st of next month so the customer is never charged the new
+            # tier's full price twice inside one cycle.
+            try:
+                old_amount = _plan_amount_paise(rp, old_sub["plan_id"]) if old_sub.get("plan_id") else 0
+                new_amount = _plan_amount_paise(rp, plan_id)
+                delta = new_amount - old_amount
+                if delta > 0:
+                    order = rp.order.create({
+                        "amount": delta,
+                        "currency": "INR",
+                        "notes": {
+                            "clew_org_id": org.id,
+                            "kind": "tier_upgrade_delta",
+                            "from_tier": org.tier,
+                            "to_tier": tier,
+                        },
+                    })
+                    upgrade_order = {"id": order["id"], "amount": delta}
+            except Exception:
+                logger.exception("billing: failed to create upgrade delta order for org %s", org.id)
+            start_at = _first_of_next_month_ts(datetime.now(timezone.utc))
+        elif anchor_start_at is not None:
+            # After the 15th: no charge now, first real charge lands on the
+            # 1st of next month via the subscription itself, same as a
+            # brand-new subscriber gets today.
+            start_at = anchor_start_at
+        # else: anchor_start_at is None and old_sub_id is None, i.e. coming
+        # from free (or a pilot trial with no real subscription) with
+        # nothing to prorate against. start_at stays None: the new
+        # subscription's own first invoice already equals "the difference"
+        # (full new-tier price), same as today.
     else:
-        is_upgrade = _TIER_RANK.get(tier, 0) > _TIER_RANK.get(org.tier, 0)
-        start_at = None
+        # Downgrade: unchanged. Current tier's access continues to cycle
+        # end, then the lower tier's price applies from the next renewal.
         if old_sub_id:
             try:
-                old_sub = rp.subscription.fetch(old_sub_id)
+                rp.subscription.cancel(old_sub_id, {"cancel_at_cycle_end": 1})
             except Exception:
-                logger.exception("billing: failed to fetch old Razorpay subscription %s", old_sub_id)
-                old_sub = {}
-            if is_upgrade:
-                # Upgrade: new plan starts immediately, no refund on the old one.
-                try:
-                    rp.subscription.cancel(old_sub_id, {"cancel_at_cycle_end": 0})
-                except Exception:
-                    logger.exception("billing: failed to cancel old Razorpay subscription %s", old_sub_id)
-            else:
-                # Downgrade: old plan runs to cycle end, new one scheduled to start then.
-                try:
-                    rp.subscription.cancel(old_sub_id, {"cancel_at_cycle_end": 1})
-                except Exception:
-                    logger.exception("billing: failed to schedule cancel on Razorpay subscription %s", old_sub_id)
-                start_at = old_sub.get("current_end")
-
-    if body.gstin:
-        org.gstin = body.gstin.strip()
+                logger.exception("billing: failed to schedule cancel on Razorpay subscription %s", old_sub_id)
+            start_at = old_sub.get("current_end")
 
     sub_params: dict = {
         "plan_id": plan_id,
@@ -472,7 +593,49 @@ def razorpay_create_subscription(
     org.razorpay_subscription_id = subscription["id"]
     db.commit()
 
-    return RazorpaySubscriptionOut(subscription_id=subscription["id"], key_id=os.environ.get("RAZORPAY_KEY_ID", ""))
+    return RazorpaySubscriptionOut(
+        subscription_id=subscription["id"],
+        key_id=os.environ.get("RAZORPAY_KEY_ID", ""),
+        upgrade_order_id=upgrade_order["id"] if upgrade_order else None,
+        upgrade_order_amount=upgrade_order["amount"] if upgrade_order else None,
+    )
+
+
+# ---------------------------------------------------------------------------
+# POST /billing/razorpay/verify-upgrade-order (item 53/section 4)
+#
+# Verifies the one-time Orders API charge for an upgrade's price difference
+# (see razorpay_create_subscription's upgrade_order_id above). This does not
+# itself change org.tier: the subscription created alongside this order still
+# goes through the normal checkout + /billing/razorpay/verify-payment flow
+# right after, which is the single place tier changes are applied. This
+# endpoint only confirms the delta payment is genuine before the frontend
+# proceeds to that second checkout step.
+# ---------------------------------------------------------------------------
+
+class RazorpayVerifyOrderBody(BaseModel):
+    razorpay_order_id: str
+    razorpay_payment_id: str
+    razorpay_signature: str
+
+
+class VerifyOrderOut(BaseModel):
+    status: str
+
+
+@router.post("/razorpay/verify-upgrade-order", response_model=VerifyOrderOut)
+def razorpay_verify_upgrade_order(
+    body: RazorpayVerifyOrderBody,
+    current_org: CurrentOrg = Depends(require_role("owner")),
+):
+    key_secret = os.environ.get("RAZORPAY_KEY_SECRET", "")
+    if not key_secret:
+        raise HTTPException(503, "Razorpay is not configured on this server.")
+    payload = f"{body.razorpay_order_id}|{body.razorpay_payment_id}"
+    expected_signature = hmac.new(key_secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected_signature, body.razorpay_signature):
+        raise HTTPException(400, "Payment verification failed.")
+    return VerifyOrderOut(status="verified")
 
 
 # ---------------------------------------------------------------------------
@@ -580,7 +743,17 @@ async def razorpay_webhook(request: Request):
 
     db: Session = SessionLocal()
     try:
+        # Item 62: same insert-before-dispatch guard as the Stripe webhook.
+        # Razorpay sends the event id via the x-razorpay-event-id header.
+        event_id = request.headers.get("x-razorpay-event-id", "")
+        if not _record_webhook_event(db, "razorpay", event_id):
+            logger.info("razorpay_webhook: duplicate event %s, skipping", event_id)
+            return Response(status_code=200)
         _handle_razorpay_event(event, db)
+        # Belt-and-suspenders: some event branches take no DB-writing action
+        # of their own (no internal db.commit()), commit here too so the
+        # processed-event row above is never silently rolled back on close.
+        db.commit()
     except Exception:
         db.rollback()
         logger.exception("razorpay_webhook: error processing event %s", event.get("event"))

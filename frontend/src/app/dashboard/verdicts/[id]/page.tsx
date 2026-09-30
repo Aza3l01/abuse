@@ -127,7 +127,11 @@ export default function VerdictDetailPage() {
     try {
       const action = v.blocked ? "unblock" : "block";
       const r = await apiFetch(`/verdicts/${v.id}/${action}`, { method: "POST" });
-      if (r.status === 403) { alert("Blocking requires Growth or Pro plan."); return; }
+      if (r.status === 403) {
+        const d = await r.json().catch(() => ({}));
+        alert(d?.detail ?? "Blocking is not available on your plan.");
+        return;
+      }
       if (r.ok) {
         const updated = await apiFetch(`/verdicts/${id}`);
         if (updated.ok) setV(await updated.json());
@@ -151,8 +155,13 @@ export default function VerdictDetailPage() {
     return <main style={{ padding: "32px", color: "var(--color-text-muted)", fontSize: "13px" }}>{error ?? "Not found."}</main>;
   }
 
-  const canBlock = (v.viewer_role === "owner" || v.viewer_role === "admin") && (v.org_tier === "growth" || v.org_tier === "pro");
-  const isPro = v.org_tier === "pro";
+  // Mirrors api/tiers.py's MANUAL_BLOCK_TIERS (item 55): Basic (starter) can
+  // block too, not just Growth/Pro. Unblock has no tier gate at all backend-
+  // side, a downgraded org must still be able to remove its own blocks.
+  const canManage = v.viewer_role === "owner" || v.viewer_role === "admin";
+  const MANUAL_BLOCK_TIERS = ["starter", "growth", "pro", "enterprise"];
+  const canBlock = canManage && (v.blocked || MANUAL_BLOCK_TIERS.includes(v.org_tier));
+  const hasThreatExplanations = ["growth", "pro", "enterprise"].includes(v.org_tier);
 
   return (
     <main style={{ padding: "32px", maxWidth: "820px", width: "100%" }}>
@@ -220,7 +229,12 @@ export default function VerdictDetailPage() {
       {/* Agent scores */}
       {v.agent_scores && v.agent_scores.length > 0 && (
         <div style={{ marginBottom: "24px" }}>
-          <SectionLabel>Agent scores</SectionLabel>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <SectionLabel>Agent scores</SectionLabel>
+            <Link href="/docs#the-detection-agents" style={{ fontSize: "11px", color: "var(--color-text-muted)" }}>
+              How the agents work →
+            </Link>
+          </div>
           <div style={{ border: "1px solid var(--color-border)", background: "var(--color-surface)" }}>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
               <thead>
@@ -268,11 +282,16 @@ export default function VerdictDetailPage() {
         </div>
       )}
 
-      {/* AI Analysis — Pro only */}
+      {/* Threat explanations: Growth+ only, per FEATURE_ROWS */}
       <div style={{ marginBottom: "24px" }}>
-        <SectionLabel>AI analysis</SectionLabel>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <SectionLabel>AI analysis</SectionLabel>
+          <Link href="/docs#threat-explanations" style={{ fontSize: "11px", color: "var(--color-text-muted)" }}>
+            Learn more →
+          </Link>
+        </div>
         <div style={{ border: "1px solid var(--color-border)", background: "var(--color-surface)", padding: "20px" }}>
-          {isPro ? (
+          {hasThreatExplanations ? (
             <p style={{ fontSize: "13px", color: "var(--color-text-muted)" }}>
               {v.explanation || "No explanation available for this verdict."}
             </p>
@@ -282,7 +301,7 @@ export default function VerdictDetailPage() {
                 <circle cx="7" cy="7" r="6" fill="none" stroke="var(--color-text)" strokeWidth="1.3" />
                 <line x1="3.1" y1="10.9" x2="10.9" y2="3.1" stroke="var(--color-text)" strokeWidth="1.3" />
               </svg>
-              Upgrade to Pro to unlock AI-generated threat analysis.
+              Upgrade to Growth to unlock threat explanations.
             </p>
           )}
         </div>

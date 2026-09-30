@@ -26,6 +26,7 @@ DELETE /auth/sessions
 import os
 import hashlib
 from datetime import datetime, timedelta, timezone
+from functools import wraps
 from typing import Optional
 
 import redis as _redis_lib
@@ -62,7 +63,7 @@ from api.auth_utils import (
 from api.deps import get_current_client, get_current_org, get_db
 from api.limiter import limiter
 from api.routes.billing import cancel_org_subscriptions_for_deletion
-from db.models import Client, MfaBackupCode, Organization, OrganizationMember, PromoCode, RefreshToken
+from db.models import Client, MfaBackupCode, Organization, OrganizationMember, RefreshToken
 
 router = APIRouter()
 
@@ -78,9 +79,35 @@ _OTP_EXPIRE_SECONDS = 15 * 60  # 15 minutes
 
 
 # ---------------------------------------------------------------------------
+# Item 65: Redis backs every rate/lockout check below and was previously an
+# unguarded hard dependency of login: a Redis outage turned every login
+# into an unhandled 500. Posture chosen (written down here, not left
+# implicit): fail CLOSED. Return a clear 503 rather than let a broken
+# security control silently pass every request through with rate limiting
+# and brute-force lockout disabled. Fail-open was considered and rejected,
+# the limiter itself is Redis-backed too (item 58), so a Redis outage
+# already means "auth is degraded," a 503 says so honestly instead of
+# quietly serving unprotected logins.
+# ---------------------------------------------------------------------------
+
+def _fail_closed_on_redis_error(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except _redis_lib.exceptions.RedisError:
+            raise HTTPException(
+                status_code=503,
+                detail="Login is temporarily unavailable. Please try again shortly.",
+            )
+    return wrapper
+
+
+# ---------------------------------------------------------------------------
 # Email-based rate limiting helper (used where slowapi can't key on body)
 # ---------------------------------------------------------------------------
 
+@_fail_closed_on_redis_error
 def _check_email_rate(email: str, limit: int, window: int, prefix: str) -> bool:
     """
     Increment a Redis counter for (prefix, email).
@@ -107,11 +134,13 @@ def _login_failure_key(email: str) -> str:
     return f"clew:login_fail:{hashlib.sha256(email.lower().encode()).hexdigest()}"
 
 
+@_fail_closed_on_redis_error
 def _is_login_locked_out(email: str) -> bool:
     count = _redis.get(_login_failure_key(email))
     return count is not None and int(count) >= _LOGIN_LOCKOUT_THRESHOLD
 
 
+@_fail_closed_on_redis_error
 def _record_login_failure(email: str, account_exists: bool = True) -> None:
     """Increment the failed-attempt counter; on the attempt that trips the
     lockout, email the account owner.
@@ -128,6 +157,7 @@ def _record_login_failure(email: str, account_exists: bool = True) -> None:
         send_login_lockout_email(email)
 
 
+@_fail_closed_on_redis_error
 def _reset_login_failures(email: str) -> None:
     _redis.delete(_login_failure_key(email))
 
@@ -269,62 +299,6 @@ def _issue_tokens(
 # POST /auth/register
 # ---------------------------------------------------------------------------
 
-def _email_domain(email: str) -> str:
-    return email.rsplit("@", 1)[-1].lower()
-
-
-def _create_org_for_new_client(
-    db: Session,
-    client_id: str,
-    email: str,
-    company_name: str,
-    pilot_code: Optional[str] = None,
-) -> Organization:
-    """Registration creates Client + Organization + OrganizationMember
-    (role=owner) atomically — one company email maps to one org for now
-    (freelancer multi-org-per-login is a later, separate flow). Caller commits.
-
-    Item 11 trial length: a manual-outreach pilot code gets 30 days, plain
-    self-serve signup gets 7. Item 26: pilot codes are validated against the
-    promo_codes table (exists AND unredeemed) and marked redeemed here, in
-    the same request that creates the Organization.
-    """
-    now = datetime.now(timezone.utc)
-    pilot_code = pilot_code.strip().upper() if pilot_code else None
-    promo: Optional[PromoCode] = None
-    if pilot_code:
-        promo = (
-            db.query(PromoCode)
-            .filter(PromoCode.code == pilot_code, PromoCode.redeemed_at.is_(None))
-            .first()
-        )
-        if promo is None:
-            raise HTTPException(status_code=400, detail="This promo code is no longer available.")
-        trial_source = "manual_outreach"
-        trial_ends_at = now + timedelta(days=30)
-        billing_provider = "pilot"
-    else:
-        trial_source = "self_serve"
-        trial_ends_at = now + timedelta(days=7)
-        billing_provider = None
-    org = Organization(
-        company_name=company_name,
-        domain=_email_domain(email),
-        tier="starter",
-        trial_source=trial_source,
-        trial_ends_at=trial_ends_at,
-        pilot_code_used=pilot_code,
-        billing_provider=billing_provider,
-    )
-    db.add(org)
-    db.flush()  # populate org.id without committing yet
-    if promo is not None:
-        promo.redeemed_at = now
-        promo.redeemed_by_org_id = org.id
-    db.add(OrganizationMember(client_id=client_id, org_id=org.id, role="owner"))
-    return org
-
-
 @router.post("/register", status_code=201)
 @limiter.limit("5/hour")
 async def register(
@@ -344,7 +318,11 @@ async def register(
         # Generic message — don't confirm whether the email is registered.
         raise HTTPException(
             status_code=400,
-            detail="Registration failed. Please check your details.",
+            detail=(
+                "We could not create that account. If you already have one, try "
+                "signing in or resetting your password. Still stuck? Email "
+                "support@clewsec.com."
+            ),
         )
 
     otp = generate_otp()
@@ -360,7 +338,12 @@ async def register(
     )
     db.add(client)
     db.flush()  # populate client.id without committing yet
-    _create_org_for_new_client(db, client.id, client.email, body.company_name, body.pilot_code)
+    # Item 63: shared with POST /org so the two org-creation entry points
+    # can't diverge on tier/trial setup. Deferred import: api/routes/org.py
+    # imports _issue_tokens from this module at its own module level, a
+    # top-level import here would be circular.
+    from api.routes.org import create_organization
+    create_organization(db, body.company_name, client, body.pilot_code, remote_ip=remote_ip)
     db.commit()
 
     send_verification_email(body.email.lower(), otp)

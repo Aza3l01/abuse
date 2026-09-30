@@ -40,9 +40,14 @@ FROM_ADDRESS  = "Clew <noreply@email.clewsec.com>"
 FROM_ALERTS   = "Clew Alerts <alerts@email.clewsec.com>"
 FROM_BILLING  = "Clew Billing <billing@email.clewsec.com>"
 FROM_TEAM     = "Clew Team <team@email.clewsec.com>"
-REPLY_TO_ALERTS  = "alerts@email.clewsec.com"
-REPLY_TO_BILLING = "billing@email.clewsec.com"
-REPLY_TO_TEAM    = "team@email.clewsec.com"
+# Item 6d: a separate subdomain from the four above, so a newsletter
+# broadcast's spam/complaint rate can never affect transactional deliverability.
+FROM_NEWS     = "Clew <news@news.clewsec.com>"
+# Reply-to (not from) since email.clewsec.com is Resend send-only, nothing
+# receives there; support@clewsec.com is a real, monitored Workspace inbox.
+REPLY_TO_ALERTS  = "support@clewsec.com"
+REPLY_TO_BILLING = "support@clewsec.com"
+REPLY_TO_TEAM    = "support@clewsec.com"
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
 TURNSTILE_SECRET_KEY = os.environ.get("TURNSTILE_SECRET_KEY", "")
 _TURNSTILE_VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
@@ -51,19 +56,16 @@ _TURNSTILE_VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteveri
 # tokens such as the Cloudflare blocking token, item 57).
 # Must be a 32-byte URL-safe base64 key, generate with:
 #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-# Store in TOTP_ENCRYPTION_KEY env var.  If absent we raise loudly so it can't
-# be silently skipped in production.
-_TOTP_KEY_RAW = os.environ.get("TOTP_ENCRYPTION_KEY", "")
-if _TOTP_KEY_RAW:
-    _fernet = Fernet(_TOTP_KEY_RAW.encode())
-else:
-    _fernet = None  # dev fallback, encrypt/decrypt will raise if called
+# Store in TOTP_ENCRYPTION_KEY env var. Item 59: required at import, same as
+# JWT_SECRET, a missing encryption key is a misconfigured deployment, not a
+# degraded mode. Previously this fell back to None at import and only raised
+# the first time a customer tried to enrol in MFA.
+_TOTP_KEY_RAW = os.environ["TOTP_ENCRYPTION_KEY"]
+_fernet = Fernet(_TOTP_KEY_RAW.encode())
 
 
 def encrypt_secret(secret: str) -> str:
     """Encrypt a plaintext secret string for storage."""
-    if _fernet is None:
-        raise RuntimeError("TOTP_ENCRYPTION_KEY is not set. Cannot encrypt secret.")
     return _fernet.encrypt(secret.encode()).decode()
 
 
@@ -75,8 +77,6 @@ def decrypt_secret(ciphertext: str) -> str:
     partially migrated table does not break blocking. Remove this tolerance
     once the migration has run in production.
     """
-    if _fernet is None:
-        raise RuntimeError("TOTP_ENCRYPTION_KEY is not set. Cannot decrypt secret.")
     try:
         return _fernet.decrypt(ciphertext.encode()).decode()
     except _FernetInvalidToken:
@@ -147,6 +147,27 @@ def decode_refresh_token(token: str) -> dict | None:
 def hash_token(raw: str) -> str:
     """SHA-256 hash of a raw token — stored in DB, never the raw value."""
     return hashlib.sha256(raw.encode()).hexdigest()
+
+
+# Item 6d: stateless double opt-in token for newsletter signups. No local
+# subscriber table exists, Resend's own Audience is the single source of
+# truth, so confirmation state is carried entirely in this signed token
+# instead of a DB row.
+def create_newsletter_confirm_token(email: str) -> str:
+    expire = datetime.now(timezone.utc) + timedelta(hours=24)
+    payload = {"sub": email, "exp": expire, "type": "newsletter_confirm"}
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def decode_newsletter_confirm_token(token: str) -> str | None:
+    """Returns the subscribed email if the token is valid, else None."""
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        if payload.get("type") != "newsletter_confirm":
+            return None
+        return payload.get("sub")
+    except JWTError:
+        return None
 
 
 # ------------------------------------------------------------------

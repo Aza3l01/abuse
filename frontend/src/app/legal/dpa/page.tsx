@@ -17,7 +17,7 @@ export default function DpaPage() {
       </p>
       <p style={legalPStyle}>
         To request a copy of the DPA as a PDF, email{" "}
-        <a href="mailto:legal@clewsec.com" style={{ color: "var(--color-text)" }}>legal@clewsec.com</a>.
+        <a href="mailto:support@clewsec.com" style={{ color: "var(--color-text)" }}>support@clewsec.com</a>.
       </p>
     </LegalLayout>
   );

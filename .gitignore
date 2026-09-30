@@ -9,6 +9,7 @@ detection/.env
 detection/.venv/
 detection/venv/
 detection/datasets/
+!detection/datasets/threat_intel_cache.json
 detection/results/
 .venv
 
@@ -24,6 +25,5 @@ frontend/out/
 
 # OS
 .DS_Store
-STRATEGY_POST.md
+SOCIAL.md
 TODO.md
-TODO_ARCHIVE.md

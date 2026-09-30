@@ -219,7 +219,7 @@ class BaseAgent(ABC):
         try:
             result = self._llm.reason(system, user)
         except LLMError as exc:
-            logger.error("[%s] LLM call failed: %s — falling back to rule-based", self.name, exc)
+            logger.warning("[%s] org=%s LLM call failed: %s, falling back to rule-based", self.name, self.memory.tenant_key, exc)
             return rule_finding
 
         # Parse and validate LLM output

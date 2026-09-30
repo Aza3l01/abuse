@@ -9,6 +9,7 @@ const NAV = [
   { href: "/dashboard",          label: "Overview" },
   { href: "/dashboard/alerts",   label: "Alerts" },
   { href: "/dashboard/ips",      label: "IPs" },
+  { href: "/docs",               label: "Docs" },
   { href: "/dashboard/settings", label: "Settings" },
 ] as const;
 
@@ -71,13 +72,16 @@ export function DashboardSidebar({ company }: { company?: string }) {
       overflowY: "auto",
     }}>
       {/* Logo */}
-      <div style={{ padding: "20px 20px 16px" }}>
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img
-          src="/clew-wordmark-dark.svg"
-          alt="Clew"
-          style={{ height: "14px", width: "auto", filter: "var(--logo-filter)" }}
-        />
+      <div style={{ padding: "20px 20px 16px", display: "flex", alignItems: "center", gap: "8px" }}>
+        <Link href="/" aria-label="Clew home">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src="/clew-wordmark-dark.svg"
+            alt="Clew"
+            style={{ height: "14px", width: "auto", filter: "var(--logo-filter)" }}
+          />
+        </Link>
+        <span style={{ fontSize: "11px", color: "var(--color-text-muted)" }}>v0.1.1</span>
       </div>
 
       {/* Org switcher — basic single-email switcher (item 7's MVP scope;
@@ -179,7 +183,7 @@ export function DashboardSidebar({ company }: { company?: string }) {
             background: "none",
             border: "none",
             cursor: "pointer",
-            fontSize: "12px",
+            fontSize: "15px",
             color: "var(--color-text-muted)",
             padding: 0,
           }}

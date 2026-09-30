@@ -7,12 +7,12 @@ const STEPS = [
   {
     number: "02",
     heading: "Agents detect. Orchestrator decides.",
-    body: "Seven specialised AI agents run in parallel against every log batch, each trained on a different threat class. A meta-agent orchestrator fuses their confidence signals into a single verdict, independently validated on real-world attack datasets.",
+    body: "Six specialised AI agents run in parallel against every log batch, each trained on a different threat class. A meta-agent orchestrator fuses their confidence signals into a single verdict, independently validated on real-world attack datasets.",
   },
   {
     number: "03",
     heading: "Dashboard shows findings, optionally blocks",
-    body: "Every verdict appears in your dashboard with affected IPs, threat type, confidence, and estimated cost. Growth and Pro clients can enable automatic WAF blocking with one setting.",
+    body: "Every verdict appears in your dashboard with affected IPs, threat type, confidence, and estimated cost. Basic plans can block an IP manually with one click, Growth and Pro clients can enable automatic WAF blocking with one setting.",
   },
 ];
 

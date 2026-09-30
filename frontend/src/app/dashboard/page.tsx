@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { apiFetch } from "@/lib/api";
 import Link from "next/link";
+import { GuidedOnboardingButton } from "@/components/dashboard/GuidedOnboardingButton";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -191,6 +192,9 @@ function NotConfiguredBox() {
       }}>
         Connect S3 → Settings
       </Link>
+      <div style={{ marginTop: "16px" }}>
+        <GuidedOnboardingButton />
+      </div>
     </div>
   );
 }

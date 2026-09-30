@@ -10,7 +10,7 @@ import { Pricing } from "@/components/home/Pricing";
 export const metadata: Metadata = {
   title: { absolute: "Clew" },
   description:
-    "Seven specialised AI agents monitor your AWS API Gateway logs for bots, credential stuffing, scrapers, and data exfiltration. No code changes. No proxy. Just connect your S3 logs.",
+    "Six specialised AI agents monitor your AWS API Gateway logs for bots, credential stuffing, scrapers, and data exfiltration. No code changes. No proxy. Just connect your S3 logs.",
 };
 
 export default function Home() {

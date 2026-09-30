@@ -107,7 +107,7 @@ export function Pricing() {
         </div>
 
         {/* Tier grid */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-0">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-0">
           {TIERS.map((tier, i) => (
             <div
               key={tier.name}
@@ -179,6 +179,16 @@ export function Pricing() {
                 </p>
               )}
 
+              {tier.contactOnly && (
+                <p
+                  className="text-xs mb-4"
+                  style={{ color: "var(--color-text-muted)" }}
+                >
+                  Multi-region, dedicated infrastructure, and SLA terms are
+                  configured per contract, not self-serve.
+                </p>
+              )}
+
               {tier.volume !== "—" && (
                 <p
                   className="text-xs mb-6"
@@ -209,15 +219,20 @@ export function Pricing() {
                       >
                         {included ? "+" : "×"}
                       </span>
-                      {row.label}
-                      {typeof value === "string" ? ` (${value})` : ""}
+                      {typeof value === "string" ? value : row.label}
                     </li>
                   );
                 })}
               </ul>
 
               <a
-                href={tier.name === "Enterprise" ? "mailto:jeff@clewsec.com" : "/register"}
+                href={
+                  tier.name === "Enterprise"
+                    ? "mailto:support@clewsec.com"
+                    : tier.tier === "free"
+                    ? "/register"
+                    : `/register?plan=${tier.tier}`
+                }
                 className="text-sm font-medium text-center transition-opacity hover:opacity-80"
                 style={{
                   padding: "10px 0",
@@ -265,7 +280,7 @@ export function Pricing() {
               className="text-sm"
               style={{ color: "var(--color-text-muted)", maxWidth: "800px" }}
             >
-              {`Full retrospective scan of your entire log history. Surfaces every incident pattern that has ever occurred.`}
+              {`Full retrospective scan of your available log history.`}
             </p>
           </div>
           <div className="flex items-center gap-6 shrink-0">
@@ -276,7 +291,7 @@ export function Pricing() {
               {AUDIT_PRICE[currency]}
             </p>
             <a
-              href="mailto:jeff@clewsec.com"
+              href="mailto:support@clewsec.com"
               className="text-sm font-medium transition-opacity hover:opacity-80 whitespace-nowrap"
               style={{
                 padding: "10px 20px",

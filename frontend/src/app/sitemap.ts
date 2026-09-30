@@ -17,6 +17,12 @@ export default function sitemap(): MetadataRoute.Sitemap {
       priority: 0.9,
     },
     {
+      url: `${base}/docs`,
+      lastModified: new Date(),
+      changeFrequency: "monthly",
+      priority: 0.8,
+    },
+    {
       url: `${base}/register`,
       lastModified: new Date(),
       changeFrequency: "yearly",
@@ -28,9 +34,9 @@ export default function sitemap(): MetadataRoute.Sitemap {
       changeFrequency: "yearly",
       priority: 0.5,
     },
-    // Item 12c — /legal/* routes. /docs and /demo are in the footer's
-    // planned link list too but have no page in this codebase yet, so
-    // they're left out of the sitemap until they exist.
+    // Item 12c, /legal/* routes. /demo is in the footer's planned link
+    // list too but has no page in this codebase yet, left out of the
+    // sitemap until it exists. /docs (above) now has a real page.
     {
       url: `${base}/legal/terms`,
       lastModified: new Date(),

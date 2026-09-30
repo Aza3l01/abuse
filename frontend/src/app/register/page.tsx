@@ -1,15 +1,23 @@
 "use client";
 
-import { useState } from "react";
-import { useRouter } from "next/navigation";
+import { useState, Suspense } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { AuthLayout, inputStyle, labelStyle, primaryBtnStyle } from "@/components/auth/AuthLayout";
 import { Turnstile } from "@/components/auth/Turnstile";
 import { API_URL } from "@/lib/api";
 import { passwordStrength, passwordStrengthLabel } from "@/lib/passwordStrength";
 
-export default function RegisterPage() {
+// Phase 4b: plans that can actually be checked out self-serve. Never "free"
+// (that's the no-plan default, not a chosen upgrade) and never "enterprise"
+// (contact-only, no self-serve checkout exists for it).
+const PURCHASABLE_PLANS = ["starter", "growth", "pro"];
+
+function RegisterForm() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const planParam = searchParams.get("plan");
+  const validPlan = planParam && PURCHASABLE_PLANS.includes(planParam) ? planParam : null;
 
   const [fullName,    setFullName]    = useState("");
   const [email,       setEmail]       = useState("");
@@ -55,6 +63,11 @@ export default function RegisterPage() {
       if (!res.ok) {
         setError(data.detail ?? "Registration failed.");
         return;
+      }
+      // Phase 4b: an intent, not an entitlement, read by the dashboard once
+      // to trigger checkout, then cleared. Never persisted to the Organization.
+      if (validPlan) {
+        try { sessionStorage.setItem("clew_plan", validPlan); } catch { /* storage unavailable, plan is skipped */ }
       }
       setRegistered(true);
     } catch {
@@ -179,5 +192,13 @@ export default function RegisterPage() {
         </Link>
       </p>
     </AuthLayout>
+  );
+}
+
+export default function RegisterPage() {
+  return (
+    <Suspense>
+      <RegisterForm />
+    </Suspense>
   );
 }

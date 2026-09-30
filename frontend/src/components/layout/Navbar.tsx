@@ -70,6 +70,19 @@ export function Navbar() {
             Pricing
           </a>
           <a
+            href="/docs"
+            className="text-sm transition-colors"
+            style={{ color: "var(--color-text-muted)" }}
+            onMouseEnter={(e) =>
+              (e.currentTarget.style.color = "var(--color-text)")
+            }
+            onMouseLeave={(e) =>
+              (e.currentTarget.style.color = "var(--color-text-muted)")
+            }
+          >
+            Docs
+          </a>
+          <a
             href={loggedIn ? "/dashboard" : "/login"}
             className="text-sm transition-colors"
             style={{ color: "var(--color-text-muted)" }}

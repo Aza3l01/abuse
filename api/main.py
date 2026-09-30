@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 load_dotenv()
 load_dotenv(".env.local", override=True)  # local dev overrides (gitignored)
 
-from api.routes import auth, clients, verdicts, dashboard, ips, billing, org, settings, alerts
+from api.routes import auth, clients, verdicts, dashboard, ips, billing, org, settings, alerts, newsletter
 from api.limiter import limiter
 
 _debug = os.environ.get("DEBUG", "").lower() in ("1", "true", "yes")
@@ -64,6 +64,7 @@ app.include_router(billing.router,              tags=["billing"])
 app.include_router(org.router,                  tags=["org"])
 app.include_router(settings.router,             tags=["settings"])
 app.include_router(alerts.router,               tags=["alerts"])
+app.include_router(newsletter.router,            tags=["newsletter"])
 
 
 # ------------------------------------------------------------------

@@ -22,9 +22,12 @@ celery_app = Celery(
     backend=REDIS_URL,
     include=[
         "workers.tasks.process_logs",
+        "workers.tasks.push_blocks",
         "workers.tasks.send_alerts",
         "workers.tasks.trial_reminders",
         "workers.tasks.purge_deleted_accounts",
+        "workers.tasks.reset_usage_counters",
+        "workers.tasks.purge_expired_data",
     ],
 )
 

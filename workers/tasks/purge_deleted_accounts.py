@@ -15,6 +15,10 @@ Client and its Organization together (see api/routes/auth.py's
 delete_account), so by the time 30 days have passed both are usually due at
 once. Purging the org first, then the client, avoids relying on ordering
 between two independent CASCADE paths into organization_members.
+
+Item 62: also deletes processed_webhook_events rows older than 30 days
+(the Razorpay/Stripe webhook idempotency guard's table). Folded in here
+rather than a new Beat task since this one already runs daily.
 """
 from __future__ import annotations
 
@@ -27,7 +31,7 @@ _REPO_ROOT = Path(__file__).parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from db.models import Client, Organization
+from db.models import Client, Organization, ProcessedWebhookEvent
 from db.session import SessionLocal
 from workers.celery_app import celery_app
 
@@ -60,10 +64,23 @@ def purge_deleted_accounts() -> dict:
             db.delete(client)
         db.commit()
 
-        logger.info(
-            "purge_deleted_accounts: purged %d organisations, %d clients",
-            len(orgs), len(clients),
+        # Item 62: same 30-day cutoff, unrelated table, just piggybacking on
+        # this task's existing daily schedule rather than adding a new one.
+        webhook_events_deleted = (
+            db.query(ProcessedWebhookEvent)
+            .filter(ProcessedWebhookEvent.created_at <= cutoff)
+            .delete(synchronize_session=False)
         )
-        return {"organisations_purged": len(orgs), "clients_purged": len(clients)}
+        db.commit()
+
+        logger.info(
+            "purge_deleted_accounts: purged %d organisations, %d clients, %d webhook events",
+            len(orgs), len(clients), webhook_events_deleted,
+        )
+        return {
+            "organisations_purged": len(orgs),
+            "clients_purged": len(clients),
+            "webhook_events_purged": webhook_events_deleted,
+        }
     finally:
         db.close()

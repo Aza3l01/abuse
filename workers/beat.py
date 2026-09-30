@@ -38,4 +38,14 @@ celery_app.conf.beat_schedule = {
         "task":     "workers.tasks.purge_deleted_accounts.purge_deleted_accounts",
         "schedule": crontab(hour=3, minute=0),
     },
+    # Item 30 (section 5): zero every org's monthly call counter on the 1st.
+    "reset-monthly-usage-counters": {
+        "task":     "workers.tasks.reset_usage_counters.reset_monthly_counters",
+        "schedule": crontab(hour=0, minute=0, day_of_month="1"),
+    },
+    # Item 30 (section 5): daily tiered retention purge across all four tables.
+    "purge-expired-data-daily": {
+        "task":     "workers.tasks.purge_expired_data.purge_expired_data",
+        "schedule": crontab(hour=4, minute=0),
+    },
 }

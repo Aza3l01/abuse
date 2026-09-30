@@ -10,7 +10,10 @@ Architecture:
           single-org-per-worker model (one Celery worker handles all
           batches for one org sequentially).
   - LTM : serialised as JSON to Redis key `clew:ltm:{org_id}` on each
-          flush; restored from Redis on __init__. TTL = 30 days.
+          flush; restored from Redis on __init__. TTL = 30 days by default,
+          overridable per call (item 30/section 5: a free-tier org passes a
+          7-day TTL instead, see workers/tasks/process_logs.py's
+          _ltm_ttl_seconds_for_tier).
   - Board: unchanged — cleared per batch as normal.
 
 Usage (in the Celery task):
@@ -35,6 +38,9 @@ logger = logging.getLogger(__name__)
 
 _LTM_KEY_PREFIX = "clew:ltm:"
 _LTM_TTL_SECONDS = 30 * 24 * 3600  # 30 days
+# Cap on the number of IPs kept in _knowledge_ip_history per dump, oldest
+# (by last-seen timestamp) dropped first, to bound the one-string Redis blob.
+_KNOWLEDGE_IP_HISTORY_CAP = 5000
 
 
 class ProductSharedMemory(SharedMemory):
@@ -49,11 +55,13 @@ class ProductSharedMemory(SharedMemory):
         org_id: str,
         redis_client: Optional[Any] = None,
         window_seconds: int = 60,
+        ttl_seconds: int = _LTM_TTL_SECONDS,
     ) -> None:
         super().__init__(window_seconds=window_seconds)
         self._org_id = org_id
         self._redis = redis_client
         self._redis_key = f"{_LTM_KEY_PREFIX}{org_id}"
+        self._ttl_seconds = ttl_seconds
 
         if self._redis is not None:
             self._load_ltm()
@@ -88,8 +96,25 @@ class ProductSharedMemory(SharedMemory):
                 },
                 "tz_history": list(getattr(ltm, "_tz_history", [])),
                 "robust_locked": dict(getattr(ltm, "_robust_locked", {})),
+                "knowledge_ip_history": self._capped_knowledge_ip_history(
+                    getattr(ltm, "_knowledge_ip_history", {})
+                ),
+                "knowledge_known_bad": list(getattr(ltm, "_knowledge_known_bad", set())),
             }
         return data
+
+    @staticmethod
+    def _capped_knowledge_ip_history(history: dict) -> dict:
+        """Keep only the _KNOWLEDGE_IP_HISTORY_CAP most-recently-seen IPs,
+        oldest (by each IP's last entry's ts) dropped first."""
+        if len(history) <= _KNOWLEDGE_IP_HISTORY_CAP:
+            return {k: list(v) for k, v in history.items()}
+        ranked = sorted(
+            history.items(),
+            key=lambda kv: kv[1][-1]["ts"] if kv[1] else "",
+            reverse=True,
+        )
+        return {k: list(v) for k, v in ranked[:_KNOWLEDGE_IP_HISTORY_CAP]}
 
     def _load_ltm(self) -> None:
         """Restore LTM state from Redis. Silently skips on any error."""
@@ -129,6 +154,8 @@ class ProductSharedMemory(SharedMemory):
             )
             ltm._tz_history = list(data.get("tz_history", []))
             ltm._robust_locked = dict(data.get("robust_locked", {}))
+            ltm._knowledge_ip_history = dict(data.get("knowledge_ip_history", {}))
+            ltm._knowledge_known_bad = set(data.get("knowledge_known_bad", []))
 
         logger.debug(
             "ProductSharedMemory: loaded LTM for org=%s  batch_count=%d",
@@ -146,7 +173,7 @@ class ProductSharedMemory(SharedMemory):
             return
         try:
             payload = json.dumps(self._dump_ltm())
-            self._redis.set(self._redis_key, payload, ex=_LTM_TTL_SECONDS)
+            self._redis.set(self._redis_key, payload, ex=self._ttl_seconds)
             logger.debug("ProductSharedMemory: flushed LTM for org=%s", self._org_id)
         except Exception as exc:
             logger.error("ProductSharedMemory: failed to flush LTM to Redis: %s", exc)

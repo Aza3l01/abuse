@@ -1467,7 +1467,71 @@ Valid values: `starter`, `growth`, `pro`
 
 ### Customer Onboarding — S3 Access
 
-When a customer connects their S3 bucket, they add this policy to their bucket in their own AWS account:
+Clew reads a customer's logs by assuming an IAM role in their own AWS
+account (`sts:AssumeRole`, phase 2), not by holding a shared long-lived
+access key. Each org gets its own server-generated External ID at creation
+time (`organizations.aws_external_id`), shown read-only on the Settings
+page. The settings page (`IamPolicyGuide`) generates both policies below
+with the org's own External ID and Clew's account ID already filled in.
+
+1. Customer creates an IAM role in their own AWS account with this trust
+   policy (the `sts:ExternalId` condition is the part that actually enforces
+   the trust, without it the role would trust *any* caller who knows Clew's
+   account ID):
+
+   ```json
+   {
+     "Version": "2012-10-17",
+     "Statement": [{
+       "Effect": "Allow",
+       "Principal": { "AWS": "arn:aws:iam::YOUR_CLEW_ACCOUNT_ID:root" },
+       "Action": "sts:AssumeRole",
+       "Condition": { "StringEquals": { "sts:ExternalId": "THEIR_ORGS_EXTERNAL_ID" } }
+     }]
+   }
+   ```
+
+2. Customer attaches this permissions policy to the same role (add the
+   `wafv2` statement only if they intend to use blocking, manual or
+   automatic, see the note below):
+
+   ```json
+   {
+     "Version": "2012-10-17",
+     "Statement": [{
+       "Effect": "Allow",
+       "Action": ["s3:GetObject", "s3:ListBucket"],
+       "Resource": ["arn:aws:s3:::THEIR-BUCKET-NAME", "arn:aws:s3:::THEIR-BUCKET-NAME/*"]
+     }]
+   }
+   ```
+
+3. Customer pastes the resulting role ARN back into Settings
+   (`PATCH /clients/me`, `aws_role_arn`). The S3 connection test runs
+   immediately.
+
+One role, two capability sets. The S3 statement alone only grants Clew read
+access to logs, it does not enable blocking (manual or automatic). A
+customer who wants blocking must tick the "Also include WAF blocking
+permissions" checkbox on the Settings page, which regenerates the
+permissions policy JSON with both statements, and update the **same role's**
+existing permissions policy with it, not create a second role. This applies
+equally to a Basic-tier customer's manual blocking and a Growth-and-above
+customer's automatic blocking, both go through the same `wafv2:GetIPSet`/
+`wafv2:UpdateIPSet` permissions, only the trigger differs.
+
+`YOUR_CLEW_ACCOUNT_ID` is the 12-digit number in the top-right of your AWS
+console, set as `CLEW_AWS_ACCOUNT_ID` in `.env`.
+
+Any org that has not configured `aws_role_arn` falls back to Clew's shared
+IAM user (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` on the API/worker
+host), the pre-phase-2 behavior. See `api/aws.py`'s `aws_session_for_org`.
+
+**Legacy path (bucket policy, no role).** Before phase 2, a customer
+granted access by attaching a bucket policy naming Clew's shared IAM user
+as principal, with no External ID and no per-customer revocation. This
+still works for any org still on the shared-credential fallback, kept here
+only until that fallback is retired:
 
 ```json
 {
@@ -1483,8 +1547,6 @@ When a customer connects their S3 bucket, they add this policy to their bucket i
   }]
 }
 ```
-
-`YOUR_CLEW_ACCOUNT_ID` is the 12-digit number in the top-right of your AWS console. Give this to customers during onboarding.
 
 ---
 

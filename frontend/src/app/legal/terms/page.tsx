@@ -37,13 +37,30 @@ export default function TermsPage() {
 
       <h2 style={legalH2Style}>3. Trials and subscriptions</h2>
       <p style={legalPStyle}>
-        New accounts start on a free trial. No payment method is required to
-        start a trial. At the end of the trial period, continued scanning
-        requires an active paid subscription. Existing data and dashboard
-        access remain available after a trial ends even without payment.
+        New self-serve accounts start immediately on the free Starter plan:
+        no trial, no card required, no expiry. Accounts onboarded with a
+        promotional code instead receive a 30-day trial of the Growth plan.
+        No payment method is required to start a Growth trial. If a Growth
+        trial ends without an active paid subscription, the account reverts
+        to the free Starter plan: scanning and dashboard access continue
+        without interruption, only Growth&apos;s additional features
+        (automatic blocking, extended retention, higher call volume) are
+        unavailable until you subscribe.
       </p>
 
-      <h2 style={legalH2Style}>4. Customer data</h2>
+      <h2 style={legalH2Style}>4. Refunds and cancellations</h2>
+      <p style={legalPStyle}>
+        You can request a full refund within 72 hours of your first paid
+        charge. After that window, and on any renewal charge, payments are
+        non-refundable. Cancelling stops future billing only: your plan
+        stays active until the end of the billing period you already paid
+        for. See the full{" "}
+        <Link href="/legal/refund-policy" style={{ color: "var(--color-text)" }}>
+          Refund Policy
+        </Link>{" "}for details.
+      </p>
+
+      <h2 style={legalH2Style}>5. Customer data</h2>
       <p style={legalPStyle}>
         You retain all rights to the log data you connect to Clew. We access
         it only to provide the service (detection, blocking, and reporting)
@@ -51,20 +68,20 @@ export default function TermsPage() {
         bucket is read-only.
       </p>
 
-      <h2 style={legalH2Style}>5. Acceptable use</h2>
+      <h2 style={legalH2Style}>6. Acceptable use</h2>
       <p style={legalPStyle}>
         You may not use Clew to monitor or block traffic you do not have the
         legal right to process, or in a manner that violates applicable law.
       </p>
 
-      <h2 style={legalH2Style}>6. Account deletion</h2>
+      <h2 style={legalH2Style}>7. Account deletion</h2>
       <p style={legalPStyle}>
         You may request deletion of your account at any time from your
         account settings. Your data will be permanently deleted within 30
         days of your request.
       </p>
 
-      <h2 style={legalH2Style}>7. Disclaimers and liability</h2>
+      <h2 style={legalH2Style}>8. Disclaimers and liability</h2>
       <p style={legalPStyle}>
         Clew is provided on an &quot;as is&quot; basis. Detection is
         probabilistic and cannot guarantee identification of every abusive
@@ -77,16 +94,26 @@ export default function TermsPage() {
         </Link>.
       </p>
 
-      <h2 style={legalH2Style}>8. Changes</h2>
+      <h2 style={legalH2Style}>9. Changes</h2>
       <p style={legalPStyle}>
         We may update these Terms from time to time. Material changes will be
         communicated by email to the address on your account.
       </p>
 
-      <h2 style={legalH2Style}>9. Contact</h2>
+      <h2 style={legalH2Style}>10. Legal entity and governing law</h2>
+      <p style={legalPStyle}>
+        Clew is operated by Clew Technologies Private Limited (CIN
+        U62090KL2026PTC104122), a private limited company incorporated in
+        India. Registered office: Idukki, Kerala, India; the full registered
+        address is available on request. These Terms are governed by the
+        laws of India, and the courts at Idukki, Kerala have exclusive
+        jurisdiction over any dispute arising from them.
+      </p>
+
+      <h2 style={legalH2Style}>11. Contact</h2>
       <p style={legalPStyle}>
         Questions about these Terms can be sent to{" "}
-        <a href="mailto:legal@clewsec.com" style={{ color: "var(--color-text)" }}>legal@clewsec.com</a>.
+        <a href="mailto:support@clewsec.com" style={{ color: "var(--color-text)" }}>support@clewsec.com</a>.
       </p>
     </LegalLayout>
   );

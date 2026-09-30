@@ -63,9 +63,13 @@ def send_trial_reminders() -> dict:
             trial_days_total = 30 if org.trial_source == "manual_outreach" else 7
             days_remaining = (org.trial_ends_at - now).days
 
-            # Item 27 point 6: trial ended with no payment method added:
-            # revert tier, leave a persistent dashboard banner (TrialBanner.tsx
-            # already renders an "expired" message once trial_ends_at has passed).
+            # Item 27 point 6 / item 53 (section 4): trial ended with no
+            # payment method added, revert to the permanent free Starter
+            # tier (not a lockout). poll_all_clients() (process_logs.py) no
+            # longer excludes tier == "free" orgs from scanning, so this org
+            # keeps being scanned within the free tier's call-volume cap.
+            # TrialBanner.tsx already renders an "expired" message once
+            # trial_ends_at has passed.
             if org.trial_ends_at <= now and org.tier != "free":
                 org.tier = "free"
                 db.commit()

@@ -28,7 +28,8 @@ for _p in [str(_REPO_ROOT), str(_REPO_ROOT / "engine")]:
 
 from db.models import AlertSent, Organization, Verdict
 from db.session import SessionLocal
-from api.auth_utils import send_email, _email_html, _p, FROM_ALERTS, REPLY_TO_ALERTS
+from api.auth_utils import send_email, _email_html, _p, FROM_ALERTS, REPLY_TO_ALERTS, FROM_BILLING, REPLY_TO_BILLING, FRONTEND_URL
+from api.tiers import CALL_VOLUME_CAPS, MANUAL_BLOCK_TIERS
 
 logger = logging.getLogger(__name__)
 
@@ -149,8 +150,12 @@ def send_alert_email(self, verdict_id: str, org_id: str) -> dict:
             logger.warning("send_alert_email: no alert_email for org %s", org_id)
             return {"status": "skipped", "reason": "no_alert_email"}
 
-        if org.tier == "free":
-            logger.debug("send_alert_email: free tier — skipping email for org %s", org_id)
+        # Item 70 (section 4): the free tier is bare-bones by design, no
+        # email alerts, dashboard only. MANUAL_BLOCK_TIERS happens to equal
+        # "every paid tier" today, reused here instead of a bare string so
+        # this stays correct if the paid ladder ever changes.
+        if org.tier not in MANUAL_BLOCK_TIERS:
+            logger.debug("send_alert_email: free tier, skipping email for org %s", org_id)
             return {"status": "skipped", "reason": "free_tier"}
 
         # Item 22: severity threshold ("All threats" default vs
@@ -194,6 +199,73 @@ def send_alert_email(self, verdict_id: str, org_id: str) -> dict:
     except Exception as exc:
         db.rollback()
         logger.exception("send_alert_email: error for verdict %s: %s", verdict_id, exc)
+        raise self.retry(exc=exc)
+    finally:
+        db.close()
+
+
+@celery_app.task(
+    name="workers.tasks.send_alerts.send_quota_warning_email",
+    bind=True,
+    max_retries=3,
+    default_retry_delay=30,
+)
+def send_quota_warning_email(self, org_id: str, level: str) -> dict:
+    """Item 30 (section 5) soft-limit email: never pauses scanning, this is
+    a notice only. `level` is "warning" (80% of the tier's monthly call
+    volume) or "exceeded" (100%). Idempotency (one email per threshold per
+    billing month) is enforced by the caller (process_logs.py's
+    _check_quota_thresholds), not here.
+    """
+    db = SessionLocal()
+    try:
+        org: Organization | None = db.query(Organization).filter(Organization.id == org_id).first()
+        if org is None or not org.alert_email:
+            logger.warning("send_quota_warning_email: no alert_email for org %s", org_id)
+            return {"status": "skipped", "reason": "no_alert_email"}
+
+        cap = CALL_VOLUME_CAPS.get(org.tier)
+        used = org.monthly_requests_processed or 0
+        cap_display = f"{cap:,}" if cap else "your plan's"
+        used_display = f"{used:,}"
+
+        if level == "exceeded":
+            subject = "You've reached your Clew monthly call volume"
+            heading = "Monthly call volume reached"
+            headline = f"Your organisation has processed {used_display} API calls this month, reaching {cap_display} call/month volume."
+        else:
+            subject = "Approaching your Clew monthly call volume"
+            heading = "Approaching your monthly call volume"
+            headline = f"Your organisation has processed {used_display} API calls this month, over 80% of {cap_display} call/month volume."
+
+        note = "Clew keeps scanning your traffic regardless. Consider upgrading for a higher monthly volume."
+        body_text = f"{headline}\n\n{note}\n{FRONTEND_URL}/dashboard/settings#billing"
+        body_html = _email_html(
+            heading=heading,
+            body_html=(
+                _p(headline)
+                + _p(note)
+                + _p(
+                    f'<a href="{FRONTEND_URL}/dashboard/settings#billing" style="color:#0D0D0D;">View plans &rarr;</a>'
+                )
+            ),
+            footer_note="You are receiving this because your organisation has email alerts enabled.",
+        )
+
+        success = send_email(
+            to=org.alert_email,
+            subject=subject,
+            body_text=body_text,
+            body_html=body_html,
+            from_address=FROM_BILLING,
+            reply_to=REPLY_TO_BILLING,
+        )
+
+        logger.info("send_quota_warning_email: org=%s level=%s status=%s", org_id, level, "sent" if success else "failed")
+        return {"status": "sent" if success else "failed"}
+
+    except Exception as exc:
+        logger.exception("send_quota_warning_email: error for org %s: %s", org_id, exc)
         raise self.retry(exc=exc)
     finally:
         db.close()

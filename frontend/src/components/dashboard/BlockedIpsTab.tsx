@@ -94,7 +94,6 @@ export function BlockedIpsTab({ role }: { role: string | null }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ip: manualIp, reason: manualReason || undefined }),
       });
-      if (r.status === 403) { setManualError("Blocking requires Growth or Pro plan."); return; }
       if (!r.ok) { const d = await r.json().catch(() => ({})); setManualError(d?.detail ?? "Failed to block IP."); return; }
       setManualIp("");
       setManualReason("");

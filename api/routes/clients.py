@@ -14,7 +14,6 @@ alert config is org-scoped, not per-login (Phase 2, item 7).
 from datetime import datetime, timezone
 from typing import Optional
 
-import boto3
 from botocore.exceptions import ClientError
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, field_validator
@@ -22,6 +21,7 @@ from sqlalchemy.orm import Session
 
 from api.deps import CurrentOrg, get_current_org, get_db, require_role
 from api.auth_utils import encrypt_secret
+from api.aws import CLEW_AWS_ACCOUNT_ID, AWSAccessError, aws_session_for_org
 from db.models import Organization
 
 router = APIRouter()
@@ -30,19 +30,20 @@ router = APIRouter()
 # ---------------------------------------------------------------------------
 # Item 16: S3 connection test, fired by every PATCH that touches S3 config.
 #
-# The bucket owner's IAM policy is checked against Clew's single shared IAM
-# user (env AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY on the worker/API host,
-# see IamPolicyGuide in the frontend Settings page). There is no per-org
-# access key/secret in this schema; that would be item 42's cross-account
-# IAM role work, explicitly POST-MVP.
+# Phase 2: reads via aws_session_for_org, so an org with aws_role_arn set is
+# tested against its own cross-account role (with the External ID), and an
+# org without one falls back to Clew's shared IAM user (env
+# AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY), the pre-phase-2 behavior.
 # ---------------------------------------------------------------------------
 
-def _test_s3_connection(bucket: str, prefix: str, region: str) -> tuple[str, Optional[str]]:
+def _test_s3_connection(org: Organization, bucket: str, prefix: str, region: str) -> tuple[str, Optional[str]]:
     """Return (status, message). status is 'connected' or 'error'."""
     try:
-        s3 = boto3.client("s3", region_name=region)
+        s3 = aws_session_for_org(org).client("s3", region_name=region)
         s3.list_objects_v2(Bucket=bucket, Prefix=prefix or "", MaxKeys=1)
         return "connected", None
+    except AWSAccessError as exc:
+        return "error", str(exc)
     except ClientError as exc:
         code = exc.response.get("Error", {}).get("Code", "")
         if code in ("InvalidAccessKeyId",):
@@ -93,6 +94,19 @@ class OrgConfig(BaseModel):
     waf_ip_set_id:       Optional[str]
     cloudflare_zone_id:  Optional[str]
     blocking_tos_accepted_at: Optional[datetime]
+    # Item 61: tenant's expected home country, used by GeoIPAgent
+    home_country:        Optional[str]
+    # Phase 2: cross-account IAM role. aws_external_id is server-generated,
+    # read-only (never in ClientUpdate/_ALLOWED_FIELDS). clew_aws_account_id
+    # isn't stored on the org at all, it's the same value for every org, read
+    # from env so the settings page can build the trust policy without a
+    # separate endpoint.
+    aws_role_arn:        Optional[str]
+    aws_external_id:     Optional[str]
+    clew_aws_account_id: str
+    # Phase 4 (section 4c): guided onboarding state.
+    onboarding_completed_at: Optional[datetime]
+    onboarding_dismissed_at: Optional[datetime]
 
     class Config:
         from_attributes = True
@@ -123,6 +137,13 @@ class ClientUpdate(BaseModel):
     waf_ip_set_id:     Optional[str] = None
     cloudflare_zone_id:Optional[str] = None
     cloudflare_token:  Optional[str] = None
+    # Item 61: tenant's expected home country, ISO 3166-1 alpha-2
+    home_country:      Optional[str] = None
+    # Phase 2: cross-account IAM role ARN, pasted back after the customer
+    # creates the role from the Settings page's generated trust/permissions
+    # policies. aws_external_id is deliberately NOT writable here, it is
+    # server-generated at org creation and never customer-chosen.
+    aws_role_arn:      Optional[str] = None
 
     @field_validator("log_format")
     @classmethod
@@ -145,6 +166,16 @@ class ClientUpdate(BaseModel):
             raise ValueError("alert_severity_threshold must be 'all' or 'high_critical_only'")
         return v
 
+    @field_validator("home_country")
+    @classmethod
+    def validate_home_country(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or v == "":
+            return None
+        v = v.strip().upper()
+        if len(v) != 2 or not v.isalpha():
+            raise ValueError("home_country must be a 2-letter ISO 3166-1 alpha-2 code")
+        return v
+
     @field_validator("s3_bucket")
     @classmethod
     def validate_s3_bucket(cls, v: Optional[str]) -> Optional[str]:
@@ -159,6 +190,19 @@ class ClientUpdate(BaseModel):
                     "s3_bucket must start and end with a lowercase letter or digit "
                     "and contain only lowercase letters, digits, and hyphens"
                 )
+        return v
+
+    @field_validator("aws_role_arn")
+    @classmethod
+    def validate_aws_role_arn(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or v == "":
+            return None
+        v = v.strip()
+        import re
+        if not re.match(r'^arn:aws:iam::\d{12}:role/[\w+=,.@-]+$', v):
+            raise ValueError(
+                "aws_role_arn must look like arn:aws:iam::<12-digit-account-id>:role/<role-name>"
+            )
         return v
 
 
@@ -189,6 +233,12 @@ def _to_org_config(org: Organization, role: str) -> OrgConfig:
         waf_ip_set_id=org.waf_ip_set_id,
         cloudflare_zone_id=org.cloudflare_zone_id,
         blocking_tos_accepted_at=org.blocking_tos_accepted_at,
+        home_country=org.home_country,
+        aws_role_arn=org.aws_role_arn,
+        aws_external_id=org.aws_external_id,
+        clew_aws_account_id=CLEW_AWS_ACCOUNT_ID,
+        onboarding_completed_at=org.onboarding_completed_at,
+        onboarding_dismissed_at=org.onboarding_dismissed_at,
     )
 
 
@@ -227,6 +277,7 @@ async def update_me(
         "s3_bucket", "s3_prefix", "log_format", "aws_region",
         "alert_email", "alert_severity_threshold",
         "waf_ip_set_id", "cloudflare_zone_id", "cloudflare_token",
+        "home_country", "aws_role_arn",
     }
     old_s3_bucket, old_s3_prefix, old_log_format = (
         org.s3_bucket, org.s3_prefix, org.log_format,
@@ -248,9 +299,11 @@ async def update_me(
         org.s3_status_message = None
 
     # Item 16: the save itself triggers the connection test, confirmation
-    # only appears after the test passes.
-    if s3_fields_touched and org.s3_bucket:
-        status, message = _test_s3_connection(org.s3_bucket, org.s3_prefix or "", org.aws_region or "us-east-1")
+    # only appears after the test passes. Phase 2: also re-test on an
+    # aws_role_arn-only save, so pasting back a role ARN gets immediate
+    # feedback instead of waiting for the next 15-minute poll.
+    if (s3_fields_touched or "aws_role_arn" in update_data) and org.s3_bucket:
+        status, message = _test_s3_connection(org, org.s3_bucket, org.s3_prefix or "", org.aws_region or "us-east-1")
         org.s3_status = status
         org.s3_status_message = message
         if status == "connected" and org.s3_connected_at is None:
@@ -290,10 +343,10 @@ async def update_me(
 # ---------------------------------------------------------------------------
 # POST /clients/me/accept-blocking-tos
 #
-# Item 28: one-time acceptance of the Growth Subscription Agreement, shown
-# in a modal right before the upgrade-to-Growth payment flow opens. Backend
-# block actions (verdicts.py) 403 until this is set. Owner-only, same as
-# the billing upgrade action that triggers this modal.
+# Item 28/69: one-time acceptance of the Blocking Subscription Agreement,
+# shown in a modal right before a manual-block-eligible tier's payment flow
+# opens. Backend block actions (verdicts.py) 403 until this is set. Owner-only,
+# same as the billing upgrade action that triggers this modal.
 # ---------------------------------------------------------------------------
 
 @router.post("/clients/me/accept-blocking-tos", response_model=OrgConfig)
@@ -304,6 +357,40 @@ async def accept_blocking_tos(
     org = current_org.organization
     if org.blocking_tos_accepted_at is None:
         org.blocking_tos_accepted_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(org)
+    return _to_org_config(org, current_org.role)
+
+
+# ---------------------------------------------------------------------------
+# Guided onboarding (Phase 4, section 4c)
+#
+# Dismissed stops the wizard from auto-opening again; completed stops
+# showing the prompt entirely. Both owner/admin only, a viewer never gets
+# the wizard, so it can't dismiss or complete it either.
+# ---------------------------------------------------------------------------
+
+@router.post("/clients/me/onboarding/dismiss", response_model=OrgConfig)
+async def dismiss_onboarding(
+    current_org: CurrentOrg = Depends(require_role("owner", "admin")),
+    db: Session = Depends(get_db),
+):
+    org = current_org.organization
+    if org.onboarding_dismissed_at is None:
+        org.onboarding_dismissed_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(org)
+    return _to_org_config(org, current_org.role)
+
+
+@router.post("/clients/me/onboarding/complete", response_model=OrgConfig)
+async def complete_onboarding(
+    current_org: CurrentOrg = Depends(require_role("owner", "admin")),
+    db: Session = Depends(get_db),
+):
+    org = current_org.organization
+    if org.onboarding_completed_at is None:
+        org.onboarding_completed_at = datetime.now(timezone.utc)
         db.commit()
         db.refresh(org)
     return _to_org_config(org, current_org.role)

@@ -7,8 +7,10 @@ POST /settings/test-waf         : wafv2:GetIPSet against the stored ARN/ID
 POST /settings/test-cloudflare  : GET /zones/{zone_id} against the stored token
 
 Same test-and-show-result pattern as `clients.py`'s S3 save-and-test (item 16).
-Both blocking integrations are Growth+ only (enforced here too, not just in
-the frontend section visibility).
+Both blocking integrations require an active paid plan (MANUAL_BLOCK_TIERS,
+enforced here too, not just in the frontend section visibility). Automatic,
+unattended blocking is the narrower AUTO_BLOCK_TIERS gate, checked separately
+in workers/tasks/process_logs.py before a verdict ever reaches push_block.
 """
 from __future__ import annotations
 
@@ -18,7 +20,8 @@ from pydantic import BaseModel
 
 from api.deps import CurrentOrg, require_role
 from api.auth_utils import decrypt_secret
-from api.tiers import AUTO_BLOCK_TIERS
+from api.aws import AWSAccessError, aws_session_for_org
+from api.tiers import MANUAL_BLOCK_TIERS
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
@@ -29,8 +32,8 @@ class TestResultOut(BaseModel):
 
 
 def _require_blocking_tier(current_org: CurrentOrg) -> None:
-    if current_org.organization.tier not in AUTO_BLOCK_TIERS:
-        raise HTTPException(status_code=403, detail="Blocking requires Growth or Pro plan.")
+    if current_org.organization.tier not in MANUAL_BLOCK_TIERS:
+        raise HTTPException(status_code=403, detail="Blocking requires an active paid plan.")
 
 
 # ---------------------------------------------------------------------------
@@ -42,9 +45,8 @@ def test_waf(current_org: CurrentOrg = Depends(require_role("owner", "admin"))):
     _require_blocking_tier(current_org)
     org = current_org.organization
     if not org.waf_ip_set_id:
-        raise HTTPException(status_code=422, detail="No WAF IP set ARN configured yet.")
+        raise HTTPException(status_code=422, detail="No WAF IP set configured yet.")
 
-    import boto3
     from botocore.exceptions import ClientError
 
     name, _, set_id = org.waf_ip_set_id.partition("::")
@@ -53,10 +55,12 @@ def test_waf(current_org: CurrentOrg = Depends(require_role("owner", "admin"))):
         name = "clew-blocked-ips"
 
     try:
-        waf = boto3.client("wafv2", region_name=org.aws_region or "us-east-1")
+        waf = aws_session_for_org(org).client("wafv2", region_name=org.aws_region or "us-east-1")
         result = waf.get_ip_set(Name=name, Scope="REGIONAL", Id=set_id)
         count = len(result["IPSet"]["Addresses"])
         return TestResultOut(status="connected", message=f"Connected, IP set contains {count} IPs")
+    except AWSAccessError as exc:
+        return TestResultOut(status="error", message=str(exc))
     except ClientError as exc:
         code = exc.response.get("Error", {}).get("Code", "")
         if code == "WAFNonexistentItemException":

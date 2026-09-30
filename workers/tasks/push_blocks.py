@@ -37,7 +37,9 @@ for _p in [str(_REPO_ROOT)]:
 from db.models import IpMemory, Organization, Verdict
 from db.session import SessionLocal
 from api.auth_utils import decrypt_secret
-from api.tiers import AUTO_BLOCK_TIERS
+from api.aws import aws_session_for_org
+from blocking.aws_waf import add_ip_to_set, remove_ip_from_set
+from blocking.cloudflare import block_ip, unblock_ip
 
 logger = logging.getLogger(__name__)
 
@@ -74,13 +76,13 @@ def push_block(self, verdict_id: str, org_id: str) -> dict:
         if org is None:
             return {"status": "skipped", "reason": "org_not_found"}
 
-        # --- Tier gate ---
-        if org.tier not in AUTO_BLOCK_TIERS:
-            logger.debug(
-                "push_block: org %s on tier %s, blocking not available",
-                org_id, org.tier,
-            )
-            return {"status": "skipped", "reason": "tier_not_eligible"}
+        # No tier gate here: both callers already check the tier set that
+        # applies to them before enqueueing this task (process_logs.py checks
+        # AUTO_BLOCK_TIERS for the automatic pipeline path, verdicts.py checks
+        # the wider MANUAL_BLOCK_TIERS for the two manual-block endpoints). A
+        # gate here checking only AUTO_BLOCK_TIERS used to silently no-op
+        # every Basic/Starter manual block, since AUTO_BLOCK_TIERS excludes
+        # "starter" but MANUAL_BLOCK_TIERS includes it.
 
         # --- Confidence gate ---
         if verdict.confidence < BLOCK_CONFIDENCE_THRESHOLD:
@@ -104,7 +106,6 @@ def push_block(self, verdict_id: str, org_id: str) -> dict:
 
         # --- AWS WAF ---
         if org.waf_ip_set_id:
-            from blocking.aws_waf import add_ip_to_set
             # WAF IP set name is stored as "name::id" or just the ID if legacy
             name, _, set_id = org.waf_ip_set_id.partition("::")
             if not set_id:
@@ -116,6 +117,7 @@ def push_block(self, verdict_id: str, org_id: str) -> dict:
                 waf_ip_set_id=set_id,
                 waf_ip_set_name=name,
                 region=org.aws_region or "us-east-1",
+                session=aws_session_for_org(org),
             )
             if ok:
                 blocked_by.append("waf")
@@ -125,7 +127,6 @@ def push_block(self, verdict_id: str, org_id: str) -> dict:
 
         # --- Cloudflare ---
         if org.cloudflare_zone_id and org.cloudflare_token:
-            from blocking.cloudflare import block_ip
             ok, error = block_ip(
                 ip=ip,
                 zone_id=org.cloudflare_zone_id,
@@ -197,7 +198,6 @@ def push_unblock(self, verdict_id: str, org_id: str) -> dict:
         unblocked_by: list[str] = []
 
         if org.waf_ip_set_id:
-            from blocking.aws_waf import remove_ip_from_set
             name, _, set_id = org.waf_ip_set_id.partition("::")
             if not set_id:
                 set_id = name
@@ -207,6 +207,7 @@ def push_unblock(self, verdict_id: str, org_id: str) -> dict:
                 waf_ip_set_id=set_id,
                 waf_ip_set_name=name,
                 region=org.aws_region or "us-east-1",
+                session=aws_session_for_org(org),
             )
             if ok:
                 unblocked_by.append("waf")
@@ -215,7 +216,6 @@ def push_unblock(self, verdict_id: str, org_id: str) -> dict:
                 ip_memory.waf_block_error = None if ok else error
 
         if org.cloudflare_zone_id and org.cloudflare_token:
-            from blocking.cloudflare import unblock_ip
             ok, error = unblock_ip(
                 ip=ip,
                 zone_id=org.cloudflare_zone_id,

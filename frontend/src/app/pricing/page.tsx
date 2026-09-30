@@ -6,7 +6,7 @@ import { Pricing } from "@/components/home/Pricing";
 export const metadata: Metadata = {
   title: "Pricing",
   description:
-    "Simple, transparent pricing for every stage of growth. From a free tier for early-stage companies to Pro for high-volume APIs. No code changes required.",
+    "Simple, transparent pricing for every stage of growth, from Starter to Pro for high-volume APIs. No code changes required.",
 };
 
 export default function PricingPage() {

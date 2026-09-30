@@ -47,6 +47,10 @@ from schemas.models import (
 
 logger = logging.getLogger(__name__)
 
+# Phase 3/item 33: hard cap on the LLM-generated explanation text written to
+# Verdict.explanation, so a runaway generation can't bloat the DB row.
+_MAX_LLM_EXPLANATION_CHARS = 800
+
 try:
     from xgboost import XGBClassifier as _XGBClassifier
     _XGB_AVAILABLE = True
@@ -461,19 +465,26 @@ class MetaAgentOrchestrator:
                 ))
 
         findings: List[AgentFinding] = list(skipped_findings)
+        active_results: Dict[str, AgentFinding] = {}
         with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
             futures = {pool.submit(agent.run, records, mode): agent for agent in active_agents}
             for future in as_completed(futures):
                 agent = futures[future]
                 try:
                     finding = future.result()
-                    findings.append(finding)
+                    active_results[agent.__class__.__name__] = finding
                     logger.debug(
                         "[MetaAgent] %s → threat=%s conf=%.2f",
                         finding.agent_name, finding.threat_type, finding.confidence_score,
                     )
                 except Exception as exc:
                     logger.error("[MetaAgent] %s failed: %s", agent.name, exc, exc_info=True)
+        # as_completed() yields in thread-finish order, not submission order — rebuild
+        # in stable agent order so downstream fusion is deterministic across runs.
+        for agent in active_agents:
+            result = active_results.get(agent.__class__.__name__)
+            if result is not None:
+                findings.append(result)
         return findings
 
     # ── Fusion logic ────────────────────────────────────────────────────────
@@ -652,12 +663,15 @@ class MetaAgentOrchestrator:
         """
         resolved = list(findings)
 
-        # Build {threat_type: confidence_score} for all HIGH-confidence detections
-        high_conf_threats: Dict[ThreatType, float] = {
-            f.threat_type: f.confidence_score
-            for f in findings
-            if f.threat_detected and f.confidence == ConfidenceLevel.HIGH
-        }
+        # Build {threat_type: confidence_score} for all HIGH-confidence detections.
+        # Use max, not last-write-wins: two agents can share a threat_type (see
+        # _AGENT_DOMAINS), and picking whichever happened to be processed last
+        # would make escalation confidence depend on agent dispatch order.
+        high_conf_threats: Dict[ThreatType, float] = {}
+        for f in findings:
+            if f.threat_detected and f.confidence == ConfidenceLevel.HIGH:
+                prev = high_conf_threats.get(f.threat_type, 0.0)
+                high_conf_threats[f.threat_type] = max(prev, f.confidence_score)
 
         if not high_conf_threats:
             return resolved
@@ -783,7 +797,7 @@ class MetaAgentOrchestrator:
         try:
             result = self._llm.reason(META_SYSTEM_PROMPT, user)
         except LLMError as exc:
-            logger.error("[MetaAgent] LLM fusion failed: %s — using rule-based verdict", exc)
+            logger.warning("[MetaAgent] org=%s LLM fusion failed: %s, using rule-based verdict", self.memory.tenant_key, exc)
             return rule_verdict
 
         is_attack   = bool(result.get("is_attack", rule_verdict.is_attack))
@@ -804,7 +818,11 @@ class MetaAgentOrchestrator:
         if compound and compound not in new_compound:
             new_compound.append(f"[LLM] {compound}")
 
-        llm_explanation = rule_verdict.explanation + f"\n\n[LLM Meta-Fusion] {reasoning}"
+        # Phase 3/item 33: the whole point is a real explanation instead of
+        # the rule-based template, so the LLM's own reasoning replaces
+        # rule_verdict.explanation rather than being appended after it. Hard
+        # length cap so a runaway generation can't bloat the verdicts row.
+        llm_explanation = reasoning.strip()[:_MAX_LLM_EXPLANATION_CHARS] if reasoning.strip() else rule_verdict.explanation
 
         logger.debug(
             "[MetaAgent] LLM fusion: is_attack=%s threat=%s conf=%.2f (rule: %s %.2f)",

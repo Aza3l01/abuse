@@ -2,10 +2,14 @@ import type { Metadata } from "next";
 import type { ReactNode } from "react";
 import { DashboardSidebar } from "@/components/dashboard/Sidebar";
 import { DashboardGate } from "@/components/dashboard/DashboardGate";
+import { DashboardContentShell } from "@/components/dashboard/DashboardContentShell";
 import { MfaNudgeBanner } from "@/components/dashboard/MfaNudgeBanner";
 import { TrialBanner } from "@/components/dashboard/TrialBanner";
+import { UsageBanner } from "@/components/dashboard/UsageBanner";
 import { SessionExpiredModal } from "@/components/dashboard/SessionExpiredModal";
 import { StatusHeader } from "@/components/dashboard/StatusHeader";
+import { OnboardingModal } from "@/components/dashboard/OnboardingModal";
+import { PlanCheckoutTrigger } from "@/components/dashboard/PlanCheckoutTrigger";
 
 export const metadata: Metadata = {
   title: "Dashboard",
@@ -19,20 +23,25 @@ export const metadata: Metadata = {
  * Client Component (needs usePathname for active-link highlighting);
  * this layout itself is a Server Component. DashboardGate blocks all of
  * this behind a "create your organisation" step if the client has none yet.
+ * DashboardContentShell reserves right-margin while the onboarding panel
+ * is docked, so the panel never overlaps page content.
  */
 export default function DashboardLayout({ children }: { children: ReactNode }) {
   return (
     <DashboardGate>
       <div style={{ display: "flex", minHeight: "100vh", background: "var(--color-bg)" }}>
         <DashboardSidebar />
-        <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
+        <DashboardContentShell>
           <StatusHeader />
           <TrialBanner />
+          <UsageBanner />
           <MfaNudgeBanner />
+          <PlanCheckoutTrigger />
           {children}
-        </div>
+        </DashboardContentShell>
       </div>
       <SessionExpiredModal />
+      <OnboardingModal />
     </DashboardGate>
   );
 }

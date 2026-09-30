@@ -191,7 +191,11 @@ export function VerdictsTab() {
     const action = currentlyBlocked ? "unblock" : "block";
     try {
       const r = await apiFetch(`/verdicts/${verdictId}/${action}`, { method: "POST" });
-      if (r.status === 403) { alert("Blocking requires Growth or Pro plan."); return; }
+      if (r.status === 403) {
+        const d = await r.json().catch(() => ({}));
+        alert(d?.detail ?? "Blocking is not available on your plan.");
+        return;
+      }
       if (r.ok) load();
     } finally {
       setBlocking(null);

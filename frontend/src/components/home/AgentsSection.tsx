@@ -39,13 +39,13 @@ const AGENTS = [
     label: "knowledge",
     name: "KnowledgeAgent",
     description:
-      "Cross-session memory. Matches emerging traffic patterns against known threat signatures accumulated across all prior sessions.",
+      "Cross-session memory. Builds a signature cache from prior verdicts over time. Passive: it does not independently produce a verdict yet.",
   },
   {
     label: "orchestrator",
     name: "Meta-Agent",
     description:
-      "Fuses signals from all seven agents via weighted multi-agent consensus and an XGBoost stacking model. One confidence-scored verdict per batch.",
+      "Fuses signals from the six active agents via weighted multi-agent consensus and an XGBoost stacking model. One confidence-scored verdict per batch.",
     isOrchestrator: true,
   },
 ];
@@ -70,14 +70,14 @@ export function AgentsSection() {
             color: "var(--color-text)",
           }}
         >
-          Not one classifier. Seven specialised agents.
+          Not one classifier. Six specialised agents.
         </h2>
 
         <p
           className="text-sm leading-relaxed mb-12"
           style={{ color: "var(--color-text-muted)" }}
         >
-          Each agent is independently optimised for a different attack class and runs in parallel against every log batch. The meta-agent orchestrator fuses their signals into a single confidence-scored verdict.
+          Six of these agents run in parallel against every log batch, each independently optimised for a different attack class, and the meta-agent orchestrator fuses their signals into a single confidence-scored verdict. A seventh, passive layer builds cross-session pattern memory over time.
         </p>
 
         {/* Tight grid: 1px dividers via container background trick */}

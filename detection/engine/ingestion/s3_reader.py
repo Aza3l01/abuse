@@ -41,6 +41,13 @@ class S3Reader:
         max_objects:        Safety cap — process at most this many objects per
                             invocation to prevent a single task from running for
                             hours if a client has a huge backlog.
+        session:            Pre-built boto3 Session to read with (phase 2:
+                            cross-account sts:AssumeRole, or the shared
+                            fallback credential, see api/aws.py). Kept as a
+                            plain boto3.Session here, not an org id, so this
+                            module stays free of any org/database concept.
+                            Falls back to boto3's default/ambient session
+                            when not provided.
     """
 
     def __init__(
@@ -50,13 +57,14 @@ class S3Reader:
         aws_region: str,
         last_processed_key: Optional[str] = None,
         max_objects: int = 500,
+        session: Optional[boto3.Session] = None,
     ) -> None:
         self.bucket = bucket
         self.prefix = prefix
         self.aws_region = aws_region
         self.last_processed_key = last_processed_key
         self.max_objects = max_objects
-        self._s3 = boto3.client("s3", region_name=aws_region)
+        self._s3 = (session or boto3).client("s3", region_name=aws_region)
 
     def list_new_objects(self) -> list[dict]:
         """
