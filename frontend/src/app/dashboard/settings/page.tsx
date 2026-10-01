@@ -1078,7 +1078,7 @@ export default function SettingsPage() {
                             textTransform: "capitalize",
                           }}
                         >
-                          {p}{p === "annual" ? " (2 months free)" : ""}
+                          {p}{p === "annual" ? " (50% off)" : ""}
                         </button>
                       ))}
                     </div>

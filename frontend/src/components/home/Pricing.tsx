@@ -66,7 +66,7 @@ export function Pricing() {
                   cursor: "pointer",
                 }}
               >
-                Annual -17%
+                Annual -50%
               </button>
             </div>
 
@@ -102,7 +102,7 @@ export function Pricing() {
             EARLY ACCESS
           </p>
           <p style={{ fontFamily: "var(--font-mono)", fontSize: "11px", letterSpacing: "0.04em", color: "var(--color-text-muted)", margin: "2px 0 0" }}>
-            until 00:00 UTC January 1, 2027
+            until 00:00 UTC January 1, 2028
           </p>
         </div>
 

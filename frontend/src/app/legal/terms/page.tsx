@@ -9,7 +9,7 @@ export const metadata: Metadata = {
 
 export default function TermsPage() {
   return (
-    <LegalLayout title="Terms of Service" lastUpdated="August 10, 2026">
+    <LegalLayout title="Terms of Service" lastUpdated="October 1, 2026">
       <p style={legalPStyle}>
         These Terms of Service (&quot;Terms&quot;) govern access to and use of Clew
         (&quot;Clew&quot;, &quot;we&quot;, &quot;us&quot;), a service that ingests API access
@@ -52,9 +52,12 @@ export default function TermsPage() {
       <p style={legalPStyle}>
         You can request a full refund within 72 hours of your first paid
         charge. After that window, and on any renewal charge, payments are
-        non-refundable. Cancelling stops future billing only: your plan
-        stays active until the end of the billing period you already paid
-        for. See the full{" "}
+        non-refundable. This applies equally to annual plans: an annual
+        charge is billed once, upfront, for the full year, and is
+        non-refundable after the 72-hour window for the remainder of that
+        year. Cancelling stops future billing only: your plan stays active
+        until the end of the billing period you already paid for. See the
+        full{" "}
         <Link href="/legal/refund-policy" style={{ color: "var(--color-text)" }}>
           Refund Policy
         </Link>{" "}for details.
