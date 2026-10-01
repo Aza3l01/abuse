@@ -32,22 +32,25 @@ abuse/                         <- project root (repo: "abuse", product: Clew)
 │   ├── main.py                <- app entry point, CORS, routers wired in
 │   ├── deps.py                <- get_db(), get_current_client(), get_current_org(), require_role()
 │   ├── auth_utils.py          <- hashing, JWT, cookies, OTP, Resend email, Turnstile verification
-│   ├── limiter.py             <- shared slowapi rate limiter instance
+│   ├── limiter.py             <- shared slowapi rate limiter (Redis-backed, shared across workers)
+│   ├── tiers.py               <- shared tier constants (blocking, volume caps, retention, LLM)
+│   ├── aws.py                 <- aws_session_for_org(): cross-account sts:AssumeRole sessions
 │   └── routes/
 │       ├── auth.py            <- register/login/MFA/sessions/password/account deletion
-│       ├── clients.py         <- GET/PATCH /clients/me (org S3 + alert + blocking config)
+│       ├── clients.py         <- GET/PATCH /clients/me (org config), blocking ToS, onboarding state
 │       ├── verdicts.py        <- list/detail/manual-block/block/unblock/threat-types
 │       ├── dashboard.py       <- GET /dashboard/summary
 │       ├── ips.py             <- GET /ips, POST /ips/{ip}/unblock
 │       ├── billing.py         <- Stripe (pending keys) + Razorpay (live) + shared cancel/refund
-│       ├── org.py             <- invites, team members, role changes, ownership transfer
+│       ├── org.py             <- create org, invites, team members, role changes, ownership transfer
 │       ├── settings.py        <- POST /settings/test-waf, /settings/test-cloudflare
+│       ├── newsletter.py      <- POST /newsletter/subscribe, /newsletter/confirm (Resend Audiences)
 │       └── alerts.py          <- GET /alerts (delivery log), POST /alerts/test
 │
 ├── db/
 │   ├── models.py              <- all SQLAlchemy ORM models (Client, Organization, ...)
 │   ├── session.py             <- engine + SessionLocal factory
-│   └── migrations/versions/   <- 13 revisions, see `alembic history` for the current chain
+│   └── migrations/versions/   <- 18 revisions, see `alembic history` for the current chain
 │
 ├── detection/                 <- AI detection engine
 │   ├── schemas/models.py      <- LogRecord pydantic model
@@ -69,13 +72,15 @@ abuse/                         <- project root (repo: "abuse", product: Clew)
 │
 ├── workers/
 │   ├── celery_app.py          <- Celery app instance + config
-│   ├── beat.py                <- schedule: poll every 15min, trial reminders + purge daily
+│   ├── beat.py                <- 5-entry schedule, see the Celery Pipeline section
 │   ├── tests/                 <- test_process_logs.py (custom runner, not pytest)
 │   └── tasks/
 │       ├── process_logs.py            <- S3 -> detect -> verdicts + ip_memory (the main task)
 │       ├── send_alerts.py             <- Resend email alerts, severity-threshold gated
 │       ├── push_blocks.py             <- WAF / Cloudflare IP block tasks
 │       ├── trial_reminders.py         <- 5d/2d trial-ending emails + expired-trial tier revert
+│       ├── reset_usage_counters.py    <- monthly call-volume counter reset (1st of month)
+│       ├── purge_expired_data.py      <- tiered retention purge (daily)
 │       └── purge_deleted_accounts.py  <- hard-deletes orgs/clients 30 days after soft-delete
 │
 ├── blocking/
@@ -88,26 +93,31 @@ abuse/                         <- project root (repo: "abuse", product: Clew)
 │       │   ├── layout.tsx             <- root layout, fonts, OG metadata
 │       │   ├── page.tsx               <- homepage (marketing)
 │       │   ├── pricing/page.tsx       <- standalone /pricing route
+│       │   ├── docs/page.tsx          <- public documentation (LegalLayout scroll-spy TOC)
 │       │   ├── login/, register/      <- sign in, create account (Turnstile-gated)
 │       │   ├── verify-email/          <- OTP confirmation
 │       │   ├── forgot-password/, reset-password/  <- Turnstile-gated reset flow
 │       │   ├── accept-invite/         <- team invite acceptance (new or existing account)
+│       │   ├── newsletter/confirm/    <- double opt-in confirmation landing page
 │       │   ├── legal/                 <- terms, privacy, dpa, subscription-agreement, refund-policy
 │       │   └── dashboard/
-│       │       ├── layout.tsx         <- sidebar + StatusHeader + DashboardGate wrapper
+│       │       ├── layout.tsx         <- sidebar + StatusHeader + banners + DashboardGate wrapper
 │       │       ├── page.tsx           <- overview (stats, chart, top IPs, scanning banner)
 │       │       ├── alerts/page.tsx    <- Verdicts + Notifications tabs
 │       │       ├── ips/page.tsx       <- All IPs + Blocked tabs
 │       │       ├── verdicts/[id]/     <- verdict detail (agent scores, raw logs, AI analysis)
 │       │       └── settings/page.tsx  <- S3/WAF/Cloudflare config, MFA, team, billing
 │       ├── components/
-│       │   ├── home/                  <- Hero, CostCalculator, HowItWorks, Pricing
-│       │   ├── layout/                <- Navbar, Footer
-│       │   ├── legal/                 <- LegalLayout (scroll-spy TOC sidebar)
-│       │   ├── dashboard/              <- Sidebar, StatusHeader, TeamMembers, tab components
+│       │   ├── home/                  <- Hero, CostCalculator, HowItWorks, AgentsSection, Pricing
+│       │   ├── layout/                <- Navbar, Footer (LinkedIn + Maps icons, NewsletterForm)
+│       │   ├── legal/                 <- LegalLayout (scroll-spy TOC sidebar, reused by /docs)
+│       │   ├── dashboard/             <- Sidebar, StatusHeader, TeamMembers, tab components,
+│       │   │                             OnboardingModal, GuidedOnboardingButton, LogSourceWizard,
+│       │   │                             PlanCheckoutTrigger, Trial/Usage/MfaNudge banners
 │       │   ├── auth/                  <- AuthLayout, Turnstile widget wrapper
 │       │   └── providers/             <- ThemeProvider (next-themes)
-│       ├── lib/                       <- api.ts (apiFetch w/ silent refresh), razorpay.ts
+│       ├── lib/                       <- api.ts (apiFetch w/ silent refresh), pricing.ts,
+│       │                                 onboarding.ts, razorpay.ts, passwordStrength.ts
 │       └── proxy.ts                   <- Edge auth gatekeeper (Next.js 16's middleware.ts)
 │
 ├── docker/
@@ -267,8 +277,9 @@ signup creates one org and stays there.
 | `email_verified` | bool | Must be True before login allowed |
 | `mfa_enabled` / `mfa_secret` | bool / text | Fernet-encrypted TOTP secret |
 | `mfa_nudge_dismissed_at` | timestamptz | |
-| `verify_token_hash` / `reset_token_hash` (+ `_expires_at`) | text / timestamptz | Hashed OTPs, never stored raw |
-| `deleted_at` | timestamptz | Item 40 soft-delete marker; hard-purged 30 days later |
+| `verify_token` (+ `verify_token_expires_at`) | text / timestamptz | Email-verification OTP, bcrypt-hashed, never stored raw |
+| `reset_token_hash` (+ `reset_token_expires_at`) | text / timestamptz | Password-reset OTP, hashed, never stored raw |
+| `deleted_at` | timestamptz | Soft-delete marker; hard-purged 30 days later |
 
 **`organizations`**: one row per tenant, owns everything else
 
@@ -277,26 +288,31 @@ signup creates one org and stays there.
 | `id` / `company_name` / `domain` | UUID / varchar / varchar | domain drives invite role-ceiling checks |
 | `s3_bucket` / `s3_prefix` / `log_format` / `aws_region` | varchar | Customer's log source config |
 | `last_processed_key` / `s3_connected_at` | text / timestamptz | Ingestion cursor + first-connect timestamp |
-| `s3_status` / `s3_status_message` | varchar / text | Set on log-format auto-detect mismatch (item 5) |
+| `s3_status` / `s3_status_message` | varchar / text | Set on log-format auto-detect mismatch |
 | `calibration_status` | varchar | `running` / `done` / `failed`, first-connection LTM warmup |
-| `last_scan_completed_at` / `last_scan_status` / `last_scan_error` | timestamptz / varchar / text | |
+| `last_scan_started_at` / `last_scan_completed_at` / `last_scan_status` / `last_scan_error` | timestamptz / timestamptz / varchar / text | `started_at` also powers the stuck-`in_progress` self-heal sweep |
 | `home_country` | varchar(2) | Feeds `GeoIPAgent`'s off-country baseline |
-| `waf_ip_set_id` / `cloudflare_zone_id` / `cloudflare_token` / `blocking_tos_accepted_at` | | Blocking config, Growth+ only |
+| `aws_role_arn` / `aws_external_id` | varchar | Cross-account `sts:AssumeRole` config. `external_id` is server-generated, read-only, never customer-chosen |
+| `waf_ip_set_id` / `cloudflare_zone_id` / `cloudflare_token` / `blocking_tos_accepted_at` | | Blocking config. `cloudflare_token` is Fernet-encrypted at rest |
+| `onboarding_completed_at` / `onboarding_dismissed_at` | timestamptz | Guided onboarding state, per organization not per user |
 | `alert_email` / `alert_severity_threshold` | varchar | `all` or `high_critical_only` |
-| `tier` | varchar | `free` / `starter` / `growth` / `pro` |
-| `trial_source` / `trial_ends_at` / `pilot_code_used` / `trial_reminder_{5,2}d_sent` | | Item 11 trial billing |
+| `tier` | varchar | `free` / `starter` / `growth` / `pro` / `enterprise` |
+| `trial_source` / `trial_ends_at` / `pilot_code_used` / `trial_reminder_{5,2}d_sent` | | Promo-code Growth trial only; self-serve signups get no trial |
 | `billing_provider` | varchar | `stripe` / `razorpay` / `pilot` |
 | `stripe_customer_id` / `stripe_subscription_id` | varchar | Pending live keys |
 | `razorpay_customer_id` / `razorpay_subscription_id` / `next_billing_date` / `first_charged_at` | | Live billing path |
 | `gstin` | varchar | Optional, India only |
-| `monthly_requests_processed` / `monthly_requests_reset_at` | int / date | Columns exist; usage metering (item 30) is post-MVP, not enforced yet |
-| `deleted_at` | timestamptz | Owner-deletes-account cascades here (item 40) |
+| `monthly_requests_processed` / `monthly_requests_reset_at` | int / timestamptz | Live call-volume metering, enforced against `CALL_VOLUME_CAPS` |
+| `quota_warning_sent_at` / `quota_exceeded_sent_at` | timestamptz | 80% and 100% soft-limit email idempotency, cleared monthly |
+| `deleted_at` | timestamptz | Owner-deletes-account cascades here |
 
 **`organization_members`**: many-to-many, a client's role within an org (`owner` / `admin` / `viewer`, unique on the pair)
 
 **`org_invites`**: single-use directed invite tokens: `invited_email`, `role`, `token_hash`, `expires_at`, `accepted_at`
 
-**`promo_codes`**: item 26 launch codes: `code` (unique), linked Stripe coupon / Razorpay offer ID (nullable, filled in later), `redeemed_at`, `redeemed_by_org_id`
+**`promo_codes`**: launch codes: `code` (unique), linked Stripe coupon / Razorpay offer ID (nullable, filled in later), `redeemed_at`, `redeemed_by_org_id`. A redeemed code grants a 30-day **Growth** trial.
+
+**`processed_webhook_events`**: webhook replay guard: `provider` (`stripe` / `razorpay`) + `event_id`, unique on the pair. Inserted before dispatch; a unique violation returns 200 without re-running side effects. Rows older than 30 days are cleared by the daily purge task.
 
 **`mfa_backup_codes`**: 10 hashed single-use recovery codes per client
 
@@ -382,6 +398,8 @@ POST /auth/delete-account           DPDP account deletion (confirmation="DELETE"
 GET   /clients/me                        Org's S3 + blocking + alert config (owner/admin)
 PATCH /clients/me                        Update any org config field, re-tests S3 on save
 POST  /clients/me/accept-blocking-tos    One-time acceptance gate before blocking is allowed
+POST  /clients/me/onboarding/dismiss     Stop auto-opening the guided onboarding modal (owner/admin)
+POST  /clients/me/onboarding/complete    Mark guided onboarding finished (owner/admin)
 ```
 
 ### Team & invites: `api/routes/org.py`
@@ -405,8 +423,8 @@ GET  /verdicts                    Paginated, multi-select severity + threat-type
 GET  /verdicts/threat-types       Distinct threat_type values for the filter dropdown
 GET  /verdicts/{id}               Full detail: agent scores, sample logs, org tier, ip_memory context
 POST /verdicts/manual-block       Manually block an IP (creates a "manual" verdict + ip_memory row)
-POST /verdicts/{id}/block         Enqueue WAF/Cloudflare block (Growth/Pro, owner/admin, ToS-gated)
-POST /verdicts/{id}/unblock       Enqueue unblock
+POST /verdicts/{id}/block         Enqueue WAF/Cloudflare block (paid tiers, owner/admin, ToS-gated)
+POST /verdicts/{id}/unblock       Enqueue unblock (never tier-gated, by design)
 ```
 
 ### Dashboard: `api/routes/dashboard.py`
@@ -432,6 +450,13 @@ POST /settings/test-waf          Verify AWS WAF IP set access (Growth+)
 POST /settings/test-cloudflare   Verify Cloudflare zone access (Growth+)
 ```
 
+### Newsletter: `api/routes/newsletter.py`
+```
+POST /newsletter/subscribe   Public, rate limited, honeypot-guarded. Sends a double opt-in email.
+                             Returns an identical response for an already-subscribed address.
+POST /newsletter/confirm     Public, confirms the opt-in token and adds the contact in Resend
+```
+
 ### Billing: `api/routes/billing.py`
 ```
 GET  /billing/status                          Current tier + subscription state
@@ -441,9 +466,10 @@ POST /billing/webhook                         Stripe webhook (verify signature +
 
 POST /billing/razorpay/create-subscription    Create/upgrade/downgrade a Razorpay subscription
 POST /billing/razorpay/verify-payment         Optimistic tier update right after checkout
+POST /billing/razorpay/verify-upgrade-order   Verify the one-time proration order payment (HMAC)
 POST /billing/razorpay/webhook                Authoritative tier reconciliation (HMAC verified)
 
-GET  /billing/refund-eligibility              72h remorse-window check
+POST /billing/refund-eligibility              72h remorse-window check
 POST /billing/cancel                          Cancel (Razorpay), immediate or at-cycle-end
 ```
 
@@ -566,12 +592,23 @@ The engine has two memory tiers:
 - **STM** (Short-Term Memory): in-process sliding window, lives for one task
   invocation only
 - **LTM** (Long-Term Memory): baseline rates, IAT reference pools, agent history,
-  timezone/off-hours history, robust-estimator lock state, persisted to Redis key
+  timezone/off-hours history, robust-estimator lock state, and `KnowledgeAgent`'s
+  per-IP reputation history plus known-bad set, persisted to Redis key
   `clew:ltm:{org_id}` after every batch
 
 `ProductSharedMemory` (subclasses `SharedMemory`) loads LTM from Redis on init
 and calls `mem.flush()` to write back after each batch. Worker restarts and
 redeployments do not lose detection context.
+
+The Redis key's TTL is tier-aware (`LTM_TTL_DAYS` in `api/tiers.py`): the free
+tier's learned state expires after 7 days of inactivity, matching its data
+retention window. Every other tier uses the engine's default 30-day idle TTL.
+
+**When adding a new LTM field, add it to both `_dump_ltm()` and `_load_ltm()`
+in `product_memory.py` and write a round-trip test using a second, fresh
+`ProductSharedMemory` instance.** Fields have been silently dropped from that
+serialization twice, and the offline eval harness cannot catch it because it
+reuses one in-process memory object and never round-trips through Redis.
 
 ### Known limitation
 
@@ -593,9 +630,11 @@ of Celery's working directory.
 
 | Task | Schedule | Purpose |
 |---|---|---|
-| `poll_all_clients` | every 15 min | Fans out one `process_logs` per org with S3 configured (skips expired-unpaid-trial and soft-deleted orgs) |
-| `send_trial_reminders` | daily 09:00 UTC | 5-day and 2-day trial-ending emails; reverts tier to `free` on actual expiry |
-| `purge_deleted_accounts` | daily 03:00 UTC | Hard-deletes orgs/clients soft-deleted 30+ days ago |
+| `poll_all_clients` | every 15 min | Fans out one `process_logs` per org with S3 configured (skips soft-deleted orgs). Free-tier orgs **are** scanned: the old expired-unpaid-trial exclusion was removed when Starter became permanently free |
+| `send_trial_reminders` | daily 09:00 UTC | 5-day and 2-day trial-ending emails; reverts tier to `free` on actual expiry. Only promo-code Growth trials exist |
+| `purge_deleted_accounts` | daily 03:00 UTC | Hard-deletes orgs/clients soft-deleted 30+ days ago, plus `processed_webhook_events` rows older than 30 days |
+| `purge_expired_data` | daily 04:00 UTC | Tiered retention purge across `alerts_sent`, `verdicts`, `scan_runs`, `ip_memory`, per `RETENTION_DAYS`. Enterprise is skipped entirely |
+| `reset_monthly_counters` | 1st of month 00:00 UTC | Zeroes `monthly_requests_processed` and clears both quota-email flags |
 
 ### `process_logs`: the main task, one per org per poll
 
@@ -618,11 +657,19 @@ of Celery's working directory.
 10. Ping `CRONITOR_URL` in the `finally` block if set (never fails the scan)
 
 **`send_alerts`**: Resend email, respects `alert_severity_threshold`. Deduplicates via
-`alerts_sent`.
+`alerts_sent`. Skipped entirely for the free tier (gated on `MANUAL_BLOCK_TIERS`).
 
-**`push_blocks`**: Checks tier ≥ growth, confidence ≥ 0.75, and that
-`blocking_tos_accepted_at` is set, then calls `blocking/aws_waf.py` and/or
-`blocking/cloudflare.py` independently (one can succeed while the other fails).
+**`push_blocks`**: checks confidence >= 0.75, then calls `blocking/aws_waf.py` and/or
+`blocking/cloudflare.py` independently (one can succeed while the other fails), using a
+cross-account session from `aws_session_for_org()` for the WAF call. Tier is checked by
+the two callers rather than inside the task, because they use different tier sets:
+`process_logs.py` checks `AUTO_BLOCK_TIERS` for the unattended path, `verdicts.py` checks
+the wider `MANUAL_BLOCK_TIERS` for the dashboard buttons.
+
+> **Known gap:** the automatic path does **not** currently check
+> `blocking_tos_accepted_at`, and there is no per-org on/off switch for automatic
+> blocking. Only the two manual routes enforce the agreement. See TODO2.md,
+> "Blocking", for the fix.
 
 ---
 
@@ -652,20 +699,29 @@ Key variables:
 
 | Route | Type | What it shows |
 |---|---|---|
-| `/` | Server | Marketing homepage: Hero, CostCalculator, HowItWorks, Pricing, Footer |
+| `/` | Server | Marketing homepage: Hero, CostCalculator, HowItWorks, AgentsSection, Pricing, Footer |
 | `/pricing` | Server | Standalone pricing comparison page |
+| `/docs` | Client | Public documentation, 14 sections, reuses `LegalLayout`'s scroll-spy TOC |
 | `/legal/*` | Client | terms, privacy, dpa, subscription-agreement, refund-policy (scroll-spy TOC) |
 | `/login` | Client | Email + password |
-| `/register` | Client | Email + password + company name, Turnstile CAPTCHA, promo code, ToS checkbox |
+| `/register` | Client | Email + password + company name, Turnstile CAPTCHA, promo code, ToS checkbox. Reads `?plan=` to carry a chosen paid tier into checkout after verification |
 | `/verify-email` | Client | 6-digit OTP input |
 | `/forgot-password` | Client | Email field + Turnstile (anti-enumeration: always shows "if registered, check email") |
 | `/reset-password` | Client | Email + OTP + new password |
 | `/accept-invite` | Client | Reads `?token=`, handles new-account / existing-account / expired / already-used |
-| `/dashboard` | Client | Stats grid, trend chart, top IPs, scanning banner, empty states |
+| `/newsletter/confirm` | Client | Double opt-in confirmation landing page |
+| `/dashboard` | Client | Stats grid, trend chart, top IPs, scanning banner, empty states, guided-onboarding entry point |
 | `/dashboard/alerts` | Client | "Verdicts" + "Notifications" tabs (delivery log, test-alert button) |
 | `/dashboard/ips` | Client | "All IPs" + "Blocked" tabs, manual block form |
 | `/dashboard/verdicts/[id]` | Client | Agent-score table, raw log sample, AI analysis (tier-gated), block/unblock |
-| `/dashboard/settings` | Client | S3/WAF/Cloudflare config, MFA, team, billing, change password, delete account |
+| `/dashboard/settings` | Client | AWS access (IAM role), WAF/Cloudflare, MFA, team, billing, change password, delete account |
+
+Guided onboarding is a modal (`OnboardingModal.tsx`) that auto-opens on first
+dashboard load for owners and admins, is dismissible, and is re-openable from
+`GuidedOnboardingButton.tsx` on the empty dashboard and from Settings. Its
+state is per organization (`onboarding_completed_at` / `onboarding_dismissed_at`),
+not per user, and it is exposed on `GET /dashboard/summary` so viewers (who
+cannot call `/clients/me`) still render correctly.
 
 ### Auth middleware: `frontend/src/proxy.ts`
 
@@ -694,22 +750,40 @@ all subdomains including `www.clewsec.com`. `allow_credentials=True` + the exact
 
 ## Blocking Integrations
 
-Growth and Pro tiers only, and gated behind a one-time blocking ToS acceptance
-(`POST /clients/me/accept-blocking-tos`) before either can be used to actively
-block (unblock is never gated).
+Two separate tier gates, defined in `api/tiers.py`:
+
+- `MANUAL_BLOCK_TIERS` (`starter`, `growth`, `pro`, `enterprise`): the dashboard
+  block button. Basic and up can block an IP by hand.
+- `AUTO_BLOCK_TIERS` (`growth`, `pro`, `enterprise`): the unattended,
+  pipeline-triggered block. Basic does **not** get this.
+
+The free Starter tier gets no blocking at all. Blocking is gated behind a
+one-time Blocking Subscription Agreement acceptance
+(`POST /clients/me/accept-blocking-tos`). Unblocking is never tier-gated and
+never agreement-gated, by design, so a downgraded org can always remove blocks
+it created.
 
 **AWS WAF v2** (`blocking/aws_waf.py`): adds/removes IPs from a customer-owned
-WAF IP set. The customer creates the IP set, configures Clew's IAM role as a
-trusted principal, and stores the IP set ARN in Settings. Clew's IAM role needs
-`wafv2:GetIPSet` + `wafv2:UpdateIPSet` on that resource.
+WAF IP set. The customer creates the IP set and stores its identifier in
+Settings. Access goes through the same cross-account IAM role used for S3
+ingestion (`aws_session_for_org()`), with `wafv2:GetIPSet` and
+`wafv2:UpdateIPSet` added to that role's permissions policy. One role, two
+capability sets, no second trust relationship. `UpdateIPSet` is a
+read-modify-write against a `LockToken` from `GetIPSet`, which is why both
+permissions are required.
 
 **Cloudflare** (`blocking/cloudflare.py`): creates/deletes block rules on the
 customer's zone using the Cloudflare API. `cloudflare_zone_id` and
-`cloudflare_token` stored per-org in the `organizations` table.
+`cloudflare_token` are stored per-org in `organizations`, with the token
+Fernet-encrypted at rest.
 
 Both can be configured simultaneously, high-confidence threats are blocked on
 all configured integrations, and each tracks its own `*_blocked` / `*_block_error`
 state independently in `ip_memory` (one can fail while the other succeeds).
+
+> **Known gap:** the automatic path does not check `blocking_tos_accepted_at`,
+> and there is no per-org toggle to turn automatic blocking on or off. See
+> TODO2.md, "Blocking".
 
 ---
 
@@ -732,7 +806,7 @@ live API keys (see "What Is Not Yet Active" below).
    calendar-anchor rule instead (on/before the 15th → immediate, after → 1st
    of next month)
 5. Cancel: `POST /billing/cancel`. Refund-eligible within a 72-hour remorse
-   window from `first_charged_at` (`GET /billing/refund-eligibility`)
+   window from `first_charged_at` (`POST /billing/refund-eligibility`)
 
 **Stripe flow (code complete, not live):**
 1. User clicks Upgrade → `POST /billing/checkout` → FastAPI creates a Stripe
@@ -863,16 +937,30 @@ For Razorpay billing, `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET` /
 
 - **Stripe billing (USD)**: code complete, DB migration applied, but blocked on
   live API keys pending company registration. Razorpay (INR) is the live path
-  today; see "Adding Stripe Later" once keys exist.
+  today; see "Adding Stripe Later" once keys exist. Non-INR visitors are shown
+  an India-only panel rather than a checkout that cannot complete.
+- **Razorpay itself is not live yet**: the integration is code complete and
+  verified against a mocked client, but the six Plan objects do not exist and
+  all `RAZORPAY_*` env vars are blank, pending bank and KYC approval. Every
+  code path degrades to a clean 503 with blank keys. The two-step upgrade
+  checkout (a one-time Orders API proration charge followed by the subscription
+  mandate) has never run against a live or sandbox account.
+- **Automatic blocking has no on/off switch and does not check the blocking
+  agreement.** Configuring a WAF IP set on Growth or above turns unattended
+  blocking on implicitly. See TODO2.md, "Blocking".
+- **Pro's "lower detection confidence threshold" and "custom thresholds"**: sold
+  on the pricing page, not built. Every agent's confidence constant is global,
+  nothing is tier-aware on confidence.
 - **Sentry / exception tracking, a public status page, an internal ops panel,
-  and a staging environment**: all explicitly post-MVP (see TODO.md's
-  "Operations, deferred" section). None of these block onboarding a first
-  real client; revisit when there's an actual client/audience to justify them.
-- **Usage metering**: `organizations.monthly_requests_processed` exists but
-  nothing increments it yet; no tier is anywhere near a volume limit.
-- **Webhook/Slack/PagerDuty alert channels, a public customer-facing API +
-  API keys, Groq-generated verdict explanations**: all post-MVP, no
-  customer has asked for any of them yet.
+  and a staging environment**: all post-MVP. None block onboarding a first real
+  client; revisit when there is an actual client or audience to justify them.
+- **Webhook/Slack/PagerDuty alert channels and a public customer-facing API +
+  API keys**: post-MVP, no customer has asked for either yet.
+- **Database backups and uptime monitoring**: the runbook exists in this file
+  but the cron job and monitors are not set up yet.
+
+For the full forward-looking list, see `TODO2.md`. `TODO.md` holds the build
+history and the Razorpay go-live checklist.
 
 ---
 
@@ -1572,9 +1660,9 @@ only until that fallback is retired:
 
    | Tier | USD | INR |
    |---|---|---|
-   | Starter | $39/mo | ₹2,999/mo |
-   | Growth | $69/mo | ₹4,999/mo |
-   | Pro | $129/mo | ₹9,999/mo |
+   | Starter | $49/mo | ₹1,999/mo |
+   | Growth | $129/mo | ₹4,999/mo |
+   | Pro | $249/mo | ₹9,999/mo |
 
 3. Developers → Webhooks → Add endpoint: `https://api.clewsec.com/billing/webhook`
    Events: `checkout.session.completed`, `customer.subscription.updated`, `customer.subscription.deleted`
