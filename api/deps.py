@@ -43,6 +43,30 @@ def get_current_client(
     return client
 
 
+def get_optional_client(
+    access_token: str | None = Cookie(default=None),
+    db: Session = Depends(get_db),
+) -> Client | None:
+    """
+    Same as get_current_client but returns None instead of raising when
+    there is no session, an expired/invalid token, or a deleted client.
+    For routes that behave differently based on whether the caller happens
+    to already be signed in, without requiring a session to call them at all.
+    """
+    if not access_token:
+        return None
+    payload = decode_access_token(access_token)
+    if payload is None:
+        return None
+    client_id = payload.get("sub")
+    if not client_id:
+        return None
+    client = db.query(Client).filter(Client.id == client_id).first()
+    if client is None or client.deleted_at is not None:
+        return None
+    return client
+
+
 @dataclass
 class CurrentOrg:
     """The organisation an authenticated request is scoped to, plus the

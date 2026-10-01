@@ -8,7 +8,7 @@ type BillingPeriod = "monthly" | "annual";
 
 const AUDIT_PRICE = { INR: "₹49,999", USD: "$599" };
 
-export function Pricing() {
+export function Pricing({ standalone = false }: { standalone?: boolean } = {}) {
   const [currency, setCurrency] = useState<Currency>("INR");
   const [billingPeriod, setBillingPeriod] = useState<BillingPeriod>("monthly");
 
@@ -31,12 +31,21 @@ export function Pricing() {
       <div style={{ maxWidth: "1400px", margin: "0 auto", padding: "0 24px" }}>
         <div className="flex items-end justify-between mb-12 flex-wrap gap-4">
           <div>
-            <p
-              className="font-mono text-xs uppercase tracking-widest"
-              style={{ color: "var(--color-text-muted)" }}
-            >
-              Pricing
-            </p>
+            {standalone ? (
+              <h1
+                className="font-mono text-xs uppercase tracking-widest"
+                style={{ color: "var(--color-text-muted)", fontWeight: 400, margin: 0 }}
+              >
+                Pricing
+              </h1>
+            ) : (
+              <p
+                className="font-mono text-xs uppercase tracking-widest"
+                style={{ color: "var(--color-text-muted)" }}
+              >
+                Pricing
+              </p>
+            )}
           </div>
 
           <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
@@ -233,7 +242,7 @@ export function Pricing() {
                     ? "/register"
                     : `/register?plan=${tier.tier}`
                 }
-                className="text-sm font-medium text-center transition-opacity hover:opacity-80"
+                className="text-sm font-medium text-center transition-colors"
                 style={{
                   padding: "10px 0",
                   background: tier.highlight
@@ -243,9 +252,25 @@ export function Pricing() {
                     ? "var(--color-bg)"
                     : "var(--color-text)",
                   border: tier.highlight
-                    ? "none"
+                    ? "1px solid var(--color-text)"
                     : "1px solid var(--color-border)",
                   display: "block",
+                }}
+                onMouseEnter={(e) => {
+                  if (tier.highlight) {
+                    e.currentTarget.style.background = "var(--color-bg)";
+                    e.currentTarget.style.color = "var(--color-text)";
+                  } else {
+                    e.currentTarget.style.borderColor = "var(--color-text)";
+                  }
+                }}
+                onMouseLeave={(e) => {
+                  if (tier.highlight) {
+                    e.currentTarget.style.background = "var(--color-text)";
+                    e.currentTarget.style.color = "var(--color-bg)";
+                  } else {
+                    e.currentTarget.style.borderColor = "var(--color-border)";
+                  }
                 }}
               >
                 {tier.cta}
@@ -292,12 +317,14 @@ export function Pricing() {
             </p>
             <a
               href="mailto:support@clewsec.com"
-              className="text-sm font-medium transition-opacity hover:opacity-80 whitespace-nowrap"
+              className="text-sm font-medium transition-colors whitespace-nowrap"
               style={{
                 padding: "10px 20px",
                 border: "1px solid var(--color-border)",
                 color: "var(--color-text)",
               }}
+              onMouseEnter={(e) => (e.currentTarget.style.borderColor = "var(--color-text)")}
+              onMouseLeave={(e) => (e.currentTarget.style.borderColor = "var(--color-border)")}
             >
               Request audit
             </a>

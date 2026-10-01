@@ -25,6 +25,17 @@ function fmtDate(iso: string) {
   return new Date(iso).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
 }
 
+// FastAPI 422s send `detail` as an array of Pydantic error objects, not a
+// string. Rendering that array directly crashes React, so always reduce it
+// to a readable string first.
+function extractErrorMessage(detail: unknown, fallback: string): string {
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail) && detail.length > 0 && typeof detail[0]?.msg === "string") {
+    return detail[0].msg.replace(/^Value error,\s*/, "");
+  }
+  return fallback;
+}
+
 function IntegrationBadge({ label, blocked, error }: { label: string; blocked: boolean; error: string | null }) {
   return (
     <span
@@ -44,7 +55,7 @@ function IntegrationBadge({ label, blocked, error }: { label: string; blocked: b
 
 // Item 21: Blocked IPs tab. Owner/admin get unblock + manual-block controls;
 // other roles see the same table read-only.
-export function BlockedIpsTab({ role }: { role: string | null }) {
+export function BlockedIpsTab({ role, tier }: { role: string | null; tier: string | null }) {
   const [data, setData] = useState<IpList | null>(null);
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
@@ -59,6 +70,11 @@ export function BlockedIpsTab({ role }: { role: string | null }) {
 
   const LIMIT = 25;
   const canManage = role === "owner" || role === "admin";
+  // Mirrors api/tiers.py's MANUAL_BLOCK_TIERS (item 55): Basic (starter) can
+  // block too, not just Growth/Pro. Unblock has no tier gate at all backend-
+  // side, a downgraded org must still be able to remove its own blocks.
+  const MANUAL_BLOCK_TIERS = ["starter", "growth", "pro", "enterprise"];
+  const canBlockManually = canManage && MANUAL_BLOCK_TIERS.includes(tier ?? "");
 
   const load = useCallback(() => {
     setLoading(true);
@@ -94,7 +110,11 @@ export function BlockedIpsTab({ role }: { role: string | null }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ip: manualIp, reason: manualReason || undefined }),
       });
-      if (!r.ok) { const d = await r.json().catch(() => ({})); setManualError(d?.detail ?? "Failed to block IP."); return; }
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        setManualError(extractErrorMessage(d?.detail, "Enter a valid public IP address."));
+        return;
+      }
       setManualIp("");
       setManualReason("");
       setShowManualForm(false);
@@ -110,7 +130,7 @@ export function BlockedIpsTab({ role }: { role: string | null }) {
 
   return (
     <div>
-      {canManage && (
+      {canBlockManually && (
         <div style={{ marginBottom: "20px" }}>
           <button
             onClick={() => setShowManualForm(v => !v)}
@@ -158,7 +178,7 @@ export function BlockedIpsTab({ role }: { role: string | null }) {
         </div>
       )}
 
-      <div style={{ border: "1px solid var(--color-border)", background: "var(--color-surface)" }}>
+      <div style={{ border: "1px solid var(--color-border)", background: "var(--color-surface)", overflowX: "auto" }}>
         {loading ? (
           <p style={{ padding: "32px 20px", fontSize: "13px", color: "var(--color-text-muted)", textAlign: "center" }}>Loading…</p>
         ) : !data || data.items.length === 0 ? (
@@ -166,7 +186,7 @@ export function BlockedIpsTab({ role }: { role: string | null }) {
             No IPs are currently blocked.
           </p>
         ) : (
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
+          <table style={{ width: "100%", minWidth: "600px", borderCollapse: "collapse", fontSize: "13px" }}>
             <thead>
               <tr>
                 {["IP", "Threats", "Last Seen", "WAF", "Cloudflare", ""].map(h => (

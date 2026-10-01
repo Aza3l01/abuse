@@ -176,9 +176,12 @@ export function OnboardingModal() {
   // Poll live org config while the panel is docked or minimized, so a step
   // saved on the Settings page (which now stays mounted alongside the
   // panel, no more navigate-away-and-lose-it) checks itself off without
-  // needing a manual reopen.
+  // needing a manual reopen. Backs off to a slower interval once minimized
+  // (the user isn't watching it) and stops entirely once onboarding is
+  // actually complete, instead of polling every 6s indefinitely either way.
   useEffect(() => {
     if (stage === "hidden" || (role !== "owner" && role !== "admin")) return;
+    if (config?.onboarding_completed_at) return;
     let cancelled = false;
     function refresh() {
       apiFetch(`/clients/me`)
@@ -187,9 +190,10 @@ export function OnboardingModal() {
         .catch(() => {/* panel still usable without the derived checkmarks */});
     }
     refresh();
-    const id = setInterval(refresh, POLL_MS);
+    const intervalMs = stage === "minimized" ? POLL_MS * 5 : POLL_MS;
+    const id = setInterval(refresh, intervalMs);
     return () => { cancelled = true; clearInterval(id); };
-  }, [stage, role]);
+  }, [stage, role, config?.onboarding_completed_at]);
 
   async function handleDismiss() {
     setBusy(true);
@@ -242,7 +246,7 @@ export function OnboardingModal() {
 
   if (stage === "hidden") return null;
 
-  const s3Done = !!(config?.s3_bucket && config?.log_format);
+  const s3Done = !!(config?.s3_bucket && config?.log_format) && config?.s3_status !== "error";
   const s3Status = config?.s3_status === "connected"
     ? "Connected"
     : config?.s3_status === "error"

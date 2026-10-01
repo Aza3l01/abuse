@@ -10,6 +10,7 @@ type Tab = "verdicts" | "notifications";
 function AlertsInner() {
   const [tab, setTab] = useState<Tab>("verdicts");
   const [role, setRole] = useState<string | null>(null);
+  const [tier, setTier] = useState<string | null>(null);
   const [alertEmail, setAlertEmail] = useState<string | null>(null);
 
   useEffect(() => {
@@ -18,6 +19,7 @@ function AlertsInner() {
       .then(c => {
         if (c) {
           setRole(c.role ?? null);
+          setTier(c.tier ?? null);
           setAlertEmail(c.alert_email ?? null);
         }
       })
@@ -56,9 +58,9 @@ function AlertsInner() {
       </div>
 
       {tab === "verdicts" ? (
-        <VerdictsTab />
+        <VerdictsTab role={role} tier={tier} />
       ) : (
-        <NotificationsTab role={role} alertEmail={alertEmail} />
+        <NotificationsTab role={role} alertEmail={alertEmail} tier={tier} />
       )}
     </main>
   );

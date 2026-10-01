@@ -10,11 +10,12 @@ type Tab = "all" | "blocked";
 export default function IpsPage() {
   const [tab, setTab] = useState<Tab>("all");
   const [role, setRole] = useState<string | null>(null);
+  const [tier, setTier] = useState<string | null>(null);
 
   useEffect(() => {
     apiFetch(`/clients/me`)
       .then(r => r.ok ? r.json() : null)
-      .then(c => { if (c) setRole(c.role ?? null); })
+      .then(c => { if (c) { setRole(c.role ?? null); setTier(c.tier ?? null); } })
       .catch(() => {/* viewer role: no /clients/me access, tabs still work read-only */});
   }, []);
 
@@ -49,7 +50,7 @@ export default function IpsPage() {
         ))}
       </div>
 
-      {tab === "all" ? <AllIpsTab /> : <BlockedIpsTab role={role} />}
+      {tab === "all" ? <AllIpsTab /> : <BlockedIpsTab role={role} tier={tier} />}
     </main>
   );
 }

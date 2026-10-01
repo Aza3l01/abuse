@@ -1,3 +1,5 @@
+"use client";
+
 import Link from "next/link";
 import { NewsletterForm } from "@/components/layout/NewsletterForm";
 
@@ -82,8 +84,10 @@ export function Footer() {
                   target="_blank"
                   rel="noopener noreferrer"
                   aria-label="Clew on LinkedIn"
-                  className="transition-opacity hover:opacity-70"
+                  className="transition-colors"
                   style={{ display: "inline-flex", color: "var(--color-text)" }}
+                  onMouseEnter={(e) => (e.currentTarget.style.color = "var(--color-text-muted)")}
+                  onMouseLeave={(e) => (e.currentTarget.style.color = "var(--color-text)")}
                 >
                   <svg width="18" height="18" viewBox="0 0 448 512" fill="currentColor" aria-hidden="true">
                     <path d="M100.28 448H7.4V149.2h92.88zm-46.44-339.7C24.09 108.3 0 84.1 0 54.3a53.79 53.79 0 0 1 107.58 0c0 29.8-24.1 54-53.79 54zM447.9 448h-92.68V302.4c0-34.7-.7-79.2-48.29-79.2-48.29 0-55.69 37.7-55.69 76.7V448h-92.78V149.2h89.08v40.8h1.3c12.4-23.5 42.69-48.3 87.88-48.3 94 0 111.28 61.9 111.28 142.3z" />
@@ -94,8 +98,10 @@ export function Footer() {
                   target="_blank"
                   rel="noopener noreferrer"
                   aria-label="Clew registered office on Google Maps"
-                  className="transition-opacity hover:opacity-70"
+                  className="transition-colors"
                   style={{ display: "inline-flex", color: "var(--color-text)" }}
+                  onMouseEnter={(e) => (e.currentTarget.style.color = "var(--color-text-muted)")}
+                  onMouseLeave={(e) => (e.currentTarget.style.color = "var(--color-text)")}
                 >
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
                     <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5A2.5 2.5 0 1 1 12 6.5a2.5 2.5 0 0 1 0 5z" />

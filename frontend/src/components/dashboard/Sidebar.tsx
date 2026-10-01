@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { API_URL, apiFetch } from "@/lib/api";
+import { useIsMobile, MOBILE_TOPBAR_HEIGHT } from "@/lib/useIsMobile";
 
 const NAV = [
   { href: "/dashboard",          label: "Overview" },
@@ -23,10 +24,12 @@ interface OrgRow {
 export function DashboardSidebar({ company }: { company?: string }) {
   const pathname = usePathname();
   const router   = useRouter();
+  const isMobile = useIsMobile();
 
   const [orgs,        setOrgs]        = useState<OrgRow[]>([]);
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [switching,    setSwitching]    = useState(false);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
   useEffect(() => {
     apiFetch(`/auth/orgs`)
@@ -59,6 +62,159 @@ export function DashboardSidebar({ company }: { company?: string }) {
     router.push("/login");
   }
 
+  // Shared org switcher + nav list, reused by both the desktop sidebar and
+  // the mobile drawer (closes the drawer on any nav/org click when mobile).
+  const orgSwitcher = orgs.length > 0 && (
+    <div style={{ padding: "0 12px 12px", borderBottom: "1px solid var(--color-border)", marginBottom: "8px" }}>
+      <button
+        onClick={() => setSwitcherOpen(v => !v)}
+        disabled={switching}
+        style={{
+          width: "100%",
+          textAlign: "left",
+          background: "var(--color-surface)",
+          border: "1px solid var(--color-border)",
+          color: "var(--color-text)",
+          padding: "8px 10px",
+          fontSize: "12px",
+          cursor: switching ? "default" : "pointer",
+        }}
+      >
+        {activeOrg?.company_name ?? "Select organisation"}
+        {orgs.length > 1 && <span style={{ color: "var(--color-text-muted)" }}> ▾</span>}
+      </button>
+      {switcherOpen && orgs.length > 1 && (
+        <div style={{ marginTop: "4px", border: "1px solid var(--color-border)", background: "var(--color-surface)" }}>
+          {orgs.map(o => (
+            <button
+              key={o.id}
+              onClick={() => { handleSwitchOrg(o.id); setMobileNavOpen(false); }}
+              style={{
+                display: "block",
+                width: "100%",
+                textAlign: "left",
+                background: o.active ? "var(--color-border)" : "transparent",
+                border: "none",
+                color: "var(--color-text)",
+                padding: "8px 10px",
+                fontSize: "12px",
+                cursor: "pointer",
+              }}
+            >
+              {o.company_name ?? o.id}
+              <span style={{ color: "var(--color-text-muted)" }}> ({o.role})</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+
+  const navLinks = (
+    <nav style={{ flex: 1, padding: "0 8px" }}>
+      {nav.map(({ href, label }) => {
+        // exact match for /dashboard, prefix match for sub-pages
+        const active =
+          href === "/dashboard"
+            ? pathname === "/dashboard"
+            : pathname.startsWith(href);
+        return (
+          <Link
+            key={href}
+            href={href}
+            onClick={() => setMobileNavOpen(false)}
+            style={{
+              display: "block",
+              padding: "8px 12px",
+              fontSize: "13px",
+              color: active ? "var(--color-text)" : "var(--color-text-muted)",
+              background: active ? "var(--color-border)" : "transparent",
+              textDecoration: "none",
+              marginBottom: "2px",
+            }}
+          >
+            {label}
+          </Link>
+        );
+      })}
+    </nav>
+  );
+
+  const footer = (
+    <div style={{
+      padding: "16px 20px",
+      borderTop: "1px solid var(--color-border)",
+    }}>
+      {company && (
+        <p style={{
+          fontSize: "11px",
+          color: "var(--color-text-muted)",
+          marginBottom: "8px",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}>
+          {company}
+        </p>
+      )}
+      <button
+        onClick={handleLogout}
+        style={{
+          background: "none",
+          border: "none",
+          cursor: "pointer",
+          fontSize: "15px",
+          color: "var(--color-text-muted)",
+          padding: 0,
+        }}
+      >
+        Sign out
+      </button>
+    </div>
+  );
+
+  if (isMobile) {
+    return (
+      <>
+        <div style={{
+          position: "fixed", top: 0, left: 0, right: 0, height: `${MOBILE_TOPBAR_HEIGHT}px`,
+          zIndex: 110, display: "flex", alignItems: "center", justifyContent: "space-between",
+          padding: "0 16px", background: "var(--color-bg)", borderBottom: "1px solid var(--color-border)",
+        }}>
+          <Link href="/" aria-label="Clew home" style={{ display: "flex", alignItems: "center" }}>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src="/clew-wordmark-dark.svg"
+              alt="Clew"
+              style={{ height: "14px", width: "auto", filter: "var(--logo-filter)" }}
+            />
+          </Link>
+          <button
+            onClick={() => setMobileNavOpen(v => !v)}
+            aria-label={mobileNavOpen ? "Close menu" : "Open menu"}
+            style={{
+              background: "none", border: "1px solid var(--color-border)", cursor: "pointer",
+              padding: "6px 10px", fontSize: "13px", color: "var(--color-text)",
+            }}
+          >
+            {mobileNavOpen ? "Close ×" : "Menu ☰"}
+          </button>
+        </div>
+        {mobileNavOpen && (
+          <div style={{
+            position: "fixed", top: `${MOBILE_TOPBAR_HEIGHT}px`, left: 0, right: 0, bottom: 0,
+            zIndex: 109, background: "var(--color-bg)", overflowY: "auto",
+            display: "flex", flexDirection: "column",
+          }}>
+            {orgSwitcher}
+            {navLinks}
+            {footer}
+          </div>
+        )}
+      </>
+    );
+  }
+
   return (
     <aside style={{
       width: "192px",
@@ -86,111 +242,13 @@ export function DashboardSidebar({ company }: { company?: string }) {
 
       {/* Org switcher — basic single-email switcher (item 7's MVP scope;
           the cross-email account switcher is post-MVP) */}
-      {orgs.length > 0 && (
-        <div style={{ padding: "0 12px 12px", borderBottom: "1px solid var(--color-border)", marginBottom: "8px" }}>
-          <button
-            onClick={() => setSwitcherOpen(v => !v)}
-            disabled={switching}
-            style={{
-              width: "100%",
-              textAlign: "left",
-              background: "var(--color-surface)",
-              border: "1px solid var(--color-border)",
-              color: "var(--color-text)",
-              padding: "8px 10px",
-              fontSize: "12px",
-              cursor: switching ? "default" : "pointer",
-            }}
-          >
-            {activeOrg?.company_name ?? "Select organisation"}
-            {orgs.length > 1 && <span style={{ color: "var(--color-text-muted)" }}> ▾</span>}
-          </button>
-          {switcherOpen && orgs.length > 1 && (
-            <div style={{ marginTop: "4px", border: "1px solid var(--color-border)", background: "var(--color-surface)" }}>
-              {orgs.map(o => (
-                <button
-                  key={o.id}
-                  onClick={() => handleSwitchOrg(o.id)}
-                  style={{
-                    display: "block",
-                    width: "100%",
-                    textAlign: "left",
-                    background: o.active ? "var(--color-border)" : "transparent",
-                    border: "none",
-                    color: "var(--color-text)",
-                    padding: "8px 10px",
-                    fontSize: "12px",
-                    cursor: "pointer",
-                  }}
-                >
-                  {o.company_name ?? o.id}
-                  <span style={{ color: "var(--color-text-muted)" }}> ({o.role})</span>
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
+      {orgSwitcher}
 
       {/* Nav */}
-      <nav style={{ flex: 1, padding: "0 8px" }}>
-        {nav.map(({ href, label }) => {
-          // exact match for /dashboard, prefix match for sub-pages
-          const active =
-            href === "/dashboard"
-              ? pathname === "/dashboard"
-              : pathname.startsWith(href);
-          return (
-            <Link
-              key={href}
-              href={href}
-              style={{
-                display: "block",
-                padding: "8px 12px",
-                fontSize: "13px",
-                color: active ? "var(--color-text)" : "var(--color-text-muted)",
-                background: active ? "var(--color-border)" : "transparent",
-                textDecoration: "none",
-                marginBottom: "2px",
-              }}
-            >
-              {label}
-            </Link>
-          );
-        })}
-      </nav>
+      {navLinks}
 
       {/* Footer */}
-      <div style={{
-        padding: "16px 20px",
-        borderTop: "1px solid var(--color-border)",
-      }}>
-        {company && (
-          <p style={{
-            fontSize: "11px",
-            color: "var(--color-text-muted)",
-            marginBottom: "8px",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-          }}>
-            {company}
-          </p>
-        )}
-        <button
-          onClick={handleLogout}
-          style={{
-            background: "none",
-            border: "none",
-            cursor: "pointer",
-            fontSize: "15px",
-            color: "var(--color-text-muted)",
-            padding: 0,
-          }}
-        >
-          Sign out
-        </button>
-      </div>
+      {footer}
     </aside>
   );
 }

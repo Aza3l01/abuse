@@ -114,10 +114,16 @@ const PAGE_SIZES = [10, 25, 50] as const;
 // Component
 // ---------------------------------------------------------------------------
 
-export function VerdictsTab() {
+export function VerdictsTab({ role, tier }: { role: string | null; tier: string | null }) {
   const searchParams = useSearchParams();
   const router = useRouter();
   const ipParam = searchParams.get("ip") ?? "";
+
+  // Mirrors dashboard/verdicts/[id]/page.tsx's gating: Block/Unblock is
+  // hidden for viewers, and for owner/admin on a tier with no blocking,
+  // except an already-blocked IP can still be unblocked after a downgrade.
+  const canManage = role === "owner" || role === "admin";
+  const MANUAL_BLOCK_TIERS = ["starter", "growth", "pro", "enterprise"];
 
   const [page,       setPage]       = useState(1);
   const [limit,      setLimit]      = useState<number>(25);
@@ -132,6 +138,7 @@ export function VerdictsTab() {
   const [loading,    setLoading]    = useState(true);
   const [error,      setError]      = useState<string | null>(null);
   const [blocking,   setBlocking]   = useState<string | null>(null);
+  const [blockError, setBlockError] = useState<string | null>(null);
   const [copiedIp,   setCopiedIp]   = useState<string | null>(null);
 
   useEffect(() => {
@@ -188,12 +195,13 @@ export function VerdictsTab() {
 
   async function handleBlock(verdictId: string, currentlyBlocked: boolean) {
     setBlocking(verdictId);
+    setBlockError(null);
     const action = currentlyBlocked ? "unblock" : "block";
     try {
       const r = await apiFetch(`/verdicts/${verdictId}/${action}`, { method: "POST" });
       if (r.status === 403) {
         const d = await r.json().catch(() => ({}));
-        alert(d?.detail ?? "Blocking is not available on your plan.");
+        setBlockError(typeof d?.detail === "string" ? d.detail : "Blocking is not available on your plan.");
         return;
       }
       if (r.ok) load();
@@ -269,7 +277,7 @@ export function VerdictsTab() {
         </div>
 
         {/* Date range presets */}
-        <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+        <div style={{ display: "flex", gap: "6px", alignItems: "center", flexWrap: "wrap" }}>
           {DATE_PRESETS.map(p => (
             <button
               key={p.days}
@@ -314,8 +322,12 @@ export function VerdictsTab() {
         </div>
       </div>
 
+      {blockError && (
+        <p style={{ fontSize: "12px", color: "var(--color-critical)", margin: "0 0 12px" }}>{blockError}</p>
+      )}
+
       {/* Table */}
-      <div style={{ border: "1px solid var(--color-border)", background: "var(--color-surface)" }}>
+      <div style={{ border: "1px solid var(--color-border)", background: "var(--color-surface)", overflowX: "auto" }}>
         {loading ? (
           <p style={{ padding: "32px 20px", fontSize: "13px", color: "var(--color-text-muted)", textAlign: "center" }}>Loading…</p>
         ) : error ? (
@@ -325,7 +337,7 @@ export function VerdictsTab() {
             No threats match the current filters.
           </p>
         ) : (
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
+          <table style={{ width: "100%", minWidth: "760px", borderCollapse: "collapse", fontSize: "13px" }}>
             <thead>
               <tr>
                 {["Time", "IP", "Attack Type", "Severity", "Confidence", "Blocked", "Actions"].map(h => (
@@ -380,18 +392,20 @@ export function VerdictsTab() {
                       >
                         View
                       </button>
-                      <button
-                        onClick={() => handleBlock(v.id, v.blocked)}
-                        disabled={blocking === v.id}
-                        style={{
-                          padding: "2px 8px", fontSize: "10px", border: "1px solid var(--color-border)",
-                          background: "transparent", color: "var(--color-text-muted)",
-                          cursor: blocking === v.id ? "default" : "pointer",
-                          opacity: blocking === v.id ? 0.5 : 1, whiteSpace: "nowrap",
-                        }}
-                      >
-                        {blocking === v.id ? "…" : v.blocked ? "Unblock" : "Block"}
-                      </button>
+                      {canManage && (v.blocked || MANUAL_BLOCK_TIERS.includes(tier ?? "")) && (
+                        <button
+                          onClick={() => handleBlock(v.id, v.blocked)}
+                          disabled={blocking === v.id}
+                          style={{
+                            padding: "2px 8px", fontSize: "10px", border: "1px solid var(--color-border)",
+                            background: "transparent", color: "var(--color-text-muted)",
+                            cursor: blocking === v.id ? "default" : "pointer",
+                            opacity: blocking === v.id ? 0.5 : 1, whiteSpace: "nowrap",
+                          }}
+                        >
+                          {blocking === v.id ? "…" : v.blocked ? "Unblock" : "Block"}
+                        </button>
+                      )}
                     </div>
                   </td>
                 </tr>

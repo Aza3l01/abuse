@@ -30,7 +30,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from api.auth_utils import hash_password, hash_token, send_org_invite_email
-from api.deps import CurrentOrg, get_current_client, get_current_org, get_db, require_role
+from api.deps import CurrentOrg, get_current_client, get_current_org, get_db, get_optional_client, require_role
 from api.limiter import limiter
 from api.routes.auth import _issue_tokens
 from db.models import Client, Organization, OrganizationMember, OrgInvite, PromoCode
@@ -572,6 +572,7 @@ async def get_invite(token: str, db: Session = Depends(get_db)):
 
 class AcceptInviteBody(BaseModel):
     password: Optional[str] = None  # required only when no account exists yet
+    full_name: Optional[str] = None  # required only when no account exists yet
 
 
 @router.post("/org/invite/{token}/accept")
@@ -582,6 +583,7 @@ async def accept_invite(
     token: str,
     body: AcceptInviteBody,
     db: Session = Depends(get_db),
+    current_client: Optional[Client] = Depends(get_optional_client),
 ):
     invite = db.query(OrgInvite).filter(OrgInvite.token_hash == hash_token(token)).first()
     if invite is None or invite.accepted_at is not None:
@@ -595,13 +597,33 @@ async def accept_invite(
     if client is None:
         if not body.password:
             raise HTTPException(status_code=400, detail="Password is required to set up your account.")
+        if not body.full_name or not body.full_name.strip():
+            raise HTTPException(status_code=400, detail="Full name is required to set up your account.")
         client = Client(
             email=invite.invited_email,
             password_hash=hash_password(body.password),
+            full_name=body.full_name.strip(),
             email_verified=True,  # the invite link itself is proof of ownership
         )
         db.add(client)
         db.flush()  # populate client.id without committing yet
+    else:
+        # An invite for an email that already has an account must never mint a
+        # session by itself: the token alone proves nothing about who is
+        # holding it (it could be forwarded, intercepted, or left in a shared
+        # inbox). Require the caller to already be signed in as that exact
+        # account, which means they passed the normal login flow, MFA
+        # included, before the invite can be accepted.
+        if current_client is None:
+            raise HTTPException(
+                status_code=401,
+                detail="Sign in to your existing account to accept this invitation.",
+            )
+        if current_client.id != client.id:
+            raise HTTPException(
+                status_code=403,
+                detail=f"This invitation is for {invite.invited_email}. Sign in as that account to accept it.",
+            )
 
     already_member = (
         db.query(OrganizationMember)
@@ -616,3 +638,4 @@ async def accept_invite(
 
     _issue_tokens(response, db, client, request, org_id=invite.org_id)
     return {"message": "Invitation accepted."}
+

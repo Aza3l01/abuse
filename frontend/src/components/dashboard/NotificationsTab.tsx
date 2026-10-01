@@ -38,7 +38,7 @@ function fmtTime(iso: string) {
 // Item 20: role prop controls whether the "Send test alert" button and
 // alert-config context line are shown. Viewer-only sessions still see the
 // delivery log (read-only), matching the rest of the dashboard's RBAC pattern.
-export function NotificationsTab({ role, alertEmail }: { role: string | null; alertEmail: string | null }) {
+export function NotificationsTab({ role, alertEmail, tier }: { role: string | null; alertEmail: string | null; tier: string | null }) {
   const [data, setData] = useState<AlertSentList | null>(null);
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
@@ -80,6 +80,13 @@ export function NotificationsTab({ role, alertEmail }: { role: string | null; al
       {/* Context line + test button, owner/admin only (viewer role has no
           settings visibility, so alertEmail is never resolvable for them). */}
       {canManageAlerts && (
+      <>
+      {tier === "free" && (
+        <p style={{ fontSize: "12px", color: "var(--color-text-muted)", marginBottom: "12px" }}>
+          Email alerts require an active paid plan. A test send will not
+          succeed, and a real threat will never trigger one either.
+        </p>
+      )}
       <div style={{
         display: "flex", alignItems: "center", justifyContent: "space-between",
         marginBottom: "20px", flexWrap: "wrap", gap: "12px",
@@ -114,6 +121,7 @@ export function NotificationsTab({ role, alertEmail }: { role: string | null; al
           </div>
         )}
       </div>
+      </>
       )}
 
       {/* Table */}

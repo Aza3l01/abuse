@@ -24,7 +24,7 @@ export const metadata: Metadata = {
   openGraph: {
     type: "website",
     siteName: "Clew",
-    title: "Clew — API Abuse Detection for SaaS",
+    title: "Clew: API Abuse Detection for SaaS",
     description:
       "Detect bots, credential stuffing, scrapers, and data exfiltration in your AWS API Gateway logs. No code changes. No proxy.",
     url: process.env.NEXT_PUBLIC_SITE_URL ?? "https://clewsec.com",
@@ -33,7 +33,7 @@ export const metadata: Metadata = {
         url: "/og-image.png",
         width: 1200,
         height: 630,
-        alt: "Clew — API Abuse Detection",
+        alt: "Clew: API Abuse Detection",
       },
     ],
   },

@@ -51,7 +51,7 @@ export function Navbar() {
 
         <div className="flex items-center gap-6">
           <a
-            href="/#pricing"
+            href="/pricing"
             onClick={(e) => {
               if (window.location.pathname === "/") {
                 const el = document.getElementById("pricing");

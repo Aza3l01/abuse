@@ -1,7 +1,7 @@
 import os
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from slowapi import _rate_limit_exceeded_handler
+from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
 from dotenv import load_dotenv
 
@@ -25,7 +25,27 @@ app = FastAPI(
 # Rate limiter state (slowapi attaches to app)
 # ------------------------------------------------------------------
 app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
+@app.exception_handler(RateLimitExceeded)
+def _rate_limit_handler(request: Request, exc: RateLimitExceeded) -> JSONResponse:
+    """
+    slowapi's built-in handler returns {"error": "..."}, but every other
+    error response in this API (FastAPI's own HTTPException included) uses
+    {"detail": "..."}. Frontend error handling reads `data.detail` and falls
+    back to a generic message, so a 429 silently looked like an unexplained
+    failure (e.g. a correct password on /login still showing "Sign in
+    failed." with no indication of a lockout). Return the same shape as
+    everything else so the frontend's existing `data.detail` reads work here
+    too.
+    """
+    return JSONResponse(
+        status_code=429,
+        content={"detail": "Too many attempts. Please wait a few minutes and try again."},
+    )
+
+
+app.add_exception_handler(RateLimitExceeded, _rate_limit_handler)
 
 # ------------------------------------------------------------------
 # CORS — allow the frontend origin (and its www variant)

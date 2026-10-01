@@ -90,12 +90,18 @@ _ATO_COST_USD = 8_000 / 84                # average cost of one successful accou
 _ATO_THREAT_TYPES = frozenset({ThreatType.CREDENTIAL_STUFFING, ThreatType.BRUTE_FORCE})
 
 
-def _estimate_cost_prevented(threat_type: ThreatType, batch_size: int, confidence: float) -> float:
-    """Rough USD estimate of the cost this verdict's detection avoided."""
+def _estimate_cost_prevented(threat_type: ThreatType, ip_request_count: int, confidence: float) -> float:
+    """Rough USD estimate of the cost this verdict's detection avoided.
+
+    ip_request_count must be the flagged IP's own request count, not the size
+    of whatever batch/window it was detected in (a window batch mixes many
+    IPs together, so using the whole batch size over-attributes cost to
+    unrelated, benign traffic that happened to share the window).
+    """
     if threat_type in _ATO_THREAT_TYPES:
-        raw = batch_size * _ATO_SUCCESS_RATE * _ATO_COST_USD
+        raw = ip_request_count * _ATO_SUCCESS_RATE * _ATO_COST_USD
     else:
-        raw = batch_size * _INFRA_COST_PER_REQUEST_USD
+        raw = ip_request_count * _INFRA_COST_PER_REQUEST_USD
     return round(raw * confidence, 2)
 
 
@@ -201,10 +207,17 @@ def run_pipeline(
         # Focus batches are already a single IP's records by construction
         # (group_by_ip()) — no need for a Counter majority vote.
         primary_ip = log_records[0].ip
+        primary_ip_requests = len(log_records)
     else:
         # Derive primary IP: the most frequent IP in the batch.
         ip_counter: Counter = Counter(lr.ip for lr in log_records)
         primary_ip = ip_counter.most_common(1)[0][0]
+        # Window batches mix many IPs together (chunk() groups up to 500
+        # records regardless of IP). Cost prevented must scale with the
+        # flagged IP's own request volume, not the whole mixed-IP window,
+        # or a single attacker hiding in a large benign batch gets credited
+        # with preventing damage from traffic that was never theirs.
+        primary_ip_requests = ip_counter[primary_ip]
 
     # Derive representative method/endpoint from the most common values.
     method_counter: Counter = Counter(lr.method for lr in log_records)
@@ -246,7 +259,7 @@ def run_pipeline(
         "explanation": verdict.explanation,
         "blocked": False,          # blocking integrations added in Phase 7
         "cost_prevented": (
-            _estimate_cost_prevented(verdict.threat_type, len(log_records), verdict.confidence_score)
+            _estimate_cost_prevented(verdict.threat_type, primary_ip_requests, verdict.confidence_score)
             if verdict.is_attack else 0.0
         ),
         "timestamp": verdict.timestamp.isoformat(),

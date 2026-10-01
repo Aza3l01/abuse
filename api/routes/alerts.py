@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from api.auth_utils import send_email, FROM_ALERTS, REPLY_TO_ALERTS
 from api.deps import CurrentOrg, get_current_org, get_db, require_role
+from api.tiers import MANUAL_BLOCK_TIERS
 from db.models import AlertSent, Verdict
 
 router = APIRouter(tags=["alerts"])
@@ -91,6 +92,12 @@ def send_test_alert(current_org: CurrentOrg = Depends(require_role("owner", "adm
     from workers.tasks.send_alerts import build_alert_email
 
     org = current_org.organization
+    # Mirrors workers/tasks/send_alerts.py's own gate: a real alert never
+    # fires for a free-tier org (MANUAL_BLOCK_TIERS, item 55), so a "test"
+    # send must not claim success either, that would tell a free customer
+    # their alerting works when it never will on a real verdict.
+    if org.tier not in MANUAL_BLOCK_TIERS:
+        return TestAlertOut(status="failed", message="Email alerts require an active paid plan.")
     if not org.alert_email:
         return TestAlertOut(status="failed", message="Set an alert email in Settings first.")
 

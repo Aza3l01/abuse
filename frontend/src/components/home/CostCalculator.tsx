@@ -320,12 +320,21 @@ export function CostCalculator() {
 
               <a
                 href="/register"
-                className="text-sm font-medium transition-opacity hover:opacity-80 whitespace-nowrap"
+                className="text-sm font-medium transition-colors whitespace-nowrap"
                 style={{
                   padding: "12px 24px",
                   background: "var(--color-text)",
                   color: "var(--color-bg)",
+                  border: "1px solid var(--color-text)",
                   display: "inline-block",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = "var(--color-bg)";
+                  e.currentTarget.style.color = "var(--color-text)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = "var(--color-text)";
+                  e.currentTarget.style.color = "var(--color-bg)";
                 }}
               >
                 See your real number →

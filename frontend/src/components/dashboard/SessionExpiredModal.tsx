@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { onSessionExpired } from "@/lib/api";
+import { onSessionExpired, resetSessionExpired } from "@/lib/api";
 import { primaryBtnStyle } from "@/components/auth/AuthLayout";
 
 /**
@@ -19,6 +19,7 @@ export function SessionExpiredModal() {
   if (!show) return null;
 
   function handleLogin() {
+    resetSessionExpired();
     const next = encodeURIComponent(window.location.pathname + window.location.search);
     router.push(`/login?next=${next}`);
   }

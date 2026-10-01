@@ -17,6 +17,14 @@ function ResetPasswordForm() {
   const [error,    setError]    = useState("");
   const [loading,  setLoading]  = useState(false);
 
+  // MFA second-factor state (the account's own password is not the second
+  // factor, so a successful reset still has to pass the TOTP/backup-code
+  // challenge before a session is issued, same as /auth/login)
+  const [mfaStep,       setMfaStep]       = useState(false);
+  const [mfaToken,      setMfaToken]      = useState("");
+  const [mfaCode,       setMfaCode]       = useState("");
+  const [useBackupCode, setUseBackupCode] = useState(false);
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError("");
@@ -33,12 +41,105 @@ function ResetPasswordForm() {
         setError(data.detail ?? "Reset failed.");
         return;
       }
+      if (data.code === "MFA_REQUIRED") {
+        setMfaToken(data.mfa_token);
+        setMfaStep(true);
+        return;
+      }
       router.push("/dashboard");
     } catch {
       setError("Could not connect to the server. Try again.");
     } finally {
       setLoading(false);
     }
+  }
+
+  async function handleMfaSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setError("");
+    setLoading(true);
+    try {
+      const res = await fetch(`${API_URL}/auth/login/mfa`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mfa_token: mfaToken, code: mfaCode, is_backup_code: useBackupCode }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.detail ?? "Invalid authenticator code.");
+        return;
+      }
+      router.push("/dashboard");
+    } catch {
+      setError("Could not connect to the server. Try again.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  if (mfaStep) {
+    return (
+      <AuthLayout title={useBackupCode ? "Use a backup code" : "Two-factor authentication"}>
+        <p style={{ fontSize: "13px", color: "var(--color-text-muted)", marginBottom: "20px" }}>
+          Your password was reset.{" "}
+          {useBackupCode
+            ? "Enter one of your 10-character backup codes (e.g. ABCDE-FGHIJ)."
+            : "Enter the 6-digit code from your authenticator app to finish signing in."}
+        </p>
+        <form onSubmit={handleMfaSubmit} style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+          <div>
+            <label style={labelStyle}>{useBackupCode ? "Backup code" : "Authenticator code"}</label>
+            <input
+              type="text"
+              inputMode={useBackupCode ? "text" : "numeric"}
+              autoComplete="one-time-code"
+              maxLength={useBackupCode ? 11 : 6}
+              required
+              autoFocus
+              value={mfaCode}
+              onChange={e => {
+                const v = e.target.value;
+                setMfaCode(useBackupCode ? v.toUpperCase() : v.replace(/\D/g, ""));
+              }}
+              placeholder={useBackupCode ? "XXXXX-XXXXX" : ""}
+              style={{
+                ...inputStyle,
+                letterSpacing: useBackupCode ? "0.06em" : "0.3em",
+                textAlign: "center",
+                fontSize: "18px",
+                fontFamily: useBackupCode ? "var(--font-mono)" : "inherit",
+              }}
+            />
+          </div>
+
+          {error && (
+            <p style={{ fontSize: "13px", color: "#E53E3E", margin: 0 }}>{error}</p>
+          )}
+
+          <button
+            type="submit"
+            style={{ ...primaryBtnStyle, opacity: loading ? 0.6 : 1 }}
+            disabled={loading}
+          >
+            {loading ? "Verifying…" : "Verify"}
+          </button>
+        </form>
+
+        <p style={{ fontSize: "13px", color: "var(--color-text-muted)", marginTop: "20px", textAlign: "center" }}>
+          <button
+            onClick={() => { setUseBackupCode(v => !v); setMfaCode(""); setError(""); }}
+            style={{
+              background: "none", border: "none",
+              color: "var(--color-text-muted)", cursor: "pointer",
+              textDecoration: "underline", fontSize: "13px", padding: 0,
+            }}
+          >
+            {useBackupCode ? "Use authenticator app instead" : "Use a backup code"}
+          </button>
+        </p>
+      </AuthLayout>
+    );
   }
 
   return (

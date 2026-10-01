@@ -162,14 +162,6 @@ function fmtTime(iso: string) {
   });
 }
 
-// ISO 3166-1 alpha-2 → flag emoji (regional indicator symbols)
-function flagEmoji(code: string | null): string {
-  if (!code || code.length !== 2) return "";
-  const base = 0x1F1E6;
-  const chars = [...code.toUpperCase()].map(c => base + (c.charCodeAt(0) - 65));
-  return String.fromCodePoint(...chars);
-}
-
 function NotConfiguredBox() {
   return (
     <div style={{
@@ -210,11 +202,21 @@ export default function DashboardOverview() {
   const [loading,  setLoading]  = useState(true);
   const [error,    setError]    = useState<string | null>(null);
   const [lastChecked, setLastChecked] = useState<Date | null>(null);
+  // Matches Settings' own locale/timezone heuristic for INR vs USD, so
+  // "Cost prevented" doesn't show a flat USD figure to an org whose billing
+  // (and everywhere else in the product) is already showing INR.
+  const [isIndia, setIsIndia] = useState(false);
+
+  useEffect(() => {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const lang = navigator.language || "";
+    setIsIndia(tz.includes("Kolkata") || tz.includes("Calcutta") || lang === "hi" || lang.endsWith("-IN"));
+  }, []);
 
   const load = () => {
     return Promise.all([
       apiFetch(`/dashboard/summary?days=${days}`),
-      apiFetch(`/verdicts?limit=10`),
+      apiFetch(`/verdicts?limit=10&sort=recent`),
     ])
       .then(async ([sr, vr]) => {
         if (!sr.ok || !vr.ok) throw new Error("API error");
@@ -336,7 +338,7 @@ export default function DashboardOverview() {
       {!s.s3_configured && <NotConfiguredBox />}
 
       {/* Stat cards */}
-      <div style={{ display: "flex", gap: "12px", marginBottom: "28px" }}>
+      <div style={{ display: "flex", gap: "12px", marginBottom: "28px", flexWrap: "wrap" }}>
         <StatCard
           label="Total threats"
           value={s.s3_configured ? s.total_threats.toLocaleString() : "—"}
@@ -354,7 +356,11 @@ export default function DashboardOverview() {
         />
         <StatCard
           label="Cost prevented"
-          value={s.s3_configured ? `$${s.cost_prevented.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : "—"}
+          value={s.s3_configured
+            ? isIndia
+              ? `₹${s.cost_prevented.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+              : `$${s.cost_prevented.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+            : "—"}
           sub={noDataYet ? "No data yet" : undefined}
         />
       </div>
@@ -416,15 +422,15 @@ export default function DashboardOverview() {
                   href={`/dashboard/alerts?ip=${tip.ip}`}
                   style={{ textDecoration: "none", color: "inherit" }}
                 >
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
                     <span style={{ fontFamily: "var(--font-mono)", fontSize: "12px" }}>{tip.ip}</span>
                     <span style={{ fontSize: "11px", color: "var(--color-text-muted)" }}>
-                      {flagEmoji(tip.geo_country)} {tip.geo_country ?? "—"} · {tip.geo_asn_org ?? "—"}
+                      {tip.geo_country ?? "—"} · {tip.geo_asn_org ?? "—"}
                     </span>
                   </div>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "2px" }}>
                     <span style={{ fontSize: "11px", color: "var(--color-text-muted)" }}>
-                      {tip.count} hits
+                      {tip.count} hit{tip.count !== 1 ? "s" : ""}
                     </span>
                     <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
                       {tip.highest_severity && <SeverityBadge severity={tip.highest_severity} />}
@@ -457,6 +463,7 @@ export default function DashboardOverview() {
       <div style={{
         border: "1px solid var(--color-border)",
         background: "var(--color-surface)",
+        overflowX: "auto",
       }}>
         <div style={{
           padding: "16px 20px",
@@ -482,7 +489,7 @@ export default function DashboardOverview() {
             </Link>
           </div>
         ) : (
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
+          <table style={{ width: "100%", minWidth: "760px", borderCollapse: "collapse", fontSize: "13px" }}>
             <thead>
               <tr>
                 {["Time", "IP", "Method", "Endpoint", "Threat", "Severity", "Confidence"].map(h => (

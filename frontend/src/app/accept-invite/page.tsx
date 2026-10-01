@@ -20,12 +20,15 @@ function AcceptInviteInner() {
   const params = useSearchParams();
   const token = params.get("token") ?? "";
 
-  const [info,      setInfo]      = useState<InviteInfo | null>(null);
-  const [loading,    setLoading]    = useState(true);
-  const [password,   setPassword]   = useState("");
-  const [submitting, setSubmitting] = useState(false);
-  const [error,      setError]      = useState("");
-  const [accepted,   setAccepted]   = useState(false);
+  const [info,        setInfo]        = useState<InviteInfo | null>(null);
+  const [loading,      setLoading]      = useState(true);
+  const [fullName,     setFullName]     = useState("");
+  const [password,     setPassword]     = useState("");
+  const [submitting,   setSubmitting]   = useState(false);
+  const [error,        setError]        = useState("");
+  const [accepted,     setAccepted]     = useState(false);
+  // undefined = still checking, null = not signed in at all
+  const [signedInEmail, setSignedInEmail] = useState<string | null | undefined>(undefined);
 
   useEffect(() => {
     if (!token) { setLoading(false); return; }
@@ -36,6 +39,14 @@ function AcceptInviteInner() {
       .finally(() => setLoading(false));
   }, [token]);
 
+  useEffect(() => {
+    if (!info?.account_exists) return;
+    fetch(`${API_URL}/auth/me`, { credentials: "include" })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => setSignedInEmail(d?.email ?? null))
+      .catch(() => setSignedInEmail(null));
+  }, [info?.account_exists]);
+
   async function handleAccept(e?: React.FormEvent) {
     e?.preventDefault();
     setSubmitting(true);
@@ -45,7 +56,7 @@ function AcceptInviteInner() {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(info?.account_exists ? {} : { password }),
+        body: JSON.stringify(info?.account_exists ? {} : { password, full_name: fullName }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -100,28 +111,54 @@ function AcceptInviteInner() {
   }
 
   const roleLabel = info.role === "admin" ? "Admin" : "Viewer";
+  const roleArticle = roleLabel === "Admin" ? "an" : "a";
 
   return (
     <AuthLayout title={`Join ${info.company_name ?? "Clew"}`}>
       <p style={{ fontSize: "14px", color: "var(--color-text-muted)", lineHeight: 1.6, marginBottom: "20px" }}>
         You have been invited to join <strong style={{ color: "var(--color-text)" }}>{info.company_name}</strong>&apos;s
-        security dashboard as a <strong style={{ color: "var(--color-text)" }}>{roleLabel}</strong>.
+        security dashboard as {roleArticle} <strong style={{ color: "var(--color-text)" }}>{roleLabel}</strong>.
       </p>
 
       {info.account_exists ? (
-        <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-          <p style={{ fontSize: "13px", color: "var(--color-text-muted)" }}>
-            Signed in as <strong style={{ color: "var(--color-text)" }}>{info.invited_email}</strong>.
-          </p>
-          <button style={primaryBtnStyle} onClick={() => handleAccept()} disabled={submitting}>
-            {submitting ? "Accepting…" : "Accept invitation"}
-          </button>
-        </div>
+        signedInEmail === undefined ? (
+          <p style={{ fontSize: "13px", color: "var(--color-text-muted)" }}>Checking your session…</p>
+        ) : signedInEmail === info.invited_email ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+            <p style={{ fontSize: "13px", color: "var(--color-text-muted)" }}>
+              Signed in as <strong style={{ color: "var(--color-text)" }}>{info.invited_email}</strong>.
+            </p>
+            <button style={primaryBtnStyle} onClick={() => handleAccept()} disabled={submitting}>
+              {submitting ? "Accepting…" : "Accept invitation"}
+            </button>
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+            <p style={{ fontSize: "13px", color: "var(--color-text-muted)", lineHeight: 1.6 }}>
+              An account already exists for <strong style={{ color: "var(--color-text)" }}>{info.invited_email}</strong>.
+              Sign in as that account to accept this invitation.
+            </p>
+            <Link
+              href={`/login?next=${encodeURIComponent(`/accept-invite?token=${token}`)}`}
+              style={primaryBtnStyle}
+            >
+              Sign in to accept
+            </Link>
+          </div>
+        )
       ) : (
         <form onSubmit={handleAccept}>
           <div style={{ marginBottom: "16px" }}>
             <label style={labelStyle}>Email</label>
             <input type="email" value={info.invited_email ?? ""} readOnly style={{ ...inputStyle, opacity: 0.6 }} />
+          </div>
+          <div style={{ marginBottom: "16px" }}>
+            <label htmlFor="fullName" style={labelStyle}>Full name</label>
+            <input
+              id="fullName" type="text" autoComplete="name" required
+              value={fullName} onChange={(e) => setFullName(e.target.value)}
+              style={inputStyle}
+            />
           </div>
           <div style={{ marginBottom: "20px" }}>
             <label htmlFor="password" style={labelStyle}>Password</label>

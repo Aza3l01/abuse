@@ -17,7 +17,7 @@ export default function RefundPolicyPage() {
         No charge occurs, so there is nothing to refund.
       </p>
 
-      <h2 style={legalH2Style}>2. First payment — 72-hour remorse window</h2>
+      <h2 style={legalH2Style}>2. First payment (72-hour remorse window)</h2>
       <p style={legalPStyle}>
         Within 72 hours of your first payment, you can request a full refund
         for any reason. This is a one-time allowance: it applies only to the

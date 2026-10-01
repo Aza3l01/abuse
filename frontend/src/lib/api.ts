@@ -9,10 +9,27 @@ export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000
 
 const SESSION_EXPIRED_EVENT = "clew:session-expired";
 
+// Once a refresh attempt has failed, the session is unrecoverable until the
+// user signs in again. Without this latch, every independent poller that
+// calls apiFetch (the onboarding panel, dashboard summaries, etc.) kept
+// retrying its own GET -> 401 -> POST /auth/refresh -> 401 cycle forever in
+// a tab nobody closed, instead of backing off once the result is already
+// known. Call resetSessionExpired() right before navigating back to /login,
+// since Next's client-side routing keeps this module (and its state) alive
+// across that navigation, a plain reload isn't guaranteed to happen.
+let sessionExpired = false;
+
 function notifySessionExpired() {
+  sessionExpired = true;
   if (typeof window !== "undefined") {
     window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT));
   }
+}
+
+/** Clears the "give up" latch so a freshly-authenticated session's requests
+ * actually go out again, call before/after sending the user back to /login. */
+export function resetSessionExpired(): void {
+  sessionExpired = false;
 }
 
 /** Subscribe to session-expiry notifications. Returns an unsubscribe function. */
@@ -33,6 +50,10 @@ export function onSessionExpired(callback: () => void): () => void {
 export async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
   const url = path.startsWith("http") ? path : `${API_URL}${path}`;
   const opts: RequestInit = { credentials: "include", ...init };
+
+  if (sessionExpired) {
+    return new Response(null, { status: 401, statusText: "Session expired" });
+  }
 
   const res = await fetch(url, opts);
   if (res.status !== 401) return res;

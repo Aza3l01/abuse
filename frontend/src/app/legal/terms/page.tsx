@@ -4,7 +4,7 @@ import { LegalLayout, legalH2Style, legalPStyle } from "@/components/legal/Legal
 
 export const metadata: Metadata = {
   title: "Terms of Service",
-  description: "Terms of Service for Clew — API abuse detection and blocking.",
+  description: "Terms of Service for Clew: API abuse detection and blocking.",
 };
 
 export default function TermsPage() {

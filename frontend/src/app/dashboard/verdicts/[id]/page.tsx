@@ -39,6 +39,8 @@ interface VerdictDetail {
   ip_total_requests: number | null;
   viewer_role: string;
   org_tier: string;
+  waf_block_error: string | null;
+  cloudflare_block_error: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -73,13 +75,6 @@ function threatLabel(t: string | null): string {
   return THREAT_LABELS[t] ?? t;
 }
 
-function flagEmoji(code: string | null): string {
-  if (!code || code.length !== 2) return "";
-  const base = 0x1F1E6;
-  const chars = [...code.toUpperCase()].map(c => base + (c.charCodeAt(0) - 65));
-  return String.fromCodePoint(...chars);
-}
-
 function fmtDateTime(iso: string) {
   return new Date(iso).toLocaleString(undefined, {
     year: "numeric", month: "short", day: "numeric",
@@ -108,33 +103,58 @@ export default function VerdictDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [blocking, setBlocking] = useState(false);
+  const [blockError, setBlockError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     setLoading(true);
     apiFetch(`/verdicts/${id}`)
       .then(async r => {
-        if (!r.ok) throw new Error("not found");
+        if (r.status === 404) {
+          setError("Verdict not found.");
+          return;
+        }
+        if (!r.ok) {
+          setError("Something went wrong loading this verdict. Try again, or contact support if it keeps happening.");
+          return;
+        }
         setV(await r.json());
       })
-      .catch(() => setError("Verdict not found."))
+      .catch(() => setError("Could not connect to the server. Try again."))
       .finally(() => setLoading(false));
   }, [id]);
 
   async function handleBlock() {
     if (!v) return;
     setBlocking(true);
+    setBlockError(null);
     try {
       const action = v.blocked ? "unblock" : "block";
       const r = await apiFetch(`/verdicts/${v.id}/${action}`, { method: "POST" });
       if (r.status === 403) {
         const d = await r.json().catch(() => ({}));
-        alert(d?.detail ?? "Blocking is not available on your plan.");
+        setBlockError(d?.detail ?? "Blocking is not available on your plan.");
         return;
       }
-      if (r.ok) {
-        const updated = await apiFetch(`/verdicts/${id}`);
-        if (updated.ok) setV(await updated.json());
+      if (!r.ok) {
+        setBlockError("Could not reach the server. Try again.");
+        return;
+      }
+      // The actual AWS/Cloudflare push happens asynchronously in a Celery
+      // task, so `blocked` won't flip immediately. Give it a moment, then
+      // refetch and surface whatever per-integration error IpMemory recorded
+      // if the IP still isn't blocked, instead of the button just going
+      // quiet with no explanation either way.
+      await new Promise(resolve => setTimeout(resolve, 2500));
+      const updated = await apiFetch(`/verdicts/${id}`);
+      if (updated.ok) {
+        const data: VerdictDetail = await updated.json();
+        setV(data);
+        if (action === "block" && !data.blocked) {
+          setBlockError(
+            data.waf_block_error || data.cloudflare_block_error || "Block is still pending. Check back shortly."
+          );
+        }
       }
     } finally {
       setBlocking(false);
@@ -183,7 +203,7 @@ export default function VerdictDetailPage() {
             {copied ? "Copied!" : v.ip}
           </h1>
           <p style={{ fontSize: "13px", color: "var(--color-text-muted)" }}>
-            {flagEmoji(v.geo_country)} {v.geo_country ?? "Unknown"}
+            {v.geo_country ?? "Unknown"}
             {v.geo_asn_org && ` · ${v.geo_asn_org}`}
             {v.geo_asn_number && ` AS${v.geo_asn_number}`}
           </p>
@@ -277,7 +297,7 @@ export default function VerdictDetailPage() {
             {v.sample_logs.join("\n")}
           </pre>
           <p style={{ fontSize: "11px", color: "var(--color-text-muted)", marginTop: "6px" }}>
-            5 most suspicious requests from this batch.
+            {v.sample_logs.length} most suspicious request{v.sample_logs.length !== 1 ? "s" : ""} from this batch.
           </p>
         </div>
       )}
@@ -308,7 +328,7 @@ export default function VerdictDetailPage() {
       </div>
 
       {/* Actions */}
-      <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: blockError ? "10px" : 0 }}>
         {canBlock && (
           <button
             onClick={handleBlock}
@@ -329,6 +349,9 @@ export default function VerdictDetailPage() {
           View all verdicts for this IP →
         </Link>
       </div>
+      {blockError && (
+        <p style={{ fontSize: "12px", color: "var(--color-critical)", margin: 0 }}>{blockError}</p>
+      )}
     </main>
   );
 }

@@ -8,6 +8,7 @@ import { TeamMembersSection }  from "@/components/dashboard/TeamMembers";
 import { GuidedOnboardingButton } from "@/components/dashboard/GuidedOnboardingButton";
 import { loadRazorpayCheckout } from "@/lib/razorpay";
 import { PRICING_TIERS, FEATURE_ROWS, tierDisplayName } from "@/lib/pricing";
+import { AWS_REGIONS } from "@/lib/awsRegions";
 import { NewsletterForm } from "@/components/layout/NewsletterForm";
 
 // ---------------------------------------------------------------------------
@@ -68,12 +69,6 @@ interface SessionRow {
 // Constants
 // ---------------------------------------------------------------------------
 
-const AWS_REGIONS = [
-  "us-east-1", "us-east-2", "us-west-1", "us-west-2",
-  "eu-west-1", "eu-west-2", "eu-central-1",
-  "ap-south-1", "ap-southeast-1", "ap-southeast-2", "ap-northeast-1",
-];
-
 // Item 61: common countries for the home-country select. Not an exhaustive
 // ISO 3166-1 list, covers the markets this product actually serves today;
 // extend as new customer countries come up.
@@ -129,6 +124,11 @@ function FieldRow({ label, children }: { label: string; children: React.ReactNod
 // the manual block/unblock button and therefore need the Blocking
 // Subscription Agreement accepted before checkout.
 const MANUAL_BLOCK_TIERS = ["starter", "growth", "pro", "enterprise"];
+// Mirrors api/tiers.py's AUTO_BLOCK_TIERS: Basic (starter) can push a manual
+// block, but only Growth and above get the unattended pipeline-triggered
+// block, so the WAF/Cloudflare section copy needs to say which one a given
+// tier actually gets instead of describing automatic blocking to everyone.
+const AUTO_BLOCK_TIERS = ["growth", "pro", "enterprise"];
 
 const inputStyle: React.CSSProperties = {
   width: "100%",
@@ -323,6 +323,11 @@ export default function SettingsPage() {
   const [saving,   setSaving]   = useState(false);
   const [saved,    setSaved]    = useState(false);
   const [error,    setError]    = useState<string | null>(null);
+  // Item 8's RBAC: Settings is owner/admin only, hidden from the sidebar for
+  // viewers, but the route itself has no guard, so a viewer who types the
+  // URL directly previously got the full (entirely non-functional, every
+  // write 403s) form instead of being told they don't have access.
+  const [accessDenied, setAccessDenied] = useState(false);
 
   // Form fields
   const [s3Bucket,     setS3Bucket]     = useState("");
@@ -399,6 +404,10 @@ export default function SettingsPage() {
   function loadConfig() {
     return apiFetch(`/clients/me`)
       .then(r => {
+        if (r.status === 403) {
+          setAccessDenied(true);
+          throw new Error("forbidden");
+        }
         if (!r.ok) throw new Error("API error");
         return r.json();
       })
@@ -457,6 +466,22 @@ export default function SettingsPage() {
     const isIndia = tz.includes("Kolkata") || tz.includes("Calcutta") || lang === "hi" || lang.endsWith("-IN");
     setCurrency(isIndia ? "INR" : "USD");
   }, []);
+
+  // The page renders a "Loading…" placeholder until `config` (and the rest
+  // of the async state above) resolves, so an anchor target like #mfa isn't
+  // in the DOM yet at mount time. A hard page load re-runs the browser's own
+  // hash-scroll after paint and works fine; client-side navigation (every
+  // in-app link) does not re-trigger that, so do it manually once the real
+  // content has rendered.
+  useEffect(() => {
+    if (typeof window === "undefined" || loading) return;
+    const hash = window.location.hash.slice(1);
+    if (!hash) return;
+    const id = requestAnimationFrame(() => {
+      document.getElementById(hash)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+    return () => cancelAnimationFrame(id);
+  }, [loading]);
 
   async function handleManage() {
     setUpgrading("portal");
@@ -947,6 +972,21 @@ export default function SettingsPage() {
     );
   }
 
+  if (accessDenied) {
+    return (
+      <main style={{ padding: "32px" }}>
+        <h1 style={{ fontFamily: "var(--font-brand)", fontSize: "22px", fontWeight: 700, marginBottom: "12px" }}>
+          Settings
+        </h1>
+        <p style={{ fontSize: "13px", color: "var(--color-text-muted)", maxWidth: "480px", lineHeight: 1.6 }}>
+          You don&apos;t have access to this page. Settings is only available to
+          organisation owners and admins. Ask an owner or admin on your team if
+          you need something changed here.
+        </p>
+      </main>
+    );
+  }
+
   return (
     <main style={{ padding: "32px", width: "100%" }}>
 
@@ -1054,7 +1094,9 @@ export default function SettingsPage() {
               <p style={{ fontSize: "12px", color: "var(--color-text-muted)", marginBottom: "16px" }}>
                 {billingStatus?.billing_provider === "razorpay"
                   ? "Upgrades start immediately; downgrades take effect at the end of the current billing cycle."
-                  : "You're on the free Starter plan. Upgrade to unlock longer threat history retention, email alerts, and automatic blocking."}
+                  : config?.tier === "free"
+                  ? "You're on the free Starter plan. Upgrade to unlock longer threat history retention, email alerts, and automatic blocking."
+                  : `You're on the ${tierDisplayName(config?.tier)} plan.`}
               </p>
 
               {currency === "INR" && (
@@ -1239,7 +1281,7 @@ export default function SettingsPage() {
                 {currency === "INR" ? "Payments by Razorpay. UPI, cards, netbanking, and wallets accepted." : "Manual invoicing is available for customers outside India."}{" "}
                 Viewing prices in {currency}.{" "}
                 <button
-                  onClick={() => setCurrency(c => c === "INR" ? "USD" : "INR")}
+                  onClick={() => { setCurrency(c => c === "INR" ? "USD" : "INR"); setBillingError(null); }}
                   style={{ background: "none", border: "none", color: "var(--color-text-muted)", cursor: "pointer", textDecoration: "underline", fontSize: "11px", padding: 0 }}
                 >
                   Switch to {currency === "INR" ? "USD" : "INR"}
@@ -1448,6 +1490,13 @@ export default function SettingsPage() {
             sub="Receive an email when a high or critical threat is detected."
           />
 
+          {config?.tier === "free" && (
+            <p style={{ fontSize: "12px", color: "var(--color-text-muted)", marginBottom: "16px" }}>
+              Email alerts require an active paid plan. You can set these up
+              now, but no email will send until you upgrade.
+            </p>
+          )}
+
           <FieldRow label="Alert email">
             <input
               type="email"
@@ -1533,7 +1582,11 @@ export default function SettingsPage() {
       <section id="waf" style={{ marginBottom: "40px" }}>
         <SectionTitle
           title="WAF Configuration"
-          sub="Push a block rule to your AWS WAF IP set when a high-confidence threat is detected."
+          sub={
+            AUTO_BLOCK_TIERS.includes(config.tier)
+              ? "Push a block rule to your AWS WAF IP set when a high-confidence threat is detected."
+              : "Push a block rule to your AWS WAF IP set with one click from a verdict. Automatic, unattended blocking is available on Growth and above."
+          }
         />
         <p style={{ fontSize: "12px", marginBottom: "16px" }}>
           <Link href="/docs#blocking-ips" style={{ color: "var(--color-text-muted)" }}>
@@ -1575,7 +1628,11 @@ export default function SettingsPage() {
       <section id="cloudflare" style={{ marginBottom: "40px" }}>
         <SectionTitle
           title="Cloudflare Configuration"
-          sub="Push a block rule to your Cloudflare zone when a high-confidence threat is detected."
+          sub={
+            AUTO_BLOCK_TIERS.includes(config.tier)
+              ? "Push a block rule to your Cloudflare zone when a high-confidence threat is detected."
+              : "Push a block rule to your Cloudflare zone with one click from a verdict. Automatic, unattended blocking is available on Growth and above."
+          }
         />
         <form onSubmit={handleSaveCloudflare}>
           <FieldRow label="Zone ID">
@@ -1696,10 +1753,10 @@ export default function SettingsPage() {
           {mfaEnabled && backupCodes && (
             <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
               <div>
-                <p style={{ fontSize: "13px", fontWeight: 600, marginBottom: "6px" }}>MFA enabled — save your backup codes</p>
+                <p style={{ fontSize: "13px", fontWeight: 600, marginBottom: "6px" }}>MFA enabled: save your backup codes</p>
                 <p style={{ fontSize: "12px", color: "var(--color-text-muted)", marginBottom: "14px" }}>
                   These 10 single-use codes let you sign in if you lose access to your
-                  authenticator app. Save them somewhere safe — they will <strong>not</strong> be shown again.
+                  authenticator app. Save them somewhere safe, they will <strong>not</strong> be shown again.
                 </p>
                 <div style={{
                   display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px",
@@ -1734,7 +1791,7 @@ export default function SettingsPage() {
                     background: "var(--color-text)", color: "var(--color-bg)", cursor: "pointer",
                   }}
                 >
-                  I&apos;ve saved them — Done
+                  I&apos;ve saved them, Done
                 </button>
               </div>
             </div>

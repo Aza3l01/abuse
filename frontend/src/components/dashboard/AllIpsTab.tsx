@@ -56,13 +56,6 @@ function SeverityBadge({ severity }: { severity: string }) {
   );
 }
 
-function flagEmoji(code: string | null): string {
-  if (!code || code.length !== 2) return "";
-  const base = 0x1F1E6;
-  const chars = [...code.toUpperCase()].map(c => base + (c.charCodeAt(0) - 65));
-  return String.fromCodePoint(...chars);
-}
-
 function fmtDate(iso: string) {
   return new Date(iso).toLocaleDateString(undefined, {
     year: "numeric", month: "short", day: "numeric",
@@ -175,7 +168,7 @@ export function AllIpsTab() {
       </div>
 
       {/* Table */}
-      <div style={{ border: "1px solid var(--color-border)", background: "var(--color-surface)" }}>
+      <div style={{ border: "1px solid var(--color-border)", background: "var(--color-surface)", overflowX: "auto" }}>
         {loading ? (
           <p style={{ padding: "32px 20px", fontSize: "13px", color: "var(--color-text-muted)", textAlign: "center" }}>Loading…</p>
         ) : error ? (
@@ -185,7 +178,7 @@ export function AllIpsTab() {
             No IPs tracked yet. They appear here once your logs are processed.
           </p>
         ) : (
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
+          <table style={{ width: "100%", minWidth: "900px", borderCollapse: "collapse", fontSize: "13px" }}>
             <thead>
               <tr>
                 <th style={{ padding: "10px 16px", textAlign: "left", fontSize: "11px", textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--color-text-muted)", borderBottom: "1px solid var(--color-border)", fontWeight: 500 }}>IP</th>
@@ -207,7 +200,7 @@ export function AllIpsTab() {
                     <span style={{ fontFamily: "var(--font-mono)", fontSize: "12px" }}>{row.ip}</span>
                   </td>
                   <td style={{ padding: "10px 16px", color: "var(--color-text-muted)", fontFamily: "var(--font-mono)", fontSize: "12px" }}>
-                    {flagEmoji(row.geo_country)} {row.geo_country ?? "—"}
+                    {row.geo_country ?? "—"}
                   </td>
                   <td style={{ padding: "10px 16px", color: "var(--color-text-muted)", fontSize: "12px" }}>
                     {row.geo_asn_org ?? "—"}

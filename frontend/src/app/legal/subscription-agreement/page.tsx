@@ -8,7 +8,7 @@ export const metadata: Metadata = {
 
 export default function SubscriptionAgreementPage() {
   return (
-    <LegalLayout title="Subscription Agreement" lastUpdated="August 10, 2026">
+    <LegalLayout title="Subscription Agreement" lastUpdated="October 1, 2026">
       <p style={legalPStyle}>
         The full subscription terms for Basic, Growth, and Pro plans
         (usage terms, S3 access scope, blocking-consent terms, and liability

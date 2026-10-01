@@ -65,7 +65,7 @@ export function DashboardGate({ children }: { children: ReactNode }) {
     return (
       <AuthLayout title="Set up your organisation">
         <p style={{ fontSize: "14px", color: "var(--color-text-muted)", lineHeight: 1.6, marginBottom: "20px" }}>
-          One last step. This creates your organisation — you&apos;ll be its owner,
+          One last step. This creates your organisation, and you&apos;ll be its owner,
           with full control over billing, configuration, and team members.
         </p>
         <form onSubmit={handleCreateOrg}>

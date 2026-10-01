@@ -16,6 +16,8 @@ const STEPS = [
   },
 ];
 
+const OTHER_PLATFORMS = ["Google Cloud", "Azure", "Cloudflare", "Vercel / Fly / Railway / bare metal"];
+
 export function HowItWorks() {
   return (
     <section
@@ -62,6 +64,34 @@ export function HowItWorks() {
               </p>
             </div>
           ))}
+        </div>
+
+        <div style={{ marginTop: "48px", padding: "32px", border: "1px solid var(--color-border)" }}>
+          <p
+            className="font-mono text-xs uppercase tracking-widest mb-6"
+            style={{ color: "var(--color-text-muted)" }}
+          >
+            Platform support
+          </p>
+          <div className="flex flex-wrap items-baseline gap-x-10 gap-y-3 mb-5">
+            <span className="font-brand font-bold text-base" style={{ color: "var(--color-text)" }}>
+              AWS
+            </span>
+            {OTHER_PLATFORMS.map((name) => (
+              <span key={name} className="text-sm" style={{ color: "var(--color-border)" }}>
+                {name} (planned)
+              </span>
+            ))}
+          </div>
+          <p
+            className="text-sm leading-relaxed"
+            style={{ color: "var(--color-text-muted)", maxWidth: "760px" }}
+          >
+            The zero-integration mode above (Clew reads your S3 logs directly,
+            no agent or SDK) is AWS-only today. A log-ingestion API is planned
+            so teams on other platforms can send logs to Clew directly,
+            check with us before you buy if you are not on AWS.
+          </p>
         </div>
       </div>
     </section>

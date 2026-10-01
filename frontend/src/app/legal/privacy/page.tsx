@@ -4,12 +4,12 @@ import { LegalLayout, legalH2Style, legalPStyle } from "@/components/legal/Legal
 
 export const metadata: Metadata = {
   title: "Privacy Policy",
-  description: "Privacy Policy for Clew — API abuse detection and blocking.",
+  description: "Privacy Policy for Clew: API abuse detection and blocking.",
 };
 
 export default function PrivacyPage() {
   return (
-    <LegalLayout title="Privacy Policy" lastUpdated="August 10, 2026">
+    <LegalLayout title="Privacy Policy" lastUpdated="October 1, 2026">
       <p style={legalPStyle}>
         This Privacy Policy describes how Clew (&quot;we&quot;, &quot;us&quot;) collects,
         uses, and protects personal data in connection with the Clew service,

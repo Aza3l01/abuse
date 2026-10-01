@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { apiFetch } from "@/lib/api";
+import { AWS_REGIONS } from "@/lib/awsRegions";
 import type { OrgConfigForOnboarding } from "@/components/dashboard/OnboardingModal";
 
 // ---------------------------------------------------------------------------
@@ -13,11 +14,17 @@ import type { OrgConfigForOnboarding } from "@/components/dashboard/OnboardingMo
 // Settings page's S3/AWS Access sections, just split into a guided sequence.
 // ---------------------------------------------------------------------------
 
-const AWS_REGIONS = [
-  "us-east-1", "us-east-2", "us-west-1", "us-west-2",
-  "eu-west-1", "eu-west-2", "eu-central-1",
-  "ap-south-1", "ap-southeast-1", "ap-southeast-2", "ap-northeast-1",
-];
+// FastAPI/Pydantic 422s send `detail` as an array of error objects, not a
+// string, so a plain `typeof d?.detail === "string"` check always falls back
+// to a generic message for field-validator failures (e.g. a malformed
+// aws_role_arn). Extract the real message when present.
+function extractErrorMessage(detail: unknown, fallback: string): string {
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail) && detail.length > 0 && typeof detail[0]?.msg === "string") {
+    return detail[0].msg.replace(/^Value error,\s*/, "");
+  }
+  return fallback;
+}
 
 type Step =
   | "bucket"
@@ -148,7 +155,7 @@ export function LogSourceWizard({
       });
       if (!r.ok) {
         const d = await r.json().catch(() => ({}));
-        setBasicsError(typeof d?.detail === "string" ? d.detail : "Save failed.");
+        setBasicsError(extractErrorMessage(d?.detail, "Save failed."));
         return;
       }
       const updated: OrgConfigForOnboarding = await r.json();
@@ -172,7 +179,7 @@ export function LogSourceWizard({
       });
       if (!r.ok) {
         const d = await r.json().catch(() => ({}));
-        setRoleResult({ status: "error", message: typeof d?.detail === "string" ? d.detail : "Save failed." });
+        setRoleResult({ status: "error", message: extractErrorMessage(d?.detail, "Save failed.") });
         return;
       }
       const updated: OrgConfigForOnboarding = await r.json();

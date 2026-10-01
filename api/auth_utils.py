@@ -558,6 +558,7 @@ def send_org_invite_email(
     existing_account: bool = False,
 ) -> bool:
     role_label = role.capitalize()
+    role_article = "an" if role_label[:1] in "AEIOU" else "a"
     existing_note = (
         f"You already have a Clew account with this email. Clicking accept will "
         f"add {company_name} to your organisations."
@@ -565,11 +566,11 @@ def send_org_invite_email(
     )
     body_text = (
         f"{inviter_name} has invited you to join {company_name}'s security "
-        f"dashboard on Clew as a {role_label}.\n\n"
+        f"dashboard on Clew as {role_article} {role_label}.\n\n"
         f"Accept the invitation: {accept_url}\n\n"
         "This invitation expires in 7 days.\n\n"
         + (existing_note + "\n\n" if existing_note else "")
-        + "If you don't recognise this invitation, ignore this email — no "
+        + "If you don't recognise this invitation, ignore this email, no "
         "account will be created."
     )
     body_html = _email_html(
@@ -578,7 +579,7 @@ def send_org_invite_email(
             _p(
                 f"<strong>{inviter_name}</strong> has invited you to join "
                 f"<strong>{company_name}</strong>'s security dashboard on Clew "
-                f"as a <strong>{role_label}</strong>."
+                f"as {role_article} <strong>{role_label}</strong>."
             )
             + (_p(existing_note) if existing_note else "")
             + f'<div style="text-align:center;margin:24px 0;">'
@@ -588,7 +589,7 @@ def send_org_invite_email(
               f'font-size:14px;font-weight:600;text-decoration:none;">Accept Invitation</a>'
               f'</div>'
             + _p("This invitation expires in 7 days.")
-            + _p("If you don't recognise this invitation, ignore this email — no account will be created.")
+            + _p("If you don't recognise this invitation, ignore this email, no account will be created.")
         ),
         footer_note="This invitation expires in 7 days and can only be used once.",
     )

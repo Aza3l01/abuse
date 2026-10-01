@@ -711,8 +711,20 @@ async def reset_password(
     ).update({"revoked": True})
     db.commit()
 
-    _issue_tokens(response, db, client, request)
     send_password_changed_email(client.email)
+
+    if client.mfa_enabled:
+        # Controlling the mailbox is not the second factor: still require the
+        # TOTP/backup-code challenge before issuing a session, same as /auth/login.
+        expire = datetime.now(timezone.utc) + timedelta(minutes=5)
+        mfa_token = _jose_jwt.encode(
+            {"sub": client.id, "exp": expire, "type": "mfa_challenge"},
+            JWT_SECRET,
+            algorithm=JWT_ALGORITHM,
+        )
+        return {"code": "MFA_REQUIRED", "mfa_token": mfa_token}
+
+    _issue_tokens(response, db, client, request)
     return {"message": "Password reset. You are now logged in."}
 
 

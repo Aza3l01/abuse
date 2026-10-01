@@ -28,12 +28,20 @@ export function Hero() {
         <div className="flex flex-wrap items-center gap-4">
           <button
             onClick={() => document.getElementById("pricing")?.scrollIntoView({ behavior: "smooth" })}
-            className="px-6 py-3 text-sm font-medium transition-opacity hover:opacity-80"
+            className="px-6 py-3 text-sm font-medium transition-colors"
             style={{
               background: "var(--color-text)",
               color: "var(--color-bg)",
-              border: "none",
+              border: "1px solid var(--color-text)",
               cursor: "pointer",
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = "var(--color-bg)";
+              e.currentTarget.style.color = "var(--color-text)";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = "var(--color-text)";
+              e.currentTarget.style.color = "var(--color-bg)";
             }}
           >
             Get started

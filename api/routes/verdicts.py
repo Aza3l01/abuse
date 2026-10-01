@@ -86,6 +86,15 @@ class VerdictDetailOut(VerdictOut):
     # viewers) so a viewer at a Pro-tier org still sees the real AI analysis
     # per item 19's spec — only the Block button is role-gated, not tier info.
     org_tier:         str = "free"
+    # The actual block/unblock push happens asynchronously in
+    # workers/tasks/push_blocks.py, so `blocked` can stay False even after a
+    # successful POST /verdicts/{id}/block if the push itself failed (e.g. a
+    # broken cross-account IAM role). Surface the same per-integration error
+    # IpMemory already tracks for the Blocked IPs tab, so the detail page can
+    # explain a stuck "not blocked" state instead of looking like nothing
+    # happened.
+    waf_block_error:        Optional[str] = None
+    cloudflare_block_error: Optional[str] = None
 
 
 class ManualBlockBody(BaseModel):
@@ -119,16 +128,20 @@ def list_verdicts(
     ip:          Optional[str] = None,
     date_from:   Optional[datetime] = None,
     date_to:     Optional[datetime] = None,
+    sort:        Literal["severity", "recent"] = "severity",
     db:          Session    = Depends(get_db),
     current_org: CurrentOrg = Depends(get_current_org),
 ):
     """
     Return a paginated, filtered list of verdicts for the current org.
 
-    All filter parameters are optional and combinable. Results are ordered
-    newest first (timestamp DESC). `severity` accepts repeated query params
-    (item 18's multi-select checkboxes). Omit for "all severities".
-    `ip` is a prefix match (e.g. "192.168." finds a subnet), not exact-only.
+    All filter parameters are optional and combinable. `severity` accepts
+    repeated query params (item 18's multi-select checkboxes). Omit for "all
+    severities". `ip` is a prefix match (e.g. "192.168." finds a subnet), not
+    exact-only. `sort` defaults to the Alerts tab's severity-then-timestamp
+    order; pass `sort=recent` for a strict timestamp DESC order (the
+    Overview's "Recent threats" panel, where the heading promises recency,
+    not severity).
     """
     q = db.query(Verdict).filter(Verdict.org_id == current_org.id)
 
@@ -144,8 +157,13 @@ def list_verdicts(
         q = q.filter(Verdict.timestamp <= date_to)
 
     total = q.count()
+    order = (
+        (Verdict.timestamp.desc(),)
+        if sort == "recent"
+        else (_SEVERITY_ORDER.asc(), Verdict.timestamp.desc())
+    )
     items = (
-        q.order_by(_SEVERITY_ORDER.asc(), Verdict.timestamp.desc())
+        q.order_by(*order)
         .offset((page - 1) * limit)
         .limit(limit)
         .all()
@@ -203,6 +221,8 @@ def get_verdict(
         ip_total_requests=ip_memory.total_requests if ip_memory else None,
         viewer_role=current_org.role,
         org_tier=current_org.organization.tier,
+        waf_block_error=ip_memory.waf_block_error if ip_memory else None,
+        cloudflare_block_error=ip_memory.cloudflare_block_error if ip_memory else None,
     )
 
 

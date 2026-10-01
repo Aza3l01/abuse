@@ -46,7 +46,7 @@ def build_alert_email(verdict) -> tuple[str, str, str]:
     confidence, timestamp). item 20's test alert uses a non-persisted
     stand-in object, not a real row.
     """
-    subject = f"[Clew] {verdict.severity.upper()} threat detected — {verdict.ip}"
+    subject = f"[Clew] {verdict.severity.upper()} threat detected: {verdict.ip}"
     body_text = (
         f"Clew detected a {verdict.severity} severity threat.\n\n"
         f"IP:          {verdict.ip}\n"
