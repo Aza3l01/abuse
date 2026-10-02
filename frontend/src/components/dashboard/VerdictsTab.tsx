@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { apiFetch } from "@/lib/api";
+import { LoadingCursor } from "@/components/dashboard/LoadingCursor";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -329,7 +330,7 @@ export function VerdictsTab({ role, tier }: { role: string | null; tier: string 
       {/* Table */}
       <div style={{ border: "1px solid var(--color-border)", background: "var(--color-surface)", overflowX: "auto" }}>
         {loading ? (
-          <p style={{ padding: "32px 20px", fontSize: "13px", color: "var(--color-text-muted)", textAlign: "center" }}>Loading…</p>
+          <p style={{ padding: "32px 20px", fontSize: "13px", color: "var(--color-text-muted)", textAlign: "center" }}>Loading<LoadingCursor /></p>
         ) : error ? (
           <p style={{ padding: "32px 20px", fontSize: "13px", color: "var(--color-text-muted)", textAlign: "center" }}>{error}</p>
         ) : !data || data.items.length === 0 ? (

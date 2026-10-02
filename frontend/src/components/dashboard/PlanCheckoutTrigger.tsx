@@ -177,7 +177,7 @@ export function PlanCheckoutTrigger() {
         position: "fixed", inset: 0, background: "rgba(13,13,13,0.6)",
         display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100,
       }}>
-        <div style={{ background: "var(--color-bg)", border: "1px solid var(--color-border)", padding: "24px", maxWidth: "460px", width: "90%" }}>
+        <div style={{ background: "var(--color-bg)", border: "1px solid var(--color-border)", padding: "24px", maxWidth: "460px", width: "90%", animation: "modal-panel-in 150ms ease-out" }}>
           <p style={{ fontSize: "14px", fontWeight: 600, marginBottom: "12px" }}>
             This plan includes active IP blocking
           </p>

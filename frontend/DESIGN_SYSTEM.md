@@ -223,7 +223,11 @@ border-radius: 0;
 border-color: var(--color-text);
 ```
 
-No opacity changes on hover. Always invert or increase border contrast.
+No opacity changes on hover for the primary/secondary buttons above. Always
+invert or increase border contrast for those. The marketing site's own
+`hover:opacity-70`/`hover:opacity-80` text buttons are a separate, deliberate
+exception, opacity hovers are fine in general (see "What This System Is Not"
+below), just not as the hover treatment for these two button styles.
 
 ---
 
@@ -392,9 +396,14 @@ LOW       background: #38A169  text: #FFFFFF
 ## What This System Is Not
 
 No gradients. No blur effects. No glassmorphism. No rounded corners anywhere.
-No drop shadows. No accent colors on the marketing site. No animations beyond
-a simple 150ms color transition on interactive elements. No illustrations.
+No drop shadows. No accent colors on the marketing site. No illustrations.
 No emoji in UI. No decorative elements that do not carry information.
 NO em dash
+
+Opacity-based hover and blink/flash transitions are fine everywhere, on the
+marketing site and in the dashboard alike. Small positional (movement-only)
+transitions on modal open are fine too. What is actually off-limits is
+hue/color changes on the marketing site specifically, the dashboard already
+uses functional severity colors for data and that has always been fine.
 
 Every element either communicates something or gets removed.

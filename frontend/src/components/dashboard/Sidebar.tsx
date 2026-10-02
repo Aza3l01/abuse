@@ -237,7 +237,7 @@ export function DashboardSidebar({ company }: { company?: string }) {
             style={{ height: "14px", width: "auto", filter: "var(--logo-filter)" }}
           />
         </Link>
-        <span style={{ fontSize: "11px", color: "var(--color-text-muted)" }}>v0.1.1</span>
+        <span style={{ fontSize: "11px", color: "var(--color-text-muted)" }}>v1.2.1</span>
       </div>
 
       {/* Org switcher — basic single-email switcher (item 7's MVP scope;

@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { AuthLayout, inputStyle, labelStyle, primaryBtnStyle } from "@/components/auth/AuthLayout";
 import { apiFetch } from "@/lib/api";
+import { LoadingCursor } from "@/components/dashboard/LoadingCursor";
 
 /**
  * Gates all /dashboard/* routes on the current client having at least one
@@ -56,7 +57,7 @@ export function DashboardGate({ children }: { children: ReactNode }) {
   if (status === "loading") {
     return (
       <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--color-text-muted)", fontSize: "13px" }}>
-        Loading…
+        Loading<LoadingCursor />
       </div>
     );
   }

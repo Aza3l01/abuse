@@ -294,7 +294,7 @@ export function TeamMembersSection({ myRole, onOwnershipTransferred }: { myRole:
           position: "fixed", inset: 0, background: "rgba(13,13,13,0.6)",
           display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100,
         }}>
-          <div style={{ background: "var(--color-bg)", border: "1px solid var(--color-border)", padding: "24px", maxWidth: "420px", width: "90%" }}>
+          <div style={{ background: "var(--color-bg)", border: "1px solid var(--color-border)", padding: "24px", maxWidth: "420px", width: "90%", animation: "modal-panel-in 150ms ease-out" }}>
             <p style={{ fontSize: "14px", marginBottom: "16px", lineHeight: 1.5 }}>
               Make <strong>{transferTarget.email}</strong> the owner of this organisation?
             </p>

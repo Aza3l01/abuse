@@ -45,3 +45,23 @@ body {
   font-family: var(--font-sans);
   transition: background 0.1s, color 0.1s;
 }
+
+/* ── Dashboard-only micro-animations ────────────────────────── */
+
+/* Blinking terminal-style loading cursor. Opacity only, no color change. */
+@keyframes blink-cursor {
+  0%, 49.99% { opacity: 1; }
+  50%, 100%  { opacity: 0; }
+}
+
+/* One-shot flash on a newly-arrived dashboard table row. */
+@keyframes new-row-flash {
+  from { background: var(--color-border); }
+  to   { background: transparent; }
+}
+
+/* Modal open: movement only, no opacity fade. */
+@keyframes modal-panel-in {
+  from { transform: translateY(6px); }
+  to   { transform: translateY(0); }
+}

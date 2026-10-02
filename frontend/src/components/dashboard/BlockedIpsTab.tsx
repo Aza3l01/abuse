@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { apiFetch } from "@/lib/api";
+import { LoadingCursor } from "@/components/dashboard/LoadingCursor";
 
 interface BlockedIpRow {
   id: string;
@@ -180,7 +181,7 @@ export function BlockedIpsTab({ role, tier }: { role: string | null; tier: strin
 
       <div style={{ border: "1px solid var(--color-border)", background: "var(--color-surface)", overflowX: "auto" }}>
         {loading ? (
-          <p style={{ padding: "32px 20px", fontSize: "13px", color: "var(--color-text-muted)", textAlign: "center" }}>Loading…</p>
+          <p style={{ padding: "32px 20px", fontSize: "13px", color: "var(--color-text-muted)", textAlign: "center" }}>Loading<LoadingCursor /></p>
         ) : !data || data.items.length === 0 ? (
           <p style={{ padding: "32px 20px", fontSize: "13px", color: "var(--color-text-muted)", textAlign: "center" }}>
             No IPs are currently blocked.
@@ -246,7 +247,7 @@ export function BlockedIpsTab({ role, tier }: { role: string | null; tier: strin
           position: "fixed", inset: 0, background: "rgba(13,13,13,0.6)",
           display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100,
         }}>
-          <div style={{ background: "var(--color-bg)", border: "1px solid var(--color-border)", padding: "24px", maxWidth: "420px", width: "90%" }}>
+          <div style={{ background: "var(--color-bg)", border: "1px solid var(--color-border)", padding: "24px", maxWidth: "420px", width: "90%", animation: "modal-panel-in 150ms ease-out" }}>
             <p style={{ fontSize: "14px", marginBottom: "16px", lineHeight: 1.5 }}>
               Unblock <span style={{ fontFamily: "var(--font-mono)" }}>{confirmIp.ip}</span>?
             </p>

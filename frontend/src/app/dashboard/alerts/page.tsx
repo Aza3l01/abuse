@@ -4,6 +4,7 @@ import { useEffect, useState, Suspense } from "react";
 import { apiFetch } from "@/lib/api";
 import { VerdictsTab } from "@/components/dashboard/VerdictsTab";
 import { NotificationsTab } from "@/components/dashboard/NotificationsTab";
+import { LoadingCursor } from "@/components/dashboard/LoadingCursor";
 
 type Tab = "verdicts" | "notifications";
 
@@ -74,7 +75,7 @@ export default function AlertsPage() {
   return (
     <Suspense fallback={
       <main style={{ padding: "32px", color: "var(--color-text-muted)", fontSize: "13px" }}>
-        Loading…
+        Loading<LoadingCursor />
       </main>
     }>
       <AlertsInner />

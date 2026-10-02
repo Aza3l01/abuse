@@ -10,6 +10,7 @@ import { loadRazorpayCheckout } from "@/lib/razorpay";
 import { PRICING_TIERS, FEATURE_ROWS, tierDisplayName } from "@/lib/pricing";
 import { AWS_REGIONS } from "@/lib/awsRegions";
 import { NewsletterForm } from "@/components/layout/NewsletterForm";
+import { LoadingCursor } from "@/components/dashboard/LoadingCursor";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -967,7 +968,7 @@ export default function SettingsPage() {
   if (loading) {
     return (
       <main style={{ padding: "32px", color: "var(--color-text-muted)", fontSize: "13px" }}>
-        Loading…
+        Loading<LoadingCursor />
       </main>
     );
   }
@@ -1298,7 +1299,7 @@ export default function SettingsPage() {
           position: "fixed", inset: 0, background: "rgba(13,13,13,0.6)",
           display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100,
         }}>
-          <div style={{ background: "var(--color-bg)", border: "1px solid var(--color-border)", padding: "24px", maxWidth: "460px", width: "90%" }}>
+          <div style={{ background: "var(--color-bg)", border: "1px solid var(--color-border)", padding: "24px", maxWidth: "460px", width: "90%", animation: "modal-panel-in 150ms ease-out" }}>
             <p style={{ fontSize: "14px", fontWeight: 600, marginBottom: "12px" }}>
               This plan includes active IP blocking
             </p>
@@ -1342,7 +1343,7 @@ export default function SettingsPage() {
           position: "fixed", inset: 0, background: "rgba(13,13,13,0.6)",
           display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100,
         }}>
-          <div style={{ background: "var(--color-bg)", border: "1px solid var(--color-border)", padding: "24px", maxWidth: "460px", width: "90%" }}>
+          <div style={{ background: "var(--color-bg)", border: "1px solid var(--color-border)", padding: "24px", maxWidth: "460px", width: "90%", animation: "modal-panel-in 150ms ease-out" }}>
             <p style={{ fontSize: "14px", fontWeight: 600, marginBottom: "12px" }}>
               Cancel your subscription?
             </p>
@@ -2002,7 +2003,7 @@ export default function SettingsPage() {
         />
         <div style={{ border: "1px solid var(--color-border)", background: "var(--color-bg)" }}>
           {sessionsLoading && (
-            <p style={{ padding: "20px", fontSize: "12px", color: "var(--color-text-muted)" }}>Loading…</p>
+            <p style={{ padding: "20px", fontSize: "12px", color: "var(--color-text-muted)" }}>Loading<LoadingCursor /></p>
           )}
           {!sessionsLoading && sessions.length === 0 && (
             <p style={{ padding: "20px", fontSize: "12px", color: "var(--color-text-muted)" }}>No active sessions found.</p>
@@ -2122,7 +2123,7 @@ export default function SettingsPage() {
           position: "fixed", inset: 0, background: "rgba(13,13,13,0.6)",
           display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100,
         }}>
-          <div style={{ background: "var(--color-bg)", border: "1px solid var(--color-border)", padding: "24px", maxWidth: "460px", width: "90%" }}>
+          <div style={{ background: "var(--color-bg)", border: "1px solid var(--color-border)", padding: "24px", maxWidth: "460px", width: "90%", animation: "modal-panel-in 150ms ease-out" }}>
             <p style={{ fontSize: "14px", fontWeight: 600, marginBottom: "12px", color: "var(--color-critical)" }}>
               Delete your account?
             </p>

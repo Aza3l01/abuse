@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { apiFetch } from "@/lib/api";
 import Link from "next/link";
 import { GuidedOnboardingButton } from "@/components/dashboard/GuidedOnboardingButton";
+import { LoadingCursor } from "@/components/dashboard/LoadingCursor";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -81,17 +82,20 @@ function SeverityBadge({ severity }: { severity: string }) {
   );
 }
 
-function StatCard({ label, value, sub }: { label: string; value: string; sub?: string }) {
+function StatCard({ label, value, sub, tooltip }: { label: string; value: string; sub?: string; tooltip?: string }) {
   return (
     <div style={{
       border: "1px solid var(--color-border)",
       background: "var(--color-surface)",
       padding: "20px",
-      flex: "1 1 0",
-      minWidth: 0,
+      flex: "1 1 140px",
+      minWidth: "140px",
     }}>
       <p style={{ fontSize: "11px", textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--color-text-muted)", marginBottom: "8px" }}>
         {label}
+        {tooltip && (
+          <span title={tooltip} style={{ marginLeft: "4px", cursor: "help" }}>(?)</span>
+        )}
       </p>
       <p style={{ fontSize: "28px", fontWeight: 700, lineHeight: 1, marginBottom: sub ? "4px" : 0 }}>
         {value}
@@ -202,6 +206,10 @@ export default function DashboardOverview() {
   const [loading,  setLoading]  = useState(true);
   const [error,    setError]    = useState<string | null>(null);
   const [lastChecked, setLastChecked] = useState<Date | null>(null);
+  // Previously-seen recent-verdict ids, used to flash only genuinely new rows
+  // on a reload (not on the very first page load).
+  const seenVerdictIds = useRef<Set<string> | null>(null);
+  const [flashIds, setFlashIds] = useState<Set<string>>(new Set());
   // Matches Settings' own locale/timezone heuristic for INR vs USD, so
   // "Cost prevented" doesn't show a flat USD figure to an org whose billing
   // (and everywhere else in the product) is already showing INR.
@@ -222,7 +230,17 @@ export default function DashboardOverview() {
         if (!sr.ok || !vr.ok) throw new Error("API error");
         const [s, v] = await Promise.all([sr.json(), vr.json()]);
         setSummary(s);
-        setRecent(v.items ?? []);
+        const items: Verdict[] = v.items ?? [];
+        const ids = new Set(items.map(i => i.id));
+        if (seenVerdictIds.current) {
+          const newly = [...ids].filter(id => !seenVerdictIds.current!.has(id));
+          if (newly.length > 0) {
+            setFlashIds(new Set(newly));
+            setTimeout(() => setFlashIds(new Set()), 1200);
+          }
+        }
+        seenVerdictIds.current = ids;
+        setRecent(items);
         setLastChecked(new Date());
       })
       .catch(() => setError("Failed to load dashboard data."));
@@ -252,7 +270,7 @@ export default function DashboardOverview() {
   if (loading) {
     return (
       <div style={{ padding: "48px 32px", color: "var(--color-text-muted)", fontSize: "13px" }}>
-        Loading…
+        Loading<LoadingCursor />
       </div>
     );
   }
@@ -292,11 +310,11 @@ export default function DashboardOverview() {
       )}
 
       {/* Title + period selector */}
-      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: "28px" }}>
+      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: "28px", flexWrap: "wrap", gap: "12px" }}>
         <h1 style={{ fontFamily: "var(--font-brand)", fontSize: "22px", fontWeight: 700 }}>
           Overview
         </h1>
-        <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap" }}>
           {!scanning && s.s3_configured && lastChecked && (
             <>
               <span style={{ fontSize: "11px", color: "var(--color-text-muted)" }}>
@@ -356,6 +374,7 @@ export default function DashboardOverview() {
         />
         <StatCard
           label="Cost prevented"
+          tooltip="Estimate only, confidence-weighted, using the same assumptions as the homepage cost calculator."
           value={s.s3_configured
             ? isIndia
               ? `₹${s.cost_prevented.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
@@ -367,10 +386,11 @@ export default function DashboardOverview() {
 
       {/* Trend chart + top IPs */}
       {s.s3_configured && (
-      <div style={{ display: "flex", gap: "12px", marginBottom: "28px" }}>
+      <div style={{ display: "flex", gap: "12px", marginBottom: "28px", flexWrap: "wrap" }}>
         {/* Chart */}
         <div style={{
-          flex: "2 1 0",
+          flex: "2 1 320px",
+          minWidth: "280px",
           border: "1px solid var(--color-border)",
           background: "var(--color-surface)",
           padding: "20px",
@@ -404,7 +424,8 @@ export default function DashboardOverview() {
 
         {/* Top IPs */}
         <div style={{
-          flex: "1 1 0",
+          flex: "1 1 220px",
+          minWidth: "220px",
           border: "1px solid var(--color-border)",
           background: "var(--color-surface)",
           padding: "20px",
@@ -508,7 +529,13 @@ export default function DashboardOverview() {
             </thead>
             <tbody>
               {recent.map(v => (
-                <tr key={v.id} style={{ borderBottom: "1px solid var(--color-border)" }}>
+                <tr
+                  key={v.id}
+                  style={{
+                    borderBottom: "1px solid var(--color-border)",
+                    animation: flashIds.has(v.id) ? "new-row-flash 1.2s ease-out" : undefined,
+                  }}
+                >
                   <td style={{ padding: "10px 20px", color: "var(--color-text-muted)", whiteSpace: "nowrap" }}>
                     {fmtTime(v.timestamp)}
                   </td>

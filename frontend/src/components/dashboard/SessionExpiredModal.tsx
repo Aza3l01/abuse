@@ -44,6 +44,7 @@ export function SessionExpiredModal() {
           padding: "32px",
           maxWidth: "360px",
           width: "100%",
+          animation: "modal-panel-in 150ms ease-out",
         }}
       >
         <p style={{ fontSize: "14px", color: "var(--color-text)", marginBottom: "20px", lineHeight: 1.5 }}>

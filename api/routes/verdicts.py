@@ -9,6 +9,7 @@ GET  /verdicts/threat-types : distinct threat_type values seen by this org (item
 GET  /verdicts/{id}        : single verdict detail, enriched with ip_memory context (item 19)
 POST /verdicts/manual-block : item 21, block an IP with no existing verdict
 """
+import ipaddress
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Literal, Optional
@@ -100,6 +101,21 @@ class VerdictDetailOut(VerdictOut):
 class ManualBlockBody(BaseModel):
     ip:     IPvAnyAddress
     reason: Optional[str] = None
+
+    @field_validator("ip", mode="before")
+    @classmethod
+    def reject_malformed_ip(cls, v: Any) -> Any:
+        """A malformed (non-IP-shaped) string fails Pydantic's own built-in
+        IPvAnyAddress coercion before reject_unsafe_ip below ever runs,
+        surfacing the library's raw internal wording. Catch that case first
+        with the same customer-facing message style.
+        """
+        if isinstance(v, str):
+            try:
+                ipaddress.ip_address(v)
+            except ValueError:
+                raise ValueError("Enter a valid public IP address.")
+        return v
 
     @field_validator("ip")
     @classmethod

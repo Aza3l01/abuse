@@ -242,7 +242,7 @@ export function Pricing({ standalone = false }: { standalone?: boolean } = {}) {
                     ? "/register"
                     : `/register?plan=${tier.tier}`
                 }
-                className="text-sm font-medium text-center transition-colors"
+                className="text-sm font-medium text-center transition-opacity hover:opacity-80"
                 style={{
                   padding: "10px 0",
                   background: tier.highlight
@@ -252,25 +252,9 @@ export function Pricing({ standalone = false }: { standalone?: boolean } = {}) {
                     ? "var(--color-bg)"
                     : "var(--color-text)",
                   border: tier.highlight
-                    ? "1px solid var(--color-text)"
+                    ? "none"
                     : "1px solid var(--color-border)",
                   display: "block",
-                }}
-                onMouseEnter={(e) => {
-                  if (tier.highlight) {
-                    e.currentTarget.style.background = "var(--color-bg)";
-                    e.currentTarget.style.color = "var(--color-text)";
-                  } else {
-                    e.currentTarget.style.borderColor = "var(--color-text)";
-                  }
-                }}
-                onMouseLeave={(e) => {
-                  if (tier.highlight) {
-                    e.currentTarget.style.background = "var(--color-text)";
-                    e.currentTarget.style.color = "var(--color-bg)";
-                  } else {
-                    e.currentTarget.style.borderColor = "var(--color-border)";
-                  }
                 }}
               >
                 {tier.cta}
@@ -317,14 +301,12 @@ export function Pricing({ standalone = false }: { standalone?: boolean } = {}) {
             </p>
             <a
               href="mailto:support@clewsec.com"
-              className="text-sm font-medium transition-colors whitespace-nowrap"
+              className="text-sm font-medium transition-opacity hover:opacity-80 whitespace-nowrap"
               style={{
                 padding: "10px 20px",
                 border: "1px solid var(--color-border)",
                 color: "var(--color-text)",
               }}
-              onMouseEnter={(e) => (e.currentTarget.style.borderColor = "var(--color-text)")}
-              onMouseLeave={(e) => (e.currentTarget.style.borderColor = "var(--color-border)")}
             >
               Request audit
             </a>

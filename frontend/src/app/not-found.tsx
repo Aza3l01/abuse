@@ -31,14 +31,12 @@ export default function NotFound() {
       </p>
       <Link
         href="/"
-        className="text-sm font-medium transition-colors"
+        className="text-sm font-medium transition-opacity hover:opacity-80"
         style={{
           padding: "10px 24px",
           border: "1px solid var(--color-border)",
           color: "var(--color-text)",
         }}
-        onMouseEnter={(e) => (e.currentTarget.style.borderColor = "var(--color-text)")}
-        onMouseLeave={(e) => (e.currentTarget.style.borderColor = "var(--color-border)")}
       >
         Back to home
       </Link>

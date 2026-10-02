@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { apiFetch } from "@/lib/api";
+import { LoadingCursor } from "@/components/dashboard/LoadingCursor";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -169,7 +170,7 @@ export default function VerdictDetailPage() {
   }
 
   if (loading) {
-    return <main style={{ padding: "32px", color: "var(--color-text-muted)", fontSize: "13px" }}>Loading…</main>;
+    return <main style={{ padding: "32px", color: "var(--color-text-muted)", fontSize: "13px" }}>Loading<LoadingCursor /></main>;
   }
   if (error || !v) {
     return <main style={{ padding: "32px", color: "var(--color-text-muted)", fontSize: "13px" }}>{error ?? "Not found."}</main>;
