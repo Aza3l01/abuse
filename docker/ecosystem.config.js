@@ -48,7 +48,7 @@ module.exports = {
         NEXT_PUBLIC_DASHBOARD_URL: 'https://dashboard.clewsec.com',
         // Server-side only (read by the Next.js proxy).
         DASHBOARD_HOST: 'dashboard.clewsec.com',
-        MARKETING_URL: 'https://www.clewsec.com',
+        HOME_URL: 'https://www.clewsec.com',
         API_INTERNAL_URL: 'http://127.0.0.1:8000',
       },
       autorestart: true,

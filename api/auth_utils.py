@@ -48,8 +48,8 @@ FROM_NEWS     = "Clew <news@news.clewsec.com>"
 REPLY_TO_ALERTS  = "support@clewsec.com"
 REPLY_TO_BILLING = "support@clewsec.com"
 REPLY_TO_TEAM    = "support@clewsec.com"
-FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
-MARKETING_URL = os.environ.get("MARKETING_URL", "http://localhost:3000").rstrip("/")
+DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "http://localhost:3000")
+HOME_URL = os.environ.get("HOME_URL", "http://localhost:3000").rstrip("/")
 TURNSTILE_SECRET_KEY = os.environ.get("TURNSTILE_SECRET_KEY", "")
 _TURNSTILE_VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
 
@@ -175,8 +175,8 @@ def decode_newsletter_confirm_token(token: str) -> str | None:
 # Cookies
 # ------------------------------------------------------------------
 # Local dev uses HTTP so secure=False; in production Nginx terminates TLS
-# and we want secure=True. Use FRONTEND_URL to detect.
-_IS_PROD = FRONTEND_URL.startswith("https")
+# and we want secure=True. Use DASHBOARD_URL to detect.
+_IS_PROD = DASHBOARD_URL.startswith("https")
 
 # Optional shared-domain cookie scope (e.g. ".clewsec.com"). Leave unset in
 # production: the dashboard host and /api share one origin, so cookies are host-only.
@@ -337,7 +337,7 @@ def send_email(
 # ------------------------------------------------------------------
 # Shared HTML email layout
 # ------------------------------------------------------------------
-_LOGO_URL = "https://clewsec.com/clew-wordmark-light.png"
+_LOGO_URL = "https://www.clewsec.com/clew-wordmark-light.png"
 
 
 def _p(text: str) -> str:
@@ -386,7 +386,7 @@ def _email_html(heading: str, body_html: str, footer_note: str = "") -> str:
         f'font-size:12px;color:#5A5A5A;margin:24px 0 0 0;max-width:520px;">'
         f'{note}<br>'
         '&copy; 2026 Clew &middot; '
-        '<a href="https://clewsec.com" style="color:#5A5A5A;">clewsec.com</a>'
+        '<a href="https://www.clewsec.com" style="color:#5A5A5A;">clewsec.com</a>'
         '</p>'
         '</div></body></html>'
     )
@@ -505,7 +505,7 @@ def send_trial_reminder_email(to: str, days_remaining: int, trial_days_total: in
         f"Your Clew {trial_days_total}-day trial ends in {days_remaining} day"
         f"{'s' if days_remaining != 1 else ''}.\n\n"
         "Add a payment method to keep scanning your logs without interruption.\n"
-        f"{FRONTEND_URL}/settings#billing"
+        f"{DASHBOARD_URL}/settings#billing"
     )
     body_html = _email_html(
         heading="Your Clew trial is ending soon",
@@ -516,7 +516,7 @@ def send_trial_reminder_email(to: str, days_remaining: int, trial_days_total: in
             )
             + _p("Add a payment method to keep scanning your logs without interruption.")
             + _p(
-                f'<a href="{FRONTEND_URL}/settings#billing" style="color:#0D0D0D;">Add payment method &rarr;</a>'
+                f'<a href="{DASHBOARD_URL}/settings#billing" style="color:#0D0D0D;">Add payment method &rarr;</a>'
             )
         ),
         footer_note="You are receiving this because your organisation has an active Clew trial.",
@@ -537,7 +537,7 @@ def send_payment_failed_email(to: str) -> bool:
     body_text = (
         "A recent payment on your Clew subscription did not go through.\n\n"
         "Please update your payment method to avoid an interruption to your service.\n"
-        f"{FRONTEND_URL}/settings#billing"
+        f"{DASHBOARD_URL}/settings#billing"
     )
     body_html = _email_html(
         heading="Your Clew payment failed",
@@ -545,7 +545,7 @@ def send_payment_failed_email(to: str) -> bool:
             _p("A recent payment on your Clew subscription did not go through.")
             + _p("Please update your payment method to avoid an interruption to your service.")
             + _p(
-                f'<a href="{FRONTEND_URL}/settings#billing" style="color:#0D0D0D;">Update payment method &rarr;</a>'
+                f'<a href="{DASHBOARD_URL}/settings#billing" style="color:#0D0D0D;">Update payment method &rarr;</a>'
             )
         ),
         footer_note="You are receiving this because your organisation has an active Clew subscription.",

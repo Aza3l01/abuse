@@ -5,7 +5,7 @@ import { jwtVerify } from "jose";
 const API_INTERNAL_URL = (process.env.API_INTERNAL_URL ?? "http://127.0.0.1:8000").replace(/\/+$/, "");
 const DASHBOARD_HOST   = (process.env.DASHBOARD_HOST ?? "dashboard.localhost:3000").toLowerCase();
 const DASHBOARD_URL    = (process.env.NEXT_PUBLIC_DASHBOARD_URL ?? "http://dashboard.localhost:3000").replace(/\/+$/, "");
-const MARKETING_URL    = (process.env.MARKETING_URL ?? "http://localhost:3000").replace(/\/+$/, "");
+const HOME_URL         = (process.env.HOME_URL ?? "http://localhost:3000").replace(/\/+$/, "");
 
 const AUTH_PAGES         = ["/login", "/register", "/verify-email", "/forgot-password", "/reset-password"];
 const OPEN_PAGES         = ["/accept-invite"];
@@ -84,7 +84,7 @@ export async function proxy(request: NextRequest) {
   }
 
   if (MARKETING_PREFIXES.some((p) => pathIs(pathname, p))) {
-    return NextResponse.redirect(new URL(`${pathname}${search}`, MARKETING_URL), 307);
+    return NextResponse.redirect(new URL(`${pathname}${search}`, HOME_URL), 307);
   }
 
   if (OPEN_PAGES.includes(pathname)) return NextResponse.next();

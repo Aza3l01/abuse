@@ -28,7 +28,7 @@ for _p in [str(_REPO_ROOT), str(_REPO_ROOT / "engine")]:
 
 from db.models import AlertSent, Organization, Verdict
 from db.session import SessionLocal
-from api.auth_utils import send_email, _email_html, _p, FROM_ALERTS, REPLY_TO_ALERTS, FROM_BILLING, REPLY_TO_BILLING, FRONTEND_URL
+from api.auth_utils import send_email, _email_html, _p, FROM_ALERTS, REPLY_TO_ALERTS, FROM_BILLING, REPLY_TO_BILLING, DASHBOARD_URL
 from api.tiers import CALL_VOLUME_CAPS, MANUAL_BLOCK_TIERS
 
 logger = logging.getLogger(__name__)
@@ -92,7 +92,7 @@ def build_alert_email(verdict) -> tuple[str, str, str]:
         + detail_row("Detected at", verdict.timestamp.strftime("%Y-%m-%d %H:%M UTC"))
         + '</table>'
     )
-    dashboard_url = f"{FRONTEND_URL}/alerts"
+    dashboard_url = f"{DASHBOARD_URL}/alerts"
     button = (
         f'<a href="{dashboard_url}" style="display:inline-block;background:#0D0D0D;'
         f'color:#F5F5F5;padding:12px 24px;'
@@ -239,14 +239,14 @@ def send_quota_warning_email(self, org_id: str, level: str) -> dict:
             headline = f"Your organisation has processed {used_display} API calls this month, over 80% of {cap_display} call/month volume."
 
         note = "Clew keeps scanning your traffic regardless. Consider upgrading for a higher monthly volume."
-        body_text = f"{headline}\n\n{note}\n{FRONTEND_URL}/settings#billing"
+        body_text = f"{headline}\n\n{note}\n{DASHBOARD_URL}/settings#billing"
         body_html = _email_html(
             heading=heading,
             body_html=(
                 _p(headline)
                 + _p(note)
                 + _p(
-                    f'<a href="{FRONTEND_URL}/settings#billing" style="color:#0D0D0D;">View plans &rarr;</a>'
+                    f'<a href="{DASHBOARD_URL}/settings#billing" style="color:#0D0D0D;">View plans &rarr;</a>'
                 )
             ),
             footer_note="You are receiving this because your organisation has email alerts enabled.",

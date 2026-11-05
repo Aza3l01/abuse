@@ -185,7 +185,7 @@ def create_checkout(
     _init_stripe()
     org = current_org.organization
     price_id = _price_id(body.tier, body.currency)
-    frontend_url = os.environ.get("FRONTEND_URL", "http://localhost:3000")
+    dashboard_url = os.environ.get("DASHBOARD_URL", "http://localhost:3000")
 
     # Reuse existing Stripe customer record if present
     customer_id = org.stripe_customer_id
@@ -205,8 +205,8 @@ def create_checkout(
         customer=customer_id,
         mode="subscription",
         line_items=[{"price": price_id, "quantity": 1}],
-        success_url=f"{frontend_url}/settings?upgraded=1",
-        cancel_url=f"{frontend_url}/settings",
+        success_url=f"{dashboard_url}/settings?upgraded=1",
+        cancel_url=f"{dashboard_url}/settings",
         metadata={"clew_org_id": org.id, "tier": body.tier},
     )
     return UrlOut(url=session.url)
@@ -222,10 +222,10 @@ def create_portal(current_org: CurrentOrg = Depends(require_role("owner"))):
     org = current_org.organization
     if not org.stripe_customer_id:
         raise HTTPException(400, "No active subscription to manage.")
-    frontend_url = os.environ.get("FRONTEND_URL", "http://localhost:3000")
+    dashboard_url = os.environ.get("DASHBOARD_URL", "http://localhost:3000")
     session = stripe.billing_portal.Session.create(
         customer=org.stripe_customer_id,
-        return_url=f"{frontend_url}/settings",
+        return_url=f"{dashboard_url}/settings",
     )
     return UrlOut(url=session.url)
 

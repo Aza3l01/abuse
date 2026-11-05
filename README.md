@@ -199,8 +199,8 @@ locally), create a gitignored `.env.local` at the repo root instead of
 editing `.env` directly. `api/main.py`, `workers/celery_app.py`, and
 `db/migrations/env.py` all load `.env` first, then `.env.local` with
 `override=True`, so anything set there wins locally without changing `.env`.
-Put the local-only `DATABASE_URL`, `FRONTEND_URL=http://dashboard.localhost:3000`,
-`MARKETING_URL=http://localhost:3000`, `COOKIE_DOMAIN=` (blank), `DEBUG=1`, and the Turnstile test key above into
+Put the local-only `DATABASE_URL`, `DASHBOARD_URL=http://dashboard.localhost:3000`,
+`HOME_URL=http://localhost:3000`, `COOKIE_DOMAIN=` (blank), `DEBUG=1`, and the Turnstile test key above into
 `.env.local` instead.
 
 ### 3. Start infrastructure
@@ -273,8 +273,8 @@ Host header and rewrites dashboard-host paths to the `app/dashboard/*` folder.
 
 | Variable | Where | Meaning |
 |---|---|---|
-| `FRONTEND_URL` | backend `.env` | Dashboard URL. Emailed app links, billing return URLs, CORS |
-| `MARKETING_URL` | backend `.env` and Next.js server | Marketing URL. Newsletter confirm link; where marketing paths on the dashboard host redirect |
+| `DASHBOARD_URL` | backend `.env` | Dashboard URL. Emailed app links, billing return URLs, CORS |
+| `HOME_URL` | backend `.env` and Next.js server | Home (marketing) URL. Newsletter confirm link; where marketing paths on the dashboard host redirect |
 | `COOKIE_DOMAIN` | backend `.env` | Blank in all environments (host-only cookies) |
 | `LEGACY_COOKIE_DOMAIN` | backend `.env` | Transition only: old cookie domain to delete (`.clewsec.com`) |
 | `NEXT_PUBLIC_API_URL` | Next.js build | `/api` (same-origin) |
@@ -1261,8 +1261,8 @@ Key values to fill in:
 - `DATABASE_URL` — use the password from step 3.3
 - `JWT_SECRET` — paste the openssl output
 - `TOTP_ENCRYPTION_KEY` — paste the Fernet key
-- `FRONTEND_URL=https://dashboard.clewsec.com`
-- `MARKETING_URL=https://www.clewsec.com`
+- `DASHBOARD_URL=https://dashboard.clewsec.com`
+- `HOME_URL=https://www.clewsec.com`
 - `COOKIE_DOMAIN`: leave blank (host-only cookies)
 - `TURNSTILE_SECRET_KEY`: from step 1.3
 - `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` — from step 1.1
@@ -1292,7 +1292,7 @@ NEXT_PUBLIC_API_URL=/api
 NEXT_PUBLIC_SITE_URL=https://www.clewsec.com
 NEXT_PUBLIC_DASHBOARD_URL=https://dashboard.clewsec.com
 DASHBOARD_HOST=dashboard.clewsec.com
-MARKETING_URL=https://www.clewsec.com
+HOME_URL=https://www.clewsec.com
 API_INTERNAL_URL=http://127.0.0.1:8000
 JWT_SECRET=PASTE_SAME_JWT_SECRET_AS_BACKEND_ENV
 NEXT_PUBLIC_TURNSTILE_SITE_KEY=PASTE_SITE_KEY_FROM_STEP_1.3
@@ -1409,7 +1409,7 @@ module.exports = {
         NEXT_PUBLIC_SITE_URL:      'https://www.clewsec.com',
         NEXT_PUBLIC_DASHBOARD_URL: 'https://dashboard.clewsec.com',
         DASHBOARD_HOST:            'dashboard.clewsec.com',
-        MARKETING_URL:             'https://www.clewsec.com',
+        HOME_URL:                  'https://www.clewsec.com',
         API_INTERNAL_URL:          'http://127.0.0.1:8000',
       },
     },

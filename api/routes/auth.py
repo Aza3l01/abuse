@@ -70,7 +70,7 @@ router = APIRouter()
 # ---------------------------------------------------------------------------
 # Environment
 # ---------------------------------------------------------------------------
-FRONTEND_URL         = os.environ.get("FRONTEND_URL", "http://localhost:3000")
+DASHBOARD_URL         = os.environ.get("DASHBOARD_URL", "http://localhost:3000")
 REDIS_URL            = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 
 _redis = _redis_lib.from_url(REDIS_URL, decode_responses=True)

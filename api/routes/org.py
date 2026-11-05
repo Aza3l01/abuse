@@ -38,7 +38,7 @@ from db.models import Client, Organization, OrganizationMember, OrgInvite, Promo
 
 router = APIRouter(tags=["org"])
 
-FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
+DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "http://localhost:3000")
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 _redis = redis_lib.from_url(REDIS_URL, decode_responses=True)
 
@@ -312,7 +312,7 @@ async def invite_member(
     db.add(invite)
     db.commit()
 
-    accept_url = f"{FRONTEND_URL}/accept-invite?token={raw_token}"
+    accept_url = f"{DASHBOARD_URL}/accept-invite?token={raw_token}"
     send_org_invite_email(
         to=invited_email,
         inviter_name=client.email,
@@ -386,7 +386,7 @@ async def resend_invite(
     invite.expires_at = datetime.now(timezone.utc) + timedelta(days=_INVITE_EXPIRE_DAYS)
     db.commit()
 
-    accept_url = f"{FRONTEND_URL}/accept-invite?token={raw_token}"
+    accept_url = f"{DASHBOARD_URL}/accept-invite?token={raw_token}"
     send_org_invite_email(
         to=invite.invited_email,
         inviter_name=client.email,

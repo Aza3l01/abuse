@@ -445,8 +445,8 @@ verification phase was added rather than trusting the unit tests.
   from the rate limiter. Cookies are host-only (`COOKIE_DOMAIN` blank), since
   the host that serves the page is the host that sets the cookie.
   `LEGACY_COOKIE_DOMAIN` exists only to delete the old `.clewsec.com` cookies
-  during the transition. Env vars: `FRONTEND_URL` (dashboard URL),
-  `MARKETING_URL`, `DASHBOARD_HOST`, `NEXT_PUBLIC_DASHBOARD_URL`,
+  during the transition. Env vars: `DASHBOARD_URL` (dashboard URL),
+  `HOME_URL` (marketing URL), `DASHBOARD_HOST`, `NEXT_PUBLIC_DASHBOARD_URL`,
   `NEXT_PUBLIC_SITE_URL`, `NEXT_PUBLIC_API_URL=/api`, `API_INTERNAL_URL`
   (see README, "Hosts and environment variables"). Dev: marketing at
   `http://localhost:3000`, app at `http://dashboard.localhost:3000`.
