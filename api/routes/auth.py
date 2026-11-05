@@ -171,6 +171,9 @@ class RegisterBody(BaseModel):
     password: str
     full_name: str
     company_name: str
+    # TODO.md priority item 5: dual-purpose, an admin pilot code or another
+    # org's referral code, api/routes/org.py's create_organization() tells
+    # them apart by PromoCode.kind.
     pilot_code: Optional[str] = None
     captcha_token: str
     tos_accepted: bool

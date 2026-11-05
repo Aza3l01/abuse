@@ -49,6 +49,7 @@ REPLY_TO_ALERTS  = "support@clewsec.com"
 REPLY_TO_BILLING = "support@clewsec.com"
 REPLY_TO_TEAM    = "support@clewsec.com"
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
+MARKETING_URL = os.environ.get("MARKETING_URL", "http://localhost:3000").rstrip("/")
 TURNSTILE_SECRET_KEY = os.environ.get("TURNSTILE_SECRET_KEY", "")
 _TURNSTILE_VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
 
@@ -177,10 +178,20 @@ def decode_newsletter_confirm_token(token: str) -> str | None:
 # and we want secure=True. Use FRONTEND_URL to detect.
 _IS_PROD = FRONTEND_URL.startswith("https")
 
-# Optional shared-domain cookie scope (e.g. ".clewsec.com").
-# Required in production so both api.clewsec.com and www.clewsec.com share
-# cookies, allowing the Next.js middleware to read and forward the refresh token.
+# Optional shared-domain cookie scope (e.g. ".clewsec.com"). Leave unset in
+# production: the dashboard host and /api share one origin, so cookies are host-only.
 COOKIE_DOMAIN: str | None = os.environ.get("COOKIE_DOMAIN") or None
+
+# Transition only: the old production COOKIE_DOMAIN. While set, every cookie write
+# also deletes that domain's copies so they stop shadowing the host-only ones.
+LEGACY_COOKIE_DOMAIN: str | None = os.environ.get("LEGACY_COOKIE_DOMAIN") or None
+
+
+def _delete_legacy_cookies(response: Response, *names: str) -> None:
+    if not LEGACY_COOKIE_DOMAIN or LEGACY_COOKIE_DOMAIN == COOKIE_DOMAIN:
+        return
+    for name in names:
+        response.delete_cookie(name, domain=LEGACY_COOKIE_DOMAIN)
 
 
 def set_auth_cookies(response: Response, access_token: str, refresh_token: str) -> None:
@@ -202,6 +213,7 @@ def set_auth_cookies(response: Response, access_token: str, refresh_token: str) 
         max_age=REFRESH_TOKEN_EXPIRE_DAYS * 86400,
         **shared,  # type: ignore[arg-type]
     )
+    _delete_legacy_cookies(response, "access_token", "refresh_token")
 
 
 def clear_auth_cookies(response: Response) -> None:
@@ -211,6 +223,7 @@ def clear_auth_cookies(response: Response) -> None:
     response.delete_cookie("access_token", **kwargs)  # type: ignore[arg-type]
     response.delete_cookie("refresh_token", **kwargs)  # type: ignore[arg-type]
     response.delete_cookie("last_org_id", **kwargs)  # type: ignore[arg-type]
+    _delete_legacy_cookies(response, "access_token", "refresh_token", "last_org_id")
 
 
 # Phase 2: remembers which org was last active so a returning multi-org user
@@ -230,6 +243,7 @@ def set_last_org_cookie(response: Response, org_id: str | None) -> None:
         )
     else:
         response.delete_cookie("last_org_id", **{k: v for k, v in kwargs.items() if k == "domain"})  # type: ignore[arg-type]
+    _delete_legacy_cookies(response, "last_org_id")
 
 
 # ------------------------------------------------------------------
@@ -491,7 +505,7 @@ def send_trial_reminder_email(to: str, days_remaining: int, trial_days_total: in
         f"Your Clew {trial_days_total}-day trial ends in {days_remaining} day"
         f"{'s' if days_remaining != 1 else ''}.\n\n"
         "Add a payment method to keep scanning your logs without interruption.\n"
-        f"{FRONTEND_URL}/dashboard/settings#billing"
+        f"{FRONTEND_URL}/settings#billing"
     )
     body_html = _email_html(
         heading="Your Clew trial is ending soon",
@@ -502,7 +516,7 @@ def send_trial_reminder_email(to: str, days_remaining: int, trial_days_total: in
             )
             + _p("Add a payment method to keep scanning your logs without interruption.")
             + _p(
-                f'<a href="{FRONTEND_URL}/dashboard/settings#billing" style="color:#0D0D0D;">Add payment method &rarr;</a>'
+                f'<a href="{FRONTEND_URL}/settings#billing" style="color:#0D0D0D;">Add payment method &rarr;</a>'
             )
         ),
         footer_note="You are receiving this because your organisation has an active Clew trial.",
@@ -523,7 +537,7 @@ def send_payment_failed_email(to: str) -> bool:
     body_text = (
         "A recent payment on your Clew subscription did not go through.\n\n"
         "Please update your payment method to avoid an interruption to your service.\n"
-        f"{FRONTEND_URL}/dashboard/settings#billing"
+        f"{FRONTEND_URL}/settings#billing"
     )
     body_html = _email_html(
         heading="Your Clew payment failed",
@@ -531,7 +545,7 @@ def send_payment_failed_email(to: str) -> bool:
             _p("A recent payment on your Clew subscription did not go through.")
             + _p("Please update your payment method to avoid an interruption to your service.")
             + _p(
-                f'<a href="{FRONTEND_URL}/dashboard/settings#billing" style="color:#0D0D0D;">Update payment method &rarr;</a>'
+                f'<a href="{FRONTEND_URL}/settings#billing" style="color:#0D0D0D;">Update payment method &rarr;</a>'
             )
         ),
         footer_note="You are receiving this because your organisation has an active Clew subscription.",

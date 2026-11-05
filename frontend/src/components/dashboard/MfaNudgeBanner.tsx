@@ -55,7 +55,7 @@ export function MfaNudgeBanner() {
     >
       <span>
         Secure your account: enable two-factor authentication.{" "}
-        <Link href="/dashboard/settings#mfa" style={{ color: "var(--color-text)", textDecoration: "underline" }}>
+        <Link href="/settings#mfa" style={{ color: "var(--color-text)", textDecoration: "underline" }}>
           Set up MFA
         </Link>
       </span>

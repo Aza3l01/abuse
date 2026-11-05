@@ -15,6 +15,9 @@ Shared (item 29b):
   POST /billing/refund-eligibility → {eligible, reason, window_expires_at}
   POST /billing/cancel             → cancel, refunding only within the 72hr remorse window
 
+Referrals (TODO.md priority item 5, api/referrals.py holds the discount math):
+  GET /billing/referral-status → this org's own code, live slot count, discount %
+
 Tier lifecycle (sole source of truth is this file + the two webhooks):
   self-serve signup (no promo code)                 → tier = "free" (permanent, see item 53/section 4)
   signup with a promo code                          → tier = "growth" (30-day trial, see item 53/section 4)
@@ -43,6 +46,7 @@ from sqlalchemy.orm import Session
 
 from api.auth_utils import send_payment_failed_email
 from api.deps import CurrentOrg, get_current_client, get_current_org, get_db, require_role
+from api.referrals import compute_referral_discount_pct, confirm_first_payment, referral_summary
 from api.tiers import MANUAL_BLOCK_TIERS
 from db.models import Client, Organization, OrganizationMember, ProcessedWebhookEvent
 from db.session import SessionLocal
@@ -135,6 +139,30 @@ def billing_status(current_org: CurrentOrg = Depends(require_role("owner"))):
 
 
 # ---------------------------------------------------------------------------
+# GET /billing/referral-status (TODO.md priority item 5)
+#
+# Owner-only, same convention as every other billing route. Dashboard
+# reads this live on every load, never caches slot count or discount.
+# ---------------------------------------------------------------------------
+
+class ReferralStatusOut(BaseModel):
+    referral_code: str | None
+    slots_filled: int
+    slots_total: int
+    is_referred: bool
+    discount_pct_monthly: float
+    discount_pct_annual: float
+
+
+@router.get("/referral-status", response_model=ReferralStatusOut)
+def billing_referral_status(
+    current_org: CurrentOrg = Depends(require_role("owner")),
+    db: Session = Depends(get_db),
+):
+    return ReferralStatusOut(**referral_summary(current_org.organization, db))
+
+
+# ---------------------------------------------------------------------------
 # POST /billing/checkout
 # ---------------------------------------------------------------------------
 
@@ -177,8 +205,8 @@ def create_checkout(
         customer=customer_id,
         mode="subscription",
         line_items=[{"price": price_id, "quantity": 1}],
-        success_url=f"{frontend_url}/dashboard/settings?upgraded=1",
-        cancel_url=f"{frontend_url}/dashboard/settings",
+        success_url=f"{frontend_url}/settings?upgraded=1",
+        cancel_url=f"{frontend_url}/settings",
         metadata={"clew_org_id": org.id, "tier": body.tier},
     )
     return UrlOut(url=session.url)
@@ -197,7 +225,7 @@ def create_portal(current_org: CurrentOrg = Depends(require_role("owner"))):
     frontend_url = os.environ.get("FRONTEND_URL", "http://localhost:3000")
     session = stripe.billing_portal.Session.create(
         customer=org.stripe_customer_id,
-        return_url=f"{frontend_url}/dashboard/settings",
+        return_url=f"{frontend_url}/settings",
     )
     return UrlOut(url=session.url)
 
@@ -408,6 +436,35 @@ def _plan_amount_paise(rp: "razorpay.Client", plan_id: str) -> int:
     return int((plan.get("item") or {}).get("amount", 0))
 
 
+def _discounted_plan_id(rp: "razorpay.Client", base_plan_id: str, discount_pct: float) -> str:
+    """TODO.md priority item 5: create a Razorpay Plan priced at a referral
+    discount off the given base plan, mirroring its period/interval/
+    currency/name. A pre-provisioned Razorpay Offer would need one created
+    per possible discount percentage; creating the discounted Plan object
+    here instead keeps the price correct even if the base plan's own amount
+    changes later, matching the "always a percentage against the current
+    price, never a stored amount" requirement. Not idempotent across calls
+    (no lookup-and-reuse of a previously created discounted plan), a small
+    amount of Plan-object sprawl in the Razorpay dashboard is an accepted
+    tradeoff given there is no live account to verify a reuse strategy
+    against yet.
+    """
+    base_plan = rp.plan.fetch(base_plan_id)
+    item = base_plan.get("item") or {}
+    discounted_amount = round(item.get("amount", 0) * (1 - discount_pct))
+    new_plan = rp.plan.create({
+        "period": base_plan.get("period"),
+        "interval": base_plan.get("interval"),
+        "item": {
+            "name": f"{item.get('name', 'Clew plan')} (referral discount)",
+            "amount": discounted_amount,
+            "currency": item.get("currency", "INR"),
+        },
+        "notes": {"clew_discount_pct": str(discount_pct), "clew_base_plan_id": base_plan_id},
+    })
+    return new_plan["id"]
+
+
 def _payment_method_display(payment: dict) -> str | None:
     method = payment.get("method", "")
     if method == "upi":
@@ -496,6 +553,13 @@ def razorpay_create_subscription(
 
     rp = _init_razorpay()
     plan_id = _razorpay_plan_id(tier, period)
+
+    # TODO.md priority item 5: recomputed fresh on every call, never cached
+    # or stored, so a slot that filled or freed since the last checkout is
+    # always reflected in the very next charge.
+    discount_pct = compute_referral_discount_pct(org, period, db)
+    if discount_pct > 0:
+        plan_id = _discounted_plan_id(rp, plan_id, discount_pct)
 
     old_sub_id = org.razorpay_subscription_id
     old_sub: dict = {}
@@ -699,6 +763,11 @@ def razorpay_verify_payment(
         org.razorpay_customer_id = payment["customer_id"]
     if org.first_charged_at is None:
         org.first_charged_at = now
+        # TODO.md priority item 5: a referral only counts once the referred
+        # org's first invoice is genuinely paid, this is that moment, not
+        # registration. Sits right next to the first_charged_at guard so it
+        # only ever fires once per org, same as that field.
+        confirm_first_payment(org, db)
     current_end = subscription.get("current_end")
     if current_end:
         org.next_billing_date = datetime.fromtimestamp(current_end, tz=timezone.utc)
@@ -787,6 +856,10 @@ def _handle_razorpay_event(event: dict, db: Session) -> None:
             org.next_billing_date = datetime.fromtimestamp(current_end, tz=timezone.utc)
         if org.first_charged_at is None:
             org.first_charged_at = now
+            # TODO.md priority item 5: same hook as verify-payment, this is
+            # the authoritative reconciliation path for the same "first
+            # charge" moment, idempotent for the same reason.
+            confirm_first_payment(org, db)
         db.commit()
         logger.info("billing: org %s Razorpay subscription activated (tier=%s)", org.id, org.tier)
 

@@ -84,6 +84,17 @@ def push_block(self, verdict_id: str, org_id: str) -> dict:
         # every Basic/Starter manual block, since AUTO_BLOCK_TIERS excludes
         # "starter" but MANUAL_BLOCK_TIERS includes it.
 
+        # --- Blocking Subscription Agreement gate ---
+        # verdicts.py's manual-block routes and checkout both already check
+        # this, but process_logs.py's automatic trigger did not, so an org
+        # with a WAF/Cloudflare integration configured could get unattended
+        # blocking with no agreement ever accepted. Defense in depth here too
+        # in case a caller is ever added that forgets the check: a Celery
+        # task has no HTTP response to 403 against, so this skips instead of
+        # raising.
+        if org.blocking_tos_accepted_at is None:
+            return {"status": "skipped", "reason": "tos_not_accepted"}
+
         # --- Confidence gate ---
         if verdict.confidence < BLOCK_CONFIDENCE_THRESHOLD:
             logger.debug(

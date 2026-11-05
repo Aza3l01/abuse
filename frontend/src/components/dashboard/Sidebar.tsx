@@ -4,14 +4,15 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { API_URL, apiFetch } from "@/lib/api";
+import { SITE_URL } from "@/lib/urls";
 import { useIsMobile, MOBILE_TOPBAR_HEIGHT } from "@/lib/useIsMobile";
 
 const NAV = [
-  { href: "/dashboard",          label: "Overview" },
-  { href: "/dashboard/alerts",   label: "Alerts" },
-  { href: "/dashboard/ips",      label: "IPs" },
-  { href: "/docs",               label: "Docs" },
-  { href: "/dashboard/settings", label: "Settings" },
+  { href: "/",                   label: "Overview" },
+  { href: "/alerts",             label: "Alerts" },
+  { href: "/ips",                label: "IPs" },
+  { href: `${SITE_URL}/docs`,     label: "Docs" },
+  { href: "/settings",           label: "Settings" },
 ] as const;
 
 interface OrgRow {
@@ -40,7 +41,7 @@ export function DashboardSidebar({ company }: { company?: string }) {
 
   const activeOrg = orgs.find(o => o.active) ?? orgs[0];
   // Settings and team management are hidden from viewers (item 8's RBAC).
-  const nav = activeOrg?.role === "viewer" ? NAV.filter(n => n.href !== "/dashboard/settings") : NAV;
+  const nav = activeOrg?.role === "viewer" ? NAV.filter(n => n.href !== "/settings") : NAV;
 
   async function handleSwitchOrg(orgId: string) {
     if (orgId === activeOrg?.id) { setSwitcherOpen(false); return; }
@@ -51,7 +52,7 @@ export function DashboardSidebar({ company }: { company?: string }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ org_id: orgId }),
       });
-      window.location.href = "/dashboard";
+      window.location.href = "/";
     } catch {
       setSwitching(false);
     }
@@ -113,10 +114,10 @@ export function DashboardSidebar({ company }: { company?: string }) {
   const navLinks = (
     <nav style={{ flex: 1, padding: "0 8px" }}>
       {nav.map(({ href, label }) => {
-        // exact match for /dashboard, prefix match for sub-pages
+        // exact match for /, prefix match for sub-pages
         const active =
-          href === "/dashboard"
-            ? pathname === "/dashboard"
+          href === "/"
+            ? pathname === "/"
             : pathname.startsWith(href);
         return (
           <Link
@@ -181,7 +182,7 @@ export function DashboardSidebar({ company }: { company?: string }) {
           zIndex: 110, display: "flex", alignItems: "center", justifyContent: "space-between",
           padding: "0 16px", background: "var(--color-bg)", borderBottom: "1px solid var(--color-border)",
         }}>
-          <Link href="/" aria-label="Clew home" style={{ display: "flex", alignItems: "center" }}>
+          <Link href={SITE_URL} aria-label="Clew home" style={{ display: "flex", alignItems: "center" }}>
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               src="/clew-wordmark-dark.svg"
@@ -229,7 +230,7 @@ export function DashboardSidebar({ company }: { company?: string }) {
     }}>
       {/* Logo */}
       <div style={{ padding: "20px 20px 16px", display: "flex", alignItems: "center", gap: "8px" }}>
-        <Link href="/" aria-label="Clew home">
+        <Link href={SITE_URL} aria-label="Clew home">
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
             src="/clew-wordmark-dark.svg"

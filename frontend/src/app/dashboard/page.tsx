@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { apiFetch } from "@/lib/api";
+import { SITE_URL } from "@/lib/urls";
 import Link from "next/link";
 import { GuidedOnboardingButton } from "@/components/dashboard/GuidedOnboardingButton";
 import { LoadingCursor } from "@/components/dashboard/LoadingCursor";
@@ -82,7 +83,7 @@ function SeverityBadge({ severity }: { severity: string }) {
   );
 }
 
-function StatCard({ label, value, sub, tooltip }: { label: string; value: string; sub?: string; tooltip?: string }) {
+function StatCard({ label, value, sub, note, noteHref }: { label: string; value: string; sub?: string; note?: string; noteHref?: string }) {
   return (
     <div style={{
       border: "1px solid var(--color-border)",
@@ -93,15 +94,22 @@ function StatCard({ label, value, sub, tooltip }: { label: string; value: string
     }}>
       <p style={{ fontSize: "11px", textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--color-text-muted)", marginBottom: "8px" }}>
         {label}
-        {tooltip && (
-          <span title={tooltip} style={{ marginLeft: "4px", cursor: "help" }}>(?)</span>
-        )}
       </p>
       <p style={{ fontSize: "28px", fontWeight: 700, lineHeight: 1, marginBottom: sub ? "4px" : 0 }}>
         {value}
       </p>
       {sub && (
         <p style={{ fontSize: "11px", color: "var(--color-text-muted)" }}>{sub}</p>
+      )}
+      {note && (
+        <p style={{ fontSize: "10px", color: "var(--color-text-muted)", marginTop: "6px" }}>
+          {note}{" "}
+          {noteHref && (
+            <Link href={noteHref} style={{ color: "var(--color-text-muted)", textDecoration: "underline" }}>
+              Learn more
+            </Link>
+          )}
+        </p>
       )}
     </div>
   );
@@ -177,7 +185,7 @@ function NotConfiguredBox() {
       <p style={{ fontSize: "13px", color: "var(--color-text-muted)", marginBottom: "16px" }}>
         Connect your S3 bucket to start monitoring
       </p>
-      <Link href="/dashboard/settings#s3" style={{
+      <Link href="/settings#s3" style={{
         display: "inline-block",
         padding: "8px 20px",
         fontSize: "13px",
@@ -374,7 +382,8 @@ export default function DashboardOverview() {
         />
         <StatCard
           label="Cost prevented"
-          tooltip="Estimate only, confidence-weighted, using the same assumptions as the homepage cost calculator."
+          note="Estimate only, confidence-weighted."
+          noteHref={`${SITE_URL}/docs#cost-prevented-estimate`}
           value={s.s3_configured
             ? isIndia
               ? `₹${s.cost_prevented.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
@@ -440,7 +449,7 @@ export default function DashboardOverview() {
               {s.top_ips.map(tip => (
                 <Link
                   key={tip.ip}
-                  href={`/dashboard/alerts?ip=${tip.ip}`}
+                  href={`/alerts?ip=${tip.ip}`}
                   style={{ textDecoration: "none", color: "inherit" }}
                 >
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
@@ -496,7 +505,7 @@ export default function DashboardOverview() {
           <p style={{ fontSize: "11px", textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--color-text-muted)" }}>
             Recent threats
           </p>
-          <Link href="/dashboard/alerts" style={{ fontSize: "12px", color: "var(--color-text-muted)", textDecoration: "none" }}>
+          <Link href="/alerts" style={{ fontSize: "12px", color: "var(--color-text-muted)", textDecoration: "none" }}>
             View all →
           </Link>
         </div>
@@ -505,7 +514,7 @@ export default function DashboardOverview() {
             <p style={{ fontSize: "13px", color: "var(--color-text-muted)", marginBottom: "12px" }}>
               No threats detected yet. Your first scan runs within 15 minutes of connecting S3.
             </p>
-            <Link href="/dashboard/settings#s3" style={{ fontSize: "12px", color: "var(--color-text)", textDecoration: "none" }}>
+            <Link href="/settings#s3" style={{ fontSize: "12px", color: "var(--color-text)", textDecoration: "none" }}>
               Check Settings →
             </Link>
           </div>
@@ -540,7 +549,7 @@ export default function DashboardOverview() {
                     {fmtTime(v.timestamp)}
                   </td>
                   <td style={{ padding: "10px 20px" }}>
-                    <Link href={`/dashboard/alerts?ip=${v.ip}`} style={{ fontFamily: "var(--font-mono)", fontSize: "12px", color: "inherit", textDecoration: "none" }}>
+                    <Link href={`/alerts?ip=${v.ip}`} style={{ fontFamily: "var(--font-mono)", fontSize: "12px", color: "inherit", textDecoration: "none" }}>
                       {v.ip}
                     </Link>
                   </td>

@@ -244,7 +244,7 @@ export function AllIpsTab() {
                   </td>
                   <td style={{ padding: "10px 16px" }}>
                     <Link
-                      href={`/dashboard/alerts?ip=${row.ip}`}
+                      href={`/alerts?ip=${row.ip}`}
                       style={{ fontSize: "11px", color: "var(--color-text-muted)", textDecoration: "none", whiteSpace: "nowrap" }}
                     >
                       View verdicts →

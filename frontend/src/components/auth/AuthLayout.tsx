@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import Link from "next/link";
+import { SITE_URL } from "@/lib/urls";
 
 interface AuthLayoutProps {
   title: string;
@@ -26,7 +27,7 @@ export function AuthLayout({ title, children, banner }: AuthLayoutProps) {
       }}
     >
       {/* Logo */}
-      <Link href="/" style={{ marginBottom: "32px", display: "block" }}>
+      <Link href={SITE_URL} style={{ marginBottom: "32px", display: "block" }}>
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
           src="/clew-wordmark-dark.svg"

@@ -64,7 +64,7 @@ function AcceptInviteInner() {
         return;
       }
       setAccepted(true);
-      setTimeout(() => router.push("/dashboard"), 1200);
+      setTimeout(() => router.push("/"), 1200);
     } catch {
       setError("Could not connect to the server. Try again.");
     } finally {

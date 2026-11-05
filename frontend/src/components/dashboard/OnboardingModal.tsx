@@ -232,7 +232,7 @@ export function OnboardingModal() {
   // Navigates only, the panel stays docked so progress ticks off next to
   // the form instead of disappearing the moment they click a step.
   function goTo(anchor: string) {
-    router.push(`/dashboard/settings${anchor}`);
+    router.push(`/settings${anchor}`);
   }
 
   // Viewer, org not yet onboarded: a plain note, never a wizard it can't act on.

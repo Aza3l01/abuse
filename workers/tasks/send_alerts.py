@@ -92,7 +92,7 @@ def build_alert_email(verdict) -> tuple[str, str, str]:
         + detail_row("Detected at", verdict.timestamp.strftime("%Y-%m-%d %H:%M UTC"))
         + '</table>'
     )
-    dashboard_url = "https://clewsec.com/dashboard/alerts"
+    dashboard_url = f"{FRONTEND_URL}/alerts"
     button = (
         f'<a href="{dashboard_url}" style="display:inline-block;background:#0D0D0D;'
         f'color:#F5F5F5;padding:12px 24px;'
@@ -239,14 +239,14 @@ def send_quota_warning_email(self, org_id: str, level: str) -> dict:
             headline = f"Your organisation has processed {used_display} API calls this month, over 80% of {cap_display} call/month volume."
 
         note = "Clew keeps scanning your traffic regardless. Consider upgrading for a higher monthly volume."
-        body_text = f"{headline}\n\n{note}\n{FRONTEND_URL}/dashboard/settings#billing"
+        body_text = f"{headline}\n\n{note}\n{FRONTEND_URL}/settings#billing"
         body_html = _email_html(
             heading=heading,
             body_html=(
                 _p(headline)
                 + _p(note)
                 + _p(
-                    f'<a href="{FRONTEND_URL}/dashboard/settings#billing" style="color:#0D0D0D;">View plans &rarr;</a>'
+                    f'<a href="{FRONTEND_URL}/settings#billing" style="color:#0D0D0D;">View plans &rarr;</a>'
                 )
             ),
             footer_note="You are receiving this because your organisation has email alerts enabled.",

@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { NewsletterForm } from "@/components/layout/NewsletterForm";
+import { DASHBOARD_URL } from "@/lib/urls";
 
 // Every column links to a route that actually exists in this codebase,
 // no Blog/Careers/Community placeholders for pages that aren't built.
@@ -7,16 +8,17 @@ const COLUMNS: { heading: string; links: { href: string; label: string; external
   {
     heading: "Product",
     links: [
-      { href: "/", label: "Home" },
+      { href: DASHBOARD_URL, label: "Dashboard", external: true },
       { href: "/pricing", label: "Pricing" },
       { href: "/docs", label: "Docs" },
+      { href: "https://status.clewsec.com", label: "Status", external: true },
     ],
   },
   {
     heading: "Account",
     links: [
-      { href: "/login", label: "Login" },
-      { href: "/register", label: "Register" },
+      { href: `${DASHBOARD_URL}/login`, label: "Login", external: true },
+      { href: `${DASHBOARD_URL}/register`, label: "Register", external: true },
     ],
   },
   {

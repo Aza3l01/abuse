@@ -6,6 +6,7 @@ import Link from "next/link";
 import { AuthLayout, inputStyle, labelStyle, primaryBtnStyle } from "@/components/auth/AuthLayout";
 import { Turnstile } from "@/components/auth/Turnstile";
 import { API_URL } from "@/lib/api";
+import { SITE_URL } from "@/lib/urls";
 import { passwordStrength, passwordStrengthLabel } from "@/lib/passwordStrength";
 
 // Phase 4b: plans that can actually be checked out self-serve. Never "free"
@@ -23,7 +24,9 @@ function RegisterForm() {
   const [email,       setEmail]       = useState("");
   const [password,    setPassword]    = useState("");
   const [company,     setCompany]     = useState("");
-  const [pilotCode,   setPilotCode]   = useState("");
+  // TODO.md priority item 5: a referral invite link carries ?ref=<code>,
+  // prefilling the same dual-purpose code field pilot codes already use.
+  const [pilotCode,   setPilotCode]   = useState(searchParams.get("ref") ?? "");
   const [tosAccepted, setTosAccepted] = useState(false);
   const [captchaToken, setCaptchaToken] = useState("");
   const [error,       setError]       = useState("");
@@ -151,7 +154,7 @@ function RegisterForm() {
           )}
         </div>
         <div>
-          <label htmlFor="pilotCode" style={labelStyle}>Pilot code (optional)</label>
+          <label htmlFor="pilotCode" style={labelStyle}>Code (Optional)</label>
           <input
             id="pilotCode" type="text" autoComplete="off"
             value={pilotCode} onChange={(e) => setPilotCode(e.target.value)}
@@ -170,9 +173,9 @@ function RegisterForm() {
           />
           <span>
             I agree to the{" "}
-            <Link href="/legal/terms" style={{ color: "var(--color-text)" }}>Terms of Service</Link>
+            <a href={`${SITE_URL}/legal/terms`} target="_blank" rel="noopener noreferrer" style={{ color: "var(--color-text)" }}>Terms of Service</a>
             {" "}and{" "}
-            <Link href="/legal/privacy" style={{ color: "var(--color-text)" }}>Privacy Policy</Link>
+            <a href={`${SITE_URL}/legal/privacy`} target="_blank" rel="noopener noreferrer" style={{ color: "var(--color-text)" }}>Privacy Policy</a>
           </span>
         </label>
 

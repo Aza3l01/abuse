@@ -32,8 +32,9 @@ from sqlalchemy.orm import Session
 from api.auth_utils import hash_password, hash_token, send_org_invite_email
 from api.deps import CurrentOrg, get_current_client, get_current_org, get_db, get_optional_client, require_role
 from api.limiter import limiter
+from api.referrals import REFERRAL_MAX_SLOTS, generate_referral_code
 from api.routes.auth import _issue_tokens
-from db.models import Client, Organization, OrganizationMember, OrgInvite, PromoCode
+from db.models import Client, Organization, OrganizationMember, OrgInvite, PromoCode, PromoCodeRedemption
 
 router = APIRouter(tags=["org"])
 
@@ -105,13 +106,22 @@ def create_organization(
 ) -> Organization:
     """Create an Organization + owner OrganizationMember row. Caller commits.
 
-    Item 53 (section 4): self-serve signup (no promo code) lands directly on
-    the permanent free Starter tier, no trial, no expiry, no card ever. A
-    promo code instead grants a 30-day trial of Growth tier (full blocking),
-    the founder's manual-outreach pilot mechanism. Item 26/27: pilot codes
-    are validated against the promo_codes table (exists AND unredeemed) and
-    marked redeemed here, in the same transaction that creates the
-    Organization.
+    Item 53 (section 4): self-serve signup (no code) lands directly on the
+    permanent free Starter tier, no trial, no expiry, no card ever.
+
+    TODO.md priority item 5: the `code` field is dual-purpose. An
+    admin-generated code (kind="admin") behaves exactly as before: it must
+    exist and be unredeemed (item 26/27), grants a 30-day Growth trial
+    (the founder's manual-outreach pilot mechanism), and is marked redeemed
+    here in the same transaction. A code auto-generated for a regular org
+    (kind="referral") instead must have a free slot (redemption count below
+    its max_redemptions), grants no trial at all, only marks this new org
+    as referred (referred_by_promo_code_id) so its own flat discount
+    applies once its first invoice is genuinely paid (api/referrals.py's
+    confirm_first_payment, called from billing.py, not here). Every new
+    org also gets its own shareable referral code, regardless of whether
+    it used one itself, an org can simultaneously be referred and refer
+    others.
 
     remote_ip: currently unused (home_country is left None at creation and
     filled in by the client in Settings), kept as a parameter in case a
@@ -124,18 +134,33 @@ def create_organization(
     now = datetime.now(timezone.utc)
     pilot_code = promo_code.strip().upper() if promo_code else None
     promo: Optional[PromoCode] = None
+    referred_by_promo_code_id: Optional[str] = None
     if pilot_code:
-        promo = (
-            db.query(PromoCode)
-            .filter(PromoCode.code == pilot_code, PromoCode.redeemed_at.is_(None))
-            .first()
-        )
+        promo = db.query(PromoCode).filter(PromoCode.code == pilot_code).first()
         if promo is None:
             raise HTTPException(status_code=400, detail="This promo code is no longer available.")
-        tier = "growth"
-        trial_source = "manual_outreach"
-        trial_ends_at = now + timedelta(days=30)
-        billing_provider = "pilot"
+        if promo.kind == "admin":
+            if promo.redeemed_at is not None:
+                raise HTTPException(status_code=400, detail="This promo code is no longer available.")
+            tier = "growth"
+            trial_source = "manual_outreach"
+            trial_ends_at = now + timedelta(days=30)
+            billing_provider = "pilot"
+        else:
+            filled = (
+                db.query(PromoCodeRedemption)
+                .filter(PromoCodeRedemption.promo_code_id == promo.id)
+                .count()
+            )
+            if filled >= promo.max_redemptions:
+                raise HTTPException(status_code=400, detail="This referral code is full.")
+            # Item 53: no trial for referral signups either, just the flat
+            # discount, computed at billing time, not granted here.
+            tier = "free"
+            trial_source = None
+            trial_ends_at = None
+            billing_provider = None
+            referred_by_promo_code_id = promo.id
     else:
         # Item 53: no trial at all for self-serve, the free Starter tier
         # never expires so there is nothing to count down.
@@ -151,6 +176,7 @@ def create_organization(
         trial_source=trial_source,
         trial_ends_at=trial_ends_at,
         pilot_code_used=pilot_code,
+        referred_by_promo_code_id=referred_by_promo_code_id,
         billing_provider=billing_provider,
         # No default: left None until the client sets it in Settings
         # (a geolocation-based guess previously pre-filled this, which
@@ -166,8 +192,17 @@ def create_organization(
     db.add(org)
     db.flush()  # populate org.id without committing yet
     if promo is not None:
-        promo.redeemed_at = now
-        promo.redeemed_by_org_id = org.id
+        if promo.kind == "admin":
+            promo.redeemed_at = now
+            promo.redeemed_by_org_id = org.id
+        else:
+            db.add(PromoCodeRedemption(promo_code_id=promo.id, redeemed_by_org_id=org.id, redeemed_at=now))
+    db.add(PromoCode(
+        code=generate_referral_code(db),
+        kind="referral",
+        owner_org_id=org.id,
+        max_redemptions=REFERRAL_MAX_SLOTS,
+    ))
     db.add(OrganizationMember(client_id=owner_client.id, org_id=org.id, role="owner"))
     return org
 

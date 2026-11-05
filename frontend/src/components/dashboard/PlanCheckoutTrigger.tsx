@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { apiFetch } from "@/lib/api";
 import { loadRazorpayCheckout } from "@/lib/razorpay";
 import { tierDisplayName } from "@/lib/pricing";
+import { SITE_URL } from "@/lib/urls";
 
 const PURCHASABLE_PLANS = ["starter", "growth", "pro"];
 // Mirrors api/tiers.py's MANUAL_BLOCK_TIERS: every self-serve paid tier gets
@@ -93,7 +94,7 @@ export function PlanCheckoutTrigger() {
             // Full reload so every tier-dependent piece of the dashboard
             // (trial/usage banners, settings, onboarding's free-tier gates)
             // picks up the new tier, matching DashboardGate's own precedent.
-            window.location.href = "/dashboard?upgraded=1";
+            window.location.href = "/?upgraded=1";
           } else {
             degrade();
           }
@@ -188,7 +189,7 @@ export function PlanCheckoutTrigger() {
           </p>
           <p style={{ fontSize: "12px", color: "var(--color-text-muted)", marginBottom: "20px", lineHeight: 1.5 }}>
             By continuing, you accept the{" "}
-            <a href="/legal/subscription-agreement" target="_blank" style={{ color: "var(--color-text)" }}>
+            <a href={`${SITE_URL}/legal/subscription-agreement`} target="_blank" rel="noopener noreferrer" style={{ color: "var(--color-text)" }}>
               Blocking Subscription Agreement ↗
             </a>.
           </p>

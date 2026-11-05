@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { PRICING_TIERS as TIERS, FEATURE_ROWS } from "@/lib/pricing";
+import { DASHBOARD_URL } from "@/lib/urls";
 
 type Currency = "INR" | "USD";
 type BillingPeriod = "monthly" | "annual";
@@ -239,8 +240,8 @@ export function Pricing({ standalone = false }: { standalone?: boolean } = {}) {
                   tier.name === "Enterprise"
                     ? "mailto:support@clewsec.com"
                     : tier.tier === "free"
-                    ? "/register"
-                    : `/register?plan=${tier.tier}`
+                    ? `${DASHBOARD_URL}/register`
+                    : `${DASHBOARD_URL}/register?plan=${tier.tier}`
                 }
                 className="text-sm font-medium text-center transition-opacity hover:opacity-80"
                 style={{

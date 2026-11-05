@@ -425,6 +425,31 @@ verification phase was added rather than trusting the unit tests.
   deputy attack that the External ID specifically closes. The ambient-
   credential path still exists as a fallback for any org without a role ARN,
   and gets removed once every org has migrated.
+- **Separate hosts for marketing, app and API (2026-11-05).** The app lives
+  on its own host so the marketing site (indexed, public, canonical) and the
+  authenticated app (noindex, cookies) never share an origin.
+
+  | Host | Serves |
+  |---|---|
+  | `www.clewsec.com` | Marketing site, canonical. `/api/` proxied by nginx |
+  | `clewsec.com` | 301 to `www` |
+  | `dashboard.clewsec.com` | The app at the root path (no `/dashboard` prefix), `/api/` proxied by nginx |
+  | `api.clewsec.com` | FastAPI directly, for webhooks and the external API only |
+
+  It is one Next.js process. `frontend/src/proxy.ts` checks the Host header
+  and rewrites dashboard-host paths to the existing `app/dashboard/*` folder,
+  so the folder name never appears in a URL (old `/dashboard/...` URLs get a
+  308 to the unprefixed path). The browser calls the API same-origin at
+  `/api/*`, which nginx maps to FastAPI. That mapping stays in nginx and is
+  never a Next.js rewrite in production, because a rewrite hides the client IP
+  from the rate limiter. Cookies are host-only (`COOKIE_DOMAIN` blank), since
+  the host that serves the page is the host that sets the cookie.
+  `LEGACY_COOKIE_DOMAIN` exists only to delete the old `.clewsec.com` cookies
+  during the transition. Env vars: `FRONTEND_URL` (dashboard URL),
+  `MARKETING_URL`, `DASHBOARD_HOST`, `NEXT_PUBLIC_DASHBOARD_URL`,
+  `NEXT_PUBLIC_SITE_URL`, `NEXT_PUBLIC_API_URL=/api`, `API_INTERNAL_URL`
+  (see README, "Hosts and environment variables"). Dev: marketing at
+  `http://localhost:3000`, app at `http://dashboard.localhost:3000`.
 
 ---
 

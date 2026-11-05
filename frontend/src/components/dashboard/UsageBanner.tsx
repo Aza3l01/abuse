@@ -56,7 +56,7 @@ export function UsageBanner() {
           : `You're at ${Math.floor(percent * 100)}% of your monthly call volume (${used} / ${cap}).`}
       </span>
       <Link
-        href="/dashboard/settings#billing"
+        href="/settings#billing"
         style={{ color: accentColor, textDecoration: "underline", flexShrink: 0 }}
       >
         Upgrade plan →

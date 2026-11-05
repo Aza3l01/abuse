@@ -95,8 +95,8 @@ export function NotificationsTab({ role, alertEmail, tier }: { role: string | nu
         <p style={{ fontSize: "13px", color: "var(--color-text-muted)" }}>
           {alertEmail
             ? <>Sending alerts to: <span style={{ color: "var(--color-text)", fontFamily: "var(--font-mono)" }}>{alertEmail}</span>{" "}
-                <Link href="/dashboard/settings#alerts" style={{ color: "var(--color-text-muted)" }}>Change in Settings →</Link></>
-            : <>No alert email configured. <Link href="/dashboard/settings#alerts" style={{ color: "var(--color-text)" }}>Set one up →</Link></>
+                <Link href="/settings#alerts" style={{ color: "var(--color-text-muted)" }}>Change in Settings →</Link></>
+            : <>No alert email configured. <Link href="/settings#alerts" style={{ color: "var(--color-text)" }}>Set one up →</Link></>
           }
         </p>
         {canSendTest && (

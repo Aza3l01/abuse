@@ -199,8 +199,8 @@ locally), create a gitignored `.env.local` at the repo root instead of
 editing `.env` directly. `api/main.py`, `workers/celery_app.py`, and
 `db/migrations/env.py` all load `.env` first, then `.env.local` with
 `override=True`, so anything set there wins locally without changing `.env`.
-Put the local-only `DATABASE_URL`, `FRONTEND_URL=http://localhost:3000`,
-`COOKIE_DOMAIN=` (blank), `DEBUG=1`, and the Turnstile test key above into
+Put the local-only `DATABASE_URL`, `FRONTEND_URL=http://dashboard.localhost:3000`,
+`MARKETING_URL=http://localhost:3000`, `COOKIE_DOMAIN=` (blank), `DEBUG=1`, and the Turnstile test key above into
 `.env.local` instead.
 
 ### 3. Start infrastructure
@@ -244,14 +244,70 @@ celery -A workers.celery_app beat --loglevel=info
 ### 6. Frontend
 ```bash
 cd frontend
-# Create frontend/.env.local with:
-# NEXT_PUBLIC_API_URL=http://localhost:8000
-# JWT_SECRET=<same value as backend .env>
+# Copy frontend/.env.local.example to frontend/.env.local and set JWT_SECRET to
+# the same value as the backend .env. The rest of the defaults work for dev
+# (NEXT_PUBLIC_API_URL=/api, DASHBOARD_HOST=dashboard.localhost:3000, ...).
 npm install
 npm run dev
 ```
 
-Frontend: `http://localhost:3000`
+Marketing site: `http://localhost:3000`
+App (dashboard, login, register): `http://dashboard.localhost:3000` (browsers
+resolve `*.localhost` to 127.0.0.1, no hosts-file edit needed).
+
+The browser calls the API same-origin at `/api/*`. In dev a Next.js rewrite
+(`next.config.ts`, development only) forwards it to `API_INTERNAL_URL`
+(default `http://127.0.0.1:8000`). In production nginx does it instead.
+
+### Hosts and environment variables
+
+| Host | Serves |
+|---|---|
+| `www.clewsec.com` | Marketing site (canonical), `/api/` proxied by nginx |
+| `clewsec.com` | 301 to `https://www.clewsec.com` |
+| `dashboard.clewsec.com` | The app at the root path (no `/dashboard` prefix), `/api/` proxied by nginx |
+| `api.clewsec.com` | FastAPI directly, for webhooks and the external API only |
+
+The dashboard host is the same Next.js process: `src/proxy.ts` looks at the
+Host header and rewrites dashboard-host paths to the `app/dashboard/*` folder.
+
+| Variable | Where | Meaning |
+|---|---|---|
+| `FRONTEND_URL` | backend `.env` | Dashboard URL. Emailed app links, billing return URLs, CORS |
+| `MARKETING_URL` | backend `.env` and Next.js server | Marketing URL. Newsletter confirm link; where marketing paths on the dashboard host redirect |
+| `COOKIE_DOMAIN` | backend `.env` | Blank in all environments (host-only cookies) |
+| `LEGACY_COOKIE_DOMAIN` | backend `.env` | Transition only: old cookie domain to delete (`.clewsec.com`) |
+| `NEXT_PUBLIC_API_URL` | Next.js build | `/api` (same-origin) |
+| `NEXT_PUBLIC_SITE_URL` | Next.js build | Absolute marketing URL (links, robots, sitemap, metadata) |
+| `NEXT_PUBLIC_DASHBOARD_URL` | Next.js build | Absolute dashboard URL (marketing CTAs, redirects) |
+| `DASHBOARD_HOST` | Next.js server | Host header value that selects the dashboard (`dashboard.clewsec.com`) |
+| `API_INTERNAL_URL` | Next.js server | FastAPI address for the proxy's token refresh and the dev rewrite |
+
+---
+
+## Pilot codes
+
+Admin-generated promo codes (`kind="admin"` on `PromoCode`) are the founder's
+manual-outreach pilot mechanism: hand one to a prospect directly, they redeem
+it at registration for a 30-day Growth trial. No Razorpay dependency, this
+grants a trial, not a charge, so it works whether or not Razorpay is live.
+Separate from referral codes (`kind="referral"`), which are auto-generated per
+org for self-serve sharing, see `api/referrals.py`.
+
+Generate a batch with `scripts/generate_promo_codes.py`, idempotent (only
+tops up to `--count` total, never regenerates or deletes existing rows), 5
+uppercase alphanumeric chars after `CLEW-`, ambiguous characters 0/O/1/I
+excluded:
+
+```bash
+python scripts/generate_promo_codes.py --count 500
+```
+
+500 is the agreed total for Clew's lifetime, decided 2026-11-01, run this
+once rather than repeatedly topping up in small batches. Each code is
+single-use (`max_redemptions=1`); track who you've handed an unredeemed code
+to yourself, the system only records `redeemed_at`/`redeemed_by_org_id` once
+a code is actually used, not before.
 
 ---
 
@@ -740,11 +796,13 @@ and retries once before giving up and showing `SessionExpiredModal`. Pre-auth
 pages and the Navbar's is-logged-in probe deliberately use plain `fetch`
 instead, a 401 there just means "not logged in," not "session expired."
 
-### Cross-origin cookies
+### Cookies
 
-`COOKIE_DOMAIN=.clewsec.com` means cookies set by `api.clewsec.com` are sent to
-all subdomains including `www.clewsec.com`. `allow_credentials=True` + the exact
-`FRONTEND_URL` in CORS config are both required for this to work.
+Auth cookies are host-only (no `Domain` attribute) in every environment. The
+browser calls the API same-origin at `/api/*` on both `www` and `dashboard`, so
+the host that serves the page is also the host that sets and receives the
+cookies. `COOKIE_DOMAIN` stays blank. `LEGACY_COOKIE_DOMAIN` exists only to
+delete the old `.clewsec.com` cookies during the transition.
 
 ---
 
@@ -973,8 +1031,9 @@ When it says "on your laptop" it means a terminal on your local machine, not the
 
 ### What you will end up with
 
-- `https://clewsec.com` — Next.js frontend
-- `https://api.clewsec.com` — FastAPI backend
+- `https://www.clewsec.com`: Next.js marketing site (`clewsec.com` redirects here)
+- `https://dashboard.clewsec.com`: the app (same Next.js process)
+- `https://api.clewsec.com`: FastAPI backend (webhooks and external API; the browser uses `/api` on the two hosts above)
 - Four PM2-managed background processes: `clew-api`, `clew-frontend`, `clew-worker`, `clew-beat`
 - PostgreSQL + Redis, both localhost-only
 
@@ -1202,8 +1261,9 @@ Key values to fill in:
 - `DATABASE_URL` — use the password from step 3.3
 - `JWT_SECRET` — paste the openssl output
 - `TOTP_ENCRYPTION_KEY` — paste the Fernet key
-- `FRONTEND_URL=https://clewsec.com`
-- `COOKIE_DOMAIN=.clewsec.com`
+- `FRONTEND_URL=https://dashboard.clewsec.com`
+- `MARKETING_URL=https://www.clewsec.com`
+- `COOKIE_DOMAIN`: leave blank (host-only cookies)
 - `TURNSTILE_SECRET_KEY`: from step 1.3
 - `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` — from step 1.1
 - `RESEND_API_KEY` — from step 1.2
@@ -1228,8 +1288,12 @@ INFO  [alembic.runtime.migration] Running upgrade b4e8f2a1c953 -> e3c1a7f920d4, 
 
 ```bash
 cat > /home/ubuntu/abuse/frontend/.env.local << 'EOF'
-NEXT_PUBLIC_API_URL=https://api.clewsec.com
-NEXT_PUBLIC_SITE_URL=https://clewsec.com
+NEXT_PUBLIC_API_URL=/api
+NEXT_PUBLIC_SITE_URL=https://www.clewsec.com
+NEXT_PUBLIC_DASHBOARD_URL=https://dashboard.clewsec.com
+DASHBOARD_HOST=dashboard.clewsec.com
+MARKETING_URL=https://www.clewsec.com
+API_INTERNAL_URL=http://127.0.0.1:8000
 JWT_SECRET=PASTE_SAME_JWT_SECRET_AS_BACKEND_ENV
 NEXT_PUBLIC_TURNSTILE_SITE_KEY=PASTE_SITE_KEY_FROM_STEP_1.3
 EOF
@@ -1271,41 +1335,18 @@ Layer 3 (Sentry exception tracking) is post-MVP, see item 46 in the project TODO
 
 ### Phase 5 — Nginx
 
+The committed config is `docker/nginx.conf`. Copy it rather than hand-writing a second copy:
+
 ```bash
-sudo nano /etc/nginx/sites-available/clew
+sudo cp /home/ubuntu/abuse/docker/nginx.conf /etc/nginx/sites-available/clew
 ```
 
-Paste:
-```nginx
-server {
-    server_name clewsec.com www.clewsec.com;
-    listen 80;
-    location / {
-        proxy_pass         http://127.0.0.1:3000;
-        proxy_http_version 1.1;
-        proxy_set_header   Upgrade       $http_upgrade;
-        proxy_set_header   Connection    'upgrade';
-        proxy_set_header   Host          $host;
-        proxy_set_header   X-Real-IP     $remote_addr;
-        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
-        proxy_set_header   X-Forwarded-Proto $scheme;
-        proxy_cache_bypass $http_upgrade;
-    }
-}
-
-server {
-    server_name api.clewsec.com;
-    listen 80;
-    location / {
-        proxy_pass         http://127.0.0.1:8000;
-        proxy_http_version 1.1;
-        proxy_set_header   Host              $host;
-        proxy_set_header   X-Real-IP         $remote_addr;
-        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
-        proxy_set_header   X-Forwarded-Proto $scheme;
-    }
-}
-```
+It defines four hosts: `clewsec.com` (301 to `www`), `www.clewsec.com`
+(Next.js), `dashboard.clewsec.com` (Next.js, `noindex`, `robots.txt` disallows
+all) and `api.clewsec.com` (FastAPI). `www` and `dashboard` each have a
+`location /api/` that strips the prefix and proxies to FastAPI on `:8000` with
+the forwarded headers. Keep that in nginx: a Next.js rewrite would hide the
+client IP from the rate limiter.
 
 ```bash
 sudo ln -s /etc/nginx/sites-available/clew /etc/nginx/sites-enabled/
@@ -1320,12 +1361,14 @@ sudo systemctl reload nginx
 
 DNS must be pointing at your server first:
 ```bash
-ping clewsec.com       # must show YOUR Elastic IP
-ping api.clewsec.com   # must show YOUR Elastic IP
+ping clewsec.com             # must show YOUR Elastic IP
+ping www.clewsec.com         # must show YOUR Elastic IP
+ping dashboard.clewsec.com   # must show YOUR Elastic IP
+ping api.clewsec.com         # must show YOUR Elastic IP
 ```
 
 ```bash
-sudo certbot --nginx -d clewsec.com -d www.clewsec.com -d api.clewsec.com
+sudo certbot --nginx -d clewsec.com -d www.clewsec.com -d dashboard.clewsec.com -d api.clewsec.com
 sudo certbot renew --dry-run    # verify auto-renewal works
 ```
 
@@ -1361,9 +1404,13 @@ module.exports = {
       script: 'node_modules/.bin/next',
       args:   'start --port 3000',
       env: {
-        NODE_ENV:             'production',
-        NEXT_PUBLIC_API_URL:  'https://api.clewsec.com',
-        NEXT_PUBLIC_SITE_URL: 'https://clewsec.com',
+        NODE_ENV:                  'production',
+        NEXT_PUBLIC_API_URL:       '/api',
+        NEXT_PUBLIC_SITE_URL:      'https://www.clewsec.com',
+        NEXT_PUBLIC_DASHBOARD_URL: 'https://dashboard.clewsec.com',
+        DASHBOARD_HOST:            'dashboard.clewsec.com',
+        MARKETING_URL:             'https://www.clewsec.com',
+        API_INTERNAL_URL:          'http://127.0.0.1:8000',
       },
     },
     {
@@ -1453,10 +1500,12 @@ Browser checklist:
 
 | URL | Expected |
 |---|---|
-| `https://clewsec.com` | Marketing homepage, padlock visible |
+| `https://www.clewsec.com` | Marketing homepage, padlock visible |
 | `https://api.clewsec.com/health` | `{"status":"ok"}` |
-| `http://clewsec.com` | Redirects to https:// |
-| `https://clewsec.com/register` | Registration form loads |
+| `https://clewsec.com` | 301 to `https://www.clewsec.com` |
+| `http://www.clewsec.com` | Redirects to https:// |
+| `https://dashboard.clewsec.com` | Redirects to `/login` when signed out |
+| `https://dashboard.clewsec.com/register` | Registration form loads |
 
 ---
 

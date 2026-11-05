@@ -388,7 +388,7 @@ export function VerdictsTab({ role, tier }: { role: string | null; tier: string 
                   <td style={{ padding: "10px 16px" }}>
                     <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
                       <button
-                        onClick={() => router.push(`/dashboard/verdicts/${v.id}`)}
+                        onClick={() => router.push(`/verdicts/${v.id}`)}
                         style={{ padding: "2px 10px", fontSize: "11px", border: "1px solid var(--color-border)", background: "transparent", color: "var(--color-text)", cursor: "pointer" }}
                       >
                         View

@@ -94,6 +94,10 @@ class OrgConfig(BaseModel):
     waf_ip_set_id:       Optional[str]
     cloudflare_zone_id:  Optional[str]
     blocking_tos_accepted_at: Optional[datetime]
+    # TODO.md priority item 2: explicit opt-in for the unattended
+    # pipeline-triggered block, visible only for Growth and above on the
+    # Settings page, off by default.
+    auto_block_enabled:  bool
     # Item 61: tenant's expected home country, used by GeoIPAgent
     home_country:        Optional[str]
     # Phase 2: cross-account IAM role. aws_external_id is server-generated,
@@ -151,6 +155,10 @@ class ClientUpdate(BaseModel):
     waf_ip_set_id:     Optional[str] = None
     cloudflare_zone_id:Optional[str] = None
     cloudflare_token:  Optional[str] = None
+    # TODO.md priority item 2: validated server-side in update_me (requires
+    # blocking_tos_accepted_at already set before it can be switched on),
+    # not just by the Settings page's own modal-gated toggle.
+    auto_block_enabled: Optional[bool] = None
     # Item 61: tenant's expected home country, ISO 3166-1 alpha-2
     home_country:      Optional[str] = None
     # Phase 2: cross-account IAM role ARN, pasted back after the customer
@@ -247,6 +255,7 @@ def _to_org_config(org: Organization, role: str) -> OrgConfig:
         waf_ip_set_id=org.waf_ip_set_id,
         cloudflare_zone_id=org.cloudflare_zone_id,
         blocking_tos_accepted_at=org.blocking_tos_accepted_at,
+        auto_block_enabled=org.auto_block_enabled,
         home_country=org.home_country,
         aws_role_arn=org.aws_role_arn,
         aws_external_id=org.aws_external_id,
@@ -291,11 +300,21 @@ async def update_me(
         "s3_bucket", "s3_prefix", "log_format", "aws_region",
         "alert_email", "alert_severity_threshold",
         "waf_ip_set_id", "cloudflare_zone_id", "cloudflare_token",
-        "home_country", "aws_role_arn",
+        "home_country", "aws_role_arn", "auto_block_enabled",
     }
     old_s3_bucket, old_s3_prefix, old_log_format = (
         org.s3_bucket, org.s3_prefix, org.log_format,
     )
+
+    # TODO.md priority item 2: auto_block_enabled can only be switched on
+    # once the Blocking Subscription Agreement is accepted. The Settings
+    # page already gates this with a modal, this is the actual enforcement
+    # boundary so a direct API call can't bypass it.
+    if update_data.get("auto_block_enabled") and org.blocking_tos_accepted_at is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Accept the Blocking Subscription Agreement before enabling automatic blocking.",
+        )
     for field, value in update_data.items():
         if field not in _ALLOWED_FIELDS:
             continue

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { DASHBOARD_URL } from "@/lib/urls";
 
 type Industry = "saas" | "fintech" | "marketplace" | "other";
 type VolumeKey = "under1m" | "1m_10m" | "10m_50m" | "over50m";
@@ -298,7 +299,13 @@ export function CostCalculator() {
                   style={{ color: "var(--color-text-muted)" }}
                 >
                   <p className="text-xs" style={{ color: "var(--color-text-muted)" }}>
-                    Directional estimate using industry bot-traffic and breach-cost benchmarks.
+                    Directional estimate using industry bot-traffic and breach-cost benchmarks.{" "}
+                    <a
+                      href="/docs#cost-prevented-estimate"
+                      style={{ color: "var(--color-text-muted)", textDecoration: "underline" }}
+                    >
+                      Learn more
+                    </a>
                   </p>
                   <select
                     value={currency}
@@ -319,7 +326,7 @@ export function CostCalculator() {
               </div>
 
               <a
-                href="/register"
+                href={`${DASHBOARD_URL}/register`}
                 className="text-sm font-medium transition-opacity hover:opacity-80 whitespace-nowrap"
                 style={{
                   padding: "12px 24px",

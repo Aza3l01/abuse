@@ -445,8 +445,19 @@ def process_logs(self, org_id: str) -> dict:
                 send_alert_email.delay(verdict_id, org_id)
             # Push block for high/critical on Growth+ tiers only, item 55's
             # AUTO_BLOCK_TIERS, a separate, more conservative gate than the
-            # alert threshold.
-            if v and v.severity in ("high", "critical") and org.tier in AUTO_BLOCK_TIERS:
+            # alert threshold. TODO.md priority items 1/2: also require the
+            # Blocking Subscription Agreement already accepted and the org's
+            # own auto_block_enabled opt-in, so unattended blocking never
+            # fires with no agreement accepted and never fires at all unless
+            # explicitly turned on, even on an eligible tier with an
+            # integration configured.
+            if (
+                v
+                and v.severity in ("high", "critical")
+                and org.tier in AUTO_BLOCK_TIERS
+                and org.auto_block_enabled
+                and org.blocking_tos_accepted_at is not None
+            ):
                 from workers.tasks.push_blocks import push_block
                 push_block.delay(verdict_id, org_id)
 

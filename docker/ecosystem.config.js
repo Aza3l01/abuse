@@ -42,8 +42,14 @@ module.exports = {
       args: 'start --port 3000',
       env: {
         NODE_ENV: 'production',
-        NEXT_PUBLIC_API_URL: 'https://api.clewsec.com',
-        NEXT_PUBLIC_SITE_URL: 'https://clewsec.com',
+        // Browser calls the API same-origin at /api (nginx maps it to FastAPI).
+        NEXT_PUBLIC_API_URL: '/api',
+        NEXT_PUBLIC_SITE_URL: 'https://www.clewsec.com',
+        NEXT_PUBLIC_DASHBOARD_URL: 'https://dashboard.clewsec.com',
+        // Server-side only (read by the Next.js proxy).
+        DASHBOARD_HOST: 'dashboard.clewsec.com',
+        MARKETING_URL: 'https://www.clewsec.com',
+        API_INTERNAL_URL: 'http://127.0.0.1:8000',
       },
       autorestart: true,
       restart_delay: 5000,

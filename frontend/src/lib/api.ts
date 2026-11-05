@@ -1,11 +1,8 @@
 /**
- * Base URL for all FastAPI calls.
- *
- * Set NEXT_PUBLIC_API_URL in frontend/.env.local.
- * Local dev default: http://localhost:8000
- * Production:        https://api.clewsec.com
+ * Base URL for all FastAPI calls. The browser calls the API same-origin at /api:
+ * nginx proxies it in production, a dev-only rewrite in next.config.ts does it locally.
  */
-export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "/api";
 
 const SESSION_EXPIRED_EVENT = "clew:session-expired";
 

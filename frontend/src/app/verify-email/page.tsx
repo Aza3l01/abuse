@@ -35,7 +35,7 @@ function VerifyEmailForm() {
         setError(data.detail ?? "Verification failed.");
         return;
       }
-      router.push("/dashboard");
+      router.push("/");
     } catch {
       setError("Could not connect to the server. Try again.");
     } finally {

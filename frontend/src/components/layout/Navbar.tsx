@@ -3,22 +3,11 @@
 import { useTheme } from "next-themes";
 import { useEffect, useState } from "react";
 import Image from "next/image";
-import { API_URL } from "@/lib/api";
-
-function useIsLoggedIn() {
-  const [loggedIn, setLoggedIn] = useState(false);
-  useEffect(() => {
-    fetch(`${API_URL}/auth/me`, { credentials: "include" })
-      .then((r) => setLoggedIn(r.ok))
-      .catch(() => setLoggedIn(false));
-  }, []);
-  return loggedIn;
-}
+import { DASHBOARD_URL } from "@/lib/urls";
 
 export function Navbar() {
   const { theme, setTheme } = useTheme();
   const [mounted, setMounted] = useState(false);
-  const loggedIn = useIsLoggedIn();
 
   useEffect(() => {
     setMounted(true);
@@ -83,7 +72,7 @@ export function Navbar() {
             Docs
           </a>
           <a
-            href={loggedIn ? "/dashboard" : "/login"}
+            href="https://status.clewsec.com"
             className="text-sm transition-colors"
             style={{ color: "var(--color-text-muted)" }}
             onMouseEnter={(e) =>
@@ -93,7 +82,20 @@ export function Navbar() {
               (e.currentTarget.style.color = "var(--color-text-muted)")
             }
           >
-            {loggedIn ? "Dashboard" : "Sign in"}
+            Status
+          </a>
+          <a
+            href={DASHBOARD_URL}
+            className="text-sm transition-colors"
+            style={{ color: "var(--color-text-muted)" }}
+            onMouseEnter={(e) =>
+              (e.currentTarget.style.color = "var(--color-text)")
+            }
+            onMouseLeave={(e) =>
+              (e.currentTarget.style.color = "var(--color-text-muted)")
+            }
+          >
+            Dashboard
           </a>
 
           {mounted && (

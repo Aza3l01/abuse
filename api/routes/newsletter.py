@@ -28,8 +28,8 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, field_validator
 
 from api.auth_utils import (
-    FRONTEND_URL,
     FROM_NEWS,
+    MARKETING_URL,
     RESEND_API_KEY,
     create_newsletter_confirm_token,
     decode_newsletter_confirm_token,
@@ -94,7 +94,7 @@ def subscribe(request: Request, body: SubscribeBody):
         return _GENERIC_RESPONSE
 
     token = create_newsletter_confirm_token(body.email)
-    confirm_url = f"{FRONTEND_URL}/newsletter/confirm?token={token}"
+    confirm_url = f"{MARKETING_URL}/newsletter/confirm?token={token}"
     send_email(
         to=body.email,
         subject="Confirm your Clew newsletter subscription",

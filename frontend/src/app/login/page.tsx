@@ -11,7 +11,11 @@ import { API_URL } from "@/lib/api";
 function LoginForm() {
   const router       = useRouter();
   const searchParams = useSearchParams();
-  const next         = searchParams.get("next") ?? "/dashboard";
+  const rawNext      = searchParams.get("next");
+  // Same-site relative paths only: "//evil.example", "/\evil.example" and tab/newline tricks fall back to "/".
+  const next         = rawNext && rawNext.startsWith("/") && !rawNext.startsWith("//") && !/[\s\\]/.test(rawNext)
+    ? rawNext
+    : "/";
 
   const [email,    setEmail]    = useState("");
   const [password, setPassword] = useState("");

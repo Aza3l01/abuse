@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { apiFetch } from "@/lib/api";
+import { SITE_URL } from "@/lib/urls";
 import { LoadingCursor } from "@/components/dashboard/LoadingCursor";
 
 // ---------------------------------------------------------------------------
@@ -252,7 +253,7 @@ export default function VerdictDetailPage() {
         <div style={{ marginBottom: "24px" }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
             <SectionLabel>Agent scores</SectionLabel>
-            <Link href="/docs#the-detection-agents" style={{ fontSize: "11px", color: "var(--color-text-muted)" }}>
+            <Link href={`${SITE_URL}/docs#the-detection-agents`} style={{ fontSize: "11px", color: "var(--color-text-muted)" }}>
               How the agents work →
             </Link>
           </div>
@@ -307,7 +308,7 @@ export default function VerdictDetailPage() {
       <div style={{ marginBottom: "24px" }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <SectionLabel>AI analysis</SectionLabel>
-          <Link href="/docs#threat-explanations" style={{ fontSize: "11px", color: "var(--color-text-muted)" }}>
+          <Link href={`${SITE_URL}/docs#threat-explanations`} style={{ fontSize: "11px", color: "var(--color-text-muted)" }}>
             Learn more →
           </Link>
         </div>
@@ -346,7 +347,7 @@ export default function VerdictDetailPage() {
             {blocking ? "Working…" : v.blocked ? "Unblock this IP" : "Block this IP"}
           </button>
         )}
-        <Link href={`/dashboard/alerts?ip=${v.ip}`} style={{ fontSize: "13px", color: "var(--color-text-muted)", textDecoration: "none" }}>
+        <Link href={`/alerts?ip=${v.ip}`} style={{ fontSize: "13px", color: "var(--color-text-muted)", textDecoration: "none" }}>
           View all verdicts for this IP →
         </Link>
       </div>

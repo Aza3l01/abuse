@@ -46,7 +46,7 @@ export function DashboardGate({ children }: { children: ReactNode }) {
         setError(data?.detail ?? "Could not create your organisation.");
         return;
       }
-      window.location.href = "/dashboard";
+      window.location.href = "/";
     } catch {
       setError("Network error. Please try again.");
     } finally {

@@ -4,7 +4,9 @@ import { useEffect, useState } from "react";
 import { useRouter }           from "next/navigation";
 import Link                    from "next/link";
 import { apiFetch }            from "@/lib/api";
+import { SITE_URL }            from "@/lib/urls";
 import { TeamMembersSection }  from "@/components/dashboard/TeamMembers";
+import { ReferralSection }     from "@/components/dashboard/ReferralSection";
 import { GuidedOnboardingButton } from "@/components/dashboard/GuidedOnboardingButton";
 import { loadRazorpayCheckout } from "@/lib/razorpay";
 import { PRICING_TIERS, FEATURE_ROWS, tierDisplayName } from "@/lib/pricing";
@@ -38,6 +40,7 @@ interface ClientConfig {
   waf_ip_set_id: string | null;
   cloudflare_zone_id: string | null;
   blocking_tos_accepted_at: string | null;
+  auto_block_enabled: boolean;
   home_country: string | null;
   aws_role_arn: string | null;
   aws_external_id: string | null;
@@ -367,10 +370,16 @@ export default function SettingsPage() {
   const [period,       setPeriod]       = useState<"monthly" | "annual">("monthly");
   const [gstin,        setGstin]        = useState("");
   const [billingStatus, setBillingStatus] = useState<BillingStatus | null>(null);
-  // Item 28: Growth blocking TOS modal, holds the tier the user clicked
-  // while the modal is open, so accepting can resume the upgrade.
-  const [blockingTosPendingTier, setBlockingTosPendingTier] = useState<string | null>(null);
+  // Item 28: Growth blocking TOS modal. Holds whichever action triggered it,
+  // a checkout tier click or (TODO.md priority item 2) the automatic-
+  // blocking toggle, so accepting can resume whichever one was pending.
+  const [blockingTosPendingAction, setBlockingTosPendingAction] = useState<
+    { kind: "checkout"; tier: string } | { kind: "auto_block" } | null
+  >(null);
   const [blockingTosBusy, setBlockingTosBusy] = useState(false);
+  // TODO.md priority item 2: auto-block on/off toggle (Growth+ only)
+  const [savingAutoBlock, setSavingAutoBlock] = useState(false);
+  const [autoBlockError,  setAutoBlockError]  = useState<string | null>(null);
   // Item 29b: cancel/refund modal
   const [cancelModalOpen, setCancelModalOpen] = useState(false);
   const [refundEligibility, setRefundEligibility] = useState<RefundEligibility | null>(null);
@@ -518,23 +527,27 @@ export default function SettingsPage() {
     // in api/tiers.py) requires the Blocking Subscription Agreement accepted
     // before the payment flow opens, and only once ever.
     if (MANUAL_BLOCK_TIERS.includes(tier) && !config?.blocking_tos_accepted_at) {
-      setBlockingTosPendingTier(tier);
+      setBlockingTosPendingAction({ kind: "checkout", tier });
       return;
     }
     startRazorpayCheckout(tier);
   }
 
   async function acceptBlockingTosAndContinue() {
-    const tier = blockingTosPendingTier;
-    if (!tier) return;
+    const action = blockingTosPendingAction;
+    if (!action) return;
     setBlockingTosBusy(true);
     try {
       const r = await apiFetch(`/clients/me/accept-blocking-tos`, { method: "POST" });
       if (r.ok) {
         const updated: ClientConfig = await r.json();
         setConfig(updated);
-        setBlockingTosPendingTier(null);
-        startRazorpayCheckout(tier);
+        setBlockingTosPendingAction(null);
+        if (action.kind === "checkout") {
+          startRazorpayCheckout(action.tier);
+        } else {
+          saveAutoBlockEnabled(true);
+        }
       } else {
         setBillingError("Could not record acceptance. Please try again.");
       }
@@ -543,6 +556,41 @@ export default function SettingsPage() {
     } finally {
       setBlockingTosBusy(false);
     }
+  }
+
+  // TODO.md priority item 2: persists auto_block_enabled directly, the
+  // backend itself also enforces blocking_tos_accepted_at (api/routes/
+  // clients.py), this is the Settings-page gate that surfaces the
+  // acceptance modal instead of a plain 400 error.
+  async function saveAutoBlockEnabled(next: boolean) {
+    setSavingAutoBlock(true);
+    setAutoBlockError(null);
+    try {
+      const r = await apiFetch(`/clients/me`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ auto_block_enabled: next }),
+      });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        setAutoBlockError(d?.detail ?? "Could not update automatic blocking.");
+        return;
+      }
+      setConfig(await r.json());
+    } catch {
+      setAutoBlockError("Network error. Please try again.");
+    } finally {
+      setSavingAutoBlock(false);
+    }
+  }
+
+  function handleAutoBlockToggle(next: boolean) {
+    setAutoBlockError(null);
+    if (next && !config?.blocking_tos_accepted_at) {
+      setBlockingTosPendingAction({ kind: "auto_block" });
+      return;
+    }
+    saveAutoBlockEnabled(next);
   }
 
   async function startRazorpayCheckout(tier: string) {
@@ -1293,30 +1341,45 @@ export default function SettingsPage() {
         </div>
       </section>
 
-      {/* Item 28/69: Blocking Subscription Agreement modal */}
-      {blockingTosPendingTier && (
+      {/* ------------------------------------------------------------------ */}
+      {/* Referrals (TODO.md priority item 5)                                 */}
+      {/* ------------------------------------------------------------------ */}
+      <section id="referrals" style={{ marginBottom: "40px" }}>
+        <SectionTitle
+          title="Referrals"
+          sub="Invite other organisations and earn a recurring discount for every one that becomes a paying customer."
+        />
+        <ReferralSection myRole={config?.role ?? null} />
+      </section>
+
+      {/* Item 28/69: Blocking Subscription Agreement modal. Also used by
+          TODO.md priority item 2's auto-block toggle, which needs the same
+          acceptance before it can be switched on. */}
+      {blockingTosPendingAction && (
         <div style={{
           position: "fixed", inset: 0, background: "rgba(13,13,13,0.6)",
           display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100,
         }}>
           <div style={{ background: "var(--color-bg)", border: "1px solid var(--color-border)", padding: "24px", maxWidth: "460px", width: "90%", animation: "modal-panel-in 150ms ease-out" }}>
             <p style={{ fontSize: "14px", fontWeight: 600, marginBottom: "12px" }}>
-              This plan includes active IP blocking
+              {blockingTosPendingAction.kind === "checkout"
+                ? "This plan includes active IP blocking"
+                : "Automatic blocking is an active security action"}
             </p>
             <p style={{ fontSize: "12px", color: "var(--color-text-muted)", marginBottom: "10px", lineHeight: 1.5 }}>
-              Clew will add malicious IPs to your AWS WAF and Cloudflare account
-              when you block them, whether manually or automatically depending
-              on your plan. This is an active security action, not just monitoring.
+              {blockingTosPendingAction.kind === "checkout"
+                ? "Clew will add malicious IPs to your AWS WAF and Cloudflare account when you block them, whether manually or automatically depending on your plan. This is an active security action, not just monitoring."
+                : "Once turned on, Clew will add malicious IPs to your AWS WAF and Cloudflare account automatically, with no click required, whenever a high-confidence threat is detected. This is an active security action, not just monitoring."}
             </p>
             <p style={{ fontSize: "12px", color: "var(--color-text-muted)", marginBottom: "20px", lineHeight: 1.5 }}>
               By continuing, you accept the{" "}
-              <a href="/legal/subscription-agreement" target="_blank" style={{ color: "var(--color-text)" }}>
+              <a href={`${SITE_URL}/legal/subscription-agreement`} target="_blank" style={{ color: "var(--color-text)" }}>
                 Blocking Subscription Agreement ↗
               </a>.
             </p>
             <div style={{ display: "flex", gap: "8px", justifyContent: "flex-end" }}>
               <button
-                onClick={() => setBlockingTosPendingTier(null)}
+                onClick={() => setBlockingTosPendingAction(null)}
                 style={{ padding: "7px 16px", fontSize: "12px", border: "1px solid var(--color-border)", background: "transparent", color: "var(--color-text)", cursor: "pointer" }}
               >
                 Cancel
@@ -1330,12 +1393,17 @@ export default function SettingsPage() {
                   cursor: blockingTosBusy ? "default" : "pointer", opacity: blockingTosBusy ? 0.6 : 1,
                 }}
               >
-                {blockingTosBusy ? "Working…" : "I understand, continue to payment"}
+                {blockingTosBusy
+                  ? "Working…"
+                  : blockingTosPendingAction.kind === "checkout"
+                    ? "I understand, continue to payment"
+                    : "I understand, turn on automatic blocking"}
               </button>
             </div>
           </div>
         </div>
       )}
+
 
       {/* Item 29b: cancel/refund modal */}
       {cancelModalOpen && (
@@ -1391,7 +1459,7 @@ export default function SettingsPage() {
           sub="Clew reads logs from your S3 bucket every 15 minutes. Configure the bucket and log format below."
         />
         <p style={{ fontSize: "12px", marginBottom: "16px" }}>
-          <Link href="/docs#connecting-your-log-source" style={{ color: "var(--color-text-muted)" }}>
+          <Link href={`${SITE_URL}/docs#connecting-your-log-source`} style={{ color: "var(--color-text-muted)" }}>
             Full setup guide, including API Gateway and ALB logging, in the docs →
           </Link>
         </p>
@@ -1520,7 +1588,7 @@ export default function SettingsPage() {
           </FieldRow>
 
           <FieldRow label="">
-            <a href="/dashboard/alerts" style={{ fontSize: "12px", color: "var(--color-text-muted)" }}>
+            <a href="/alerts" style={{ fontSize: "12px", color: "var(--color-text-muted)" }}>
               Send a test alert on the Alerts page →
             </a>
           </FieldRow>
@@ -1577,6 +1645,46 @@ export default function SettingsPage() {
       </section>
 
       {/* ------------------------------------------------------------------ */}
+      {/* TODO.md priority item 2: automatic blocking on/off toggle          */}
+      {/* (Growth and above only, Basic's manual blocking is unaffected)     */}
+      {/* ------------------------------------------------------------------ */}
+      {config && AUTO_BLOCK_TIERS.includes(config.tier) && (
+      <section id="auto-block" style={{ marginBottom: "40px" }}>
+        <SectionTitle
+          title="Automatic Blocking"
+          sub="Automatically push a block rule to whichever integration below is configured, the moment a high-confidence threat is detected. Off by default, no click required once on."
+        />
+        <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+          <button
+            type="button"
+            onClick={() => handleAutoBlockToggle(!config.auto_block_enabled)}
+            disabled={savingAutoBlock}
+            style={{
+              padding: "8px 20px",
+              fontSize: "13px",
+              border: "1px solid var(--color-text)",
+              background: config.auto_block_enabled ? "var(--color-text)" : "transparent",
+              color: config.auto_block_enabled ? "var(--color-bg)" : "var(--color-text)",
+              cursor: savingAutoBlock ? "default" : "pointer",
+              opacity: savingAutoBlock ? 0.6 : 1,
+              transition: "background 150ms, color 150ms",
+            }}
+          >
+            {savingAutoBlock ? "Saving…" : config.auto_block_enabled ? "On" : "Off"}
+          </button>
+          {!config.blocking_tos_accepted_at && (
+            <span style={{ fontSize: "12px", color: "var(--color-text-muted)" }}>
+              Requires accepting the Blocking Subscription Agreement first.
+            </span>
+          )}
+          {autoBlockError && (
+            <span style={{ fontSize: "12px", color: "var(--color-critical)" }}>{autoBlockError}</span>
+          )}
+        </div>
+      </section>
+      )}
+
+      {/* ------------------------------------------------------------------ */}
       {/* WAF Configuration (any MANUAL_BLOCK_TIERS org), items 22/23         */}
       {/* ------------------------------------------------------------------ */}
       {config && MANUAL_BLOCK_TIERS.includes(config.tier) && (
@@ -1590,7 +1698,7 @@ export default function SettingsPage() {
           }
         />
         <p style={{ fontSize: "12px", marginBottom: "16px" }}>
-          <Link href="/docs#blocking-ips" style={{ color: "var(--color-text-muted)" }}>
+          <Link href={`${SITE_URL}/docs#blocking-ips`} style={{ color: "var(--color-text-muted)" }}>
             How manual and automatic blocking work →
           </Link>
         </p>
@@ -2079,7 +2187,7 @@ export default function SettingsPage() {
           sub="Invite teammates to your organisation. Owners can change roles or remove members."
         />
         <p style={{ fontSize: "12px", marginBottom: "16px" }}>
-          <Link href="/docs#team-and-roles" style={{ color: "var(--color-text-muted)" }}>
+          <Link href={`${SITE_URL}/docs#team-and-roles`} style={{ color: "var(--color-text-muted)" }}>
             What each role can do →
           </Link>
         </p>

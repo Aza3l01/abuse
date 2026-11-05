@@ -1,14 +1,14 @@
 import type { MetadataRoute } from "next";
 
 export default function robots(): MetadataRoute.Robots {
-  const base = process.env.NEXT_PUBLIC_SITE_URL ?? "https://clewsec.com";
+  const base = process.env.NEXT_PUBLIC_SITE_URL ?? "https://www.clewsec.com";
 
   return {
     rules: [
       {
         userAgent: "*",
         allow: ["/", "/pricing", "/register", "/login"],
-        disallow: ["/dashboard/", "/api/"],
+        disallow: ["/api/"],
       },
     ],
     sitemap: `${base}/sitemap.xml`,

@@ -24,7 +24,7 @@ function minutesAgo(iso: string): number {
 function ScanStatus({ s }: { s: StatusSummary }) {
   if (s.last_scan_status === "error") {
     return (
-      <Link href="/dashboard/settings#s3" style={{ color: "var(--color-critical)", textDecoration: "none", fontSize: "12px" }}>
+      <Link href="/settings#s3" style={{ color: "var(--color-critical)", textDecoration: "none", fontSize: "12px" }}>
         Last scan failed, check settings
       </Link>
     );
@@ -69,7 +69,7 @@ export function StatusHeader() {
     }}>
       <ScanStatus s={summary} />
       <Link
-        href="/dashboard/settings#s3"
+        href="/settings#s3"
         style={{ display: "flex", alignItems: "center", gap: "6px", textDecoration: "none" }}
       >
         <span style={{ width: "8px", height: "8px", background: dotColor, display: "inline-block" }} />

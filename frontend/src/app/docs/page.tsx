@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { LegalLayout, legalH2Style, legalPStyle } from "@/components/legal/LegalLayout";
+import { DASHBOARD_URL } from "@/lib/urls";
 
 export const metadata: Metadata = {
   title: "Documentation",
@@ -75,7 +76,7 @@ export default function DocsPage() {
         onboarding flow that walks you through setup in a few clicks. These
         docs are the reference version, for people who want the detail.
         <br />
-        <Link href="/dashboard" style={linkStyle}>
+        <Link href={DASHBOARD_URL} style={linkStyle}>
           Open guided onboarding in your dashboard →
         </Link>
       </p>
@@ -98,7 +99,7 @@ export default function DocsPage() {
       <p style={legalPStyle}>
         You can upgrade, downgrade, or add blocking integrations at any time
         from{" "}
-        <Link href="/dashboard/settings#billing" style={linkStyle}>
+        <Link href={`${DASHBOARD_URL}/settings#billing`} style={linkStyle}>
           Settings → Plan &amp; Billing
         </Link>
         .
@@ -111,7 +112,7 @@ export default function DocsPage() {
         Clew reads your logs by assuming an IAM role inside your own AWS
         account, not by holding a long-lived access key. Your organisation
         gets its own External ID, shown read-only on{" "}
-        <Link href="/dashboard/settings#s3" style={linkStyle}>
+        <Link href={`${DASHBOARD_URL}/settings#s3`} style={linkStyle}>
           Settings → AWS Access
         </Link>
         , which generates both policies below with your External ID and
@@ -304,11 +305,11 @@ export default function DocsPage() {
       <p style={legalPStyle}>
         Set an alert email and a severity threshold, all threats or high and
         critical only, in{" "}
-        <Link href="/dashboard/settings#alerts" style={linkStyle}>
+        <Link href={`${DASHBOARD_URL}/settings#alerts`} style={linkStyle}>
           Settings → Alerts
         </Link>
         . Every delivery, sent or failed, is logged on the{" "}
-        <Link href="/dashboard/alerts" style={linkStyle}>Alerts</Link> page,
+        <Link href={`${DASHBOARD_URL}/alerts`} style={linkStyle}>Alerts</Link> page,
         with a button to send yourself a test alert. Free Starter accounts
         do not receive email alerts, that starts at Basic.
       </p>
@@ -322,11 +323,11 @@ export default function DocsPage() {
         where Clew blocks the moment a high or critical threat is detected
         with no click required, is available from Growth up. Both push to
         AWS WAF and Cloudflare, whichever you configure in{" "}
-        <Link href="/dashboard/settings#waf" style={linkStyle}>
+        <Link href={`${DASHBOARD_URL}/settings#waf`} style={linkStyle}>
           Settings → WAF Configuration
         </Link>{" "}
         and{" "}
-        <Link href="/dashboard/settings#cloudflare" style={linkStyle}>
+        <Link href={`${DASHBOARD_URL}/settings#cloudflare`} style={linkStyle}>
           Cloudflare Configuration
         </Link>
         . Configure either one, both, or neither, if neither is set up Clew
@@ -369,7 +370,7 @@ export default function DocsPage() {
       <p style={legalPStyle}>
         Invites to an email outside your organisation&apos;s own domain are
         capped at the viewer role. Manage your team from{" "}
-        <Link href="/dashboard/settings#team" style={linkStyle}>
+        <Link href={`${DASHBOARD_URL}/settings#team`} style={linkStyle}>
           Settings → Team Members
         </Link>
         .
@@ -434,8 +435,45 @@ export default function DocsPage() {
         for the full list of subprocessors.
       </p>
 
+      <h2 style={legalH2Style} id="cost-prevented-estimate">
+        14. How the cost prevented estimate works
+      </h2>
+      <p style={legalPStyle}>
+        The &quot;cost prevented&quot; figure, shown on your dashboard and on
+        the homepage calculator, is a modeled estimate, not a measured cost.
+        It is meant to give a rough sense of scale, not an exact accounting
+        of money saved.
+      </p>
+      <p style={legalPStyle}>
+        Each verdict&apos;s contribution is scaled by its own confidence
+        score: a low-confidence detection contributes little, a near-certain
+        one contributes close to the full modeled amount for its threat
+        type, rather than either counting fully or not at all.
+      </p>
+      <p style={legalPStyle}>
+        The underlying per-request cost assumptions are banded into a low
+        and high range rather than a single number, reflecting published
+        industry research on bot traffic and credential-stuffing outcomes,
+        the same bands shown on the homepage cost calculator. Two cost
+        components feed the model: an infrastructure cost for every
+        malicious request, traffic that consumes compute and bandwidth
+        without ever succeeding, and an account-takeover cost, applied only
+        to the credential-stuffing and brute-force share of traffic, using
+        an assumed rate for how often a stuffing attempt actually
+        compromises an account and an assumed average cost per successful
+        takeover.
+      </p>
+      <p style={legalPStyle}>
+        The exact numbers behind this model, the abuse-rate bands, the
+        takeover success rate, the cost per compromised account, the infra
+        cost per request, are tuning constants, not guarantees, and may be
+        revised as better data becomes available. This page describes the
+        reasoning rather than the literal values, so it stays accurate even
+        when those constants are tuned.
+      </p>
+
       <h2 style={legalH2Style} id="faq">
-        14. FAQ
+        15. FAQ
       </h2>
 
       <h3 style={h3Style}>Is there a free plan?</h3>

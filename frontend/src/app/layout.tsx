@@ -19,7 +19,7 @@ export const metadata: Metadata = {
   description:
     "API abuse detection and blocking for growing SaaS companies. No code changes. No proxy. Just connect your S3 logs.",
   metadataBase: new URL(
-    process.env.NEXT_PUBLIC_SITE_URL ?? "https://clewsec.com"
+    process.env.NEXT_PUBLIC_SITE_URL ?? "https://www.clewsec.com"
   ),
   openGraph: {
     type: "website",
@@ -27,7 +27,7 @@ export const metadata: Metadata = {
     title: "Clew Security: API Abuse Detection for SaaS",
     description:
       "Detect bots, credential stuffing, scrapers, and data exfiltration in your AWS API Gateway logs. No code changes. No proxy.",
-    url: process.env.NEXT_PUBLIC_SITE_URL ?? "https://clewsec.com",
+    url: process.env.NEXT_PUBLIC_SITE_URL ?? "https://www.clewsec.com",
     images: [
       {
         url: "/og-image.png",

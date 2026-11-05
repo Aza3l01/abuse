@@ -56,7 +56,7 @@ export function TrialBanner() {
           : `Growth trial: ${daysRemaining} day${daysRemaining === 1 ? "" : "s"} remaining.`}
       </span>
       <Link
-        href="/dashboard/settings#billing"
+        href="/settings#billing"
         style={{ color: "var(--color-text)", textDecoration: "underline", flexShrink: 0 }}
       >
         Add payment method →
