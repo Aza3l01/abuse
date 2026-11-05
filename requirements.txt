@@ -31,6 +31,8 @@ resend==2.49.0
 # Billing
 stripe==15.1.0
 razorpay==1.4.2
+# razorpay imports pkg_resources, which Python 3.12 venvs only get from setuptools
+setuptools<81
 
 # Rate limiting
 slowapi==0.1.9
