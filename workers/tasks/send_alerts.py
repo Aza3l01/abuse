@@ -211,11 +211,10 @@ def send_alert_email(self, verdict_id: str, org_id: str) -> dict:
     default_retry_delay=30,
 )
 def send_quota_warning_email(self, org_id: str, level: str) -> dict:
-    """Item 30 (section 5) soft-limit email: never pauses scanning, this is
-    a notice only. `level` is "warning" (80% of the tier's monthly call
-    volume) or "exceeded" (100%). Idempotency (one email per threshold per
-    billing month) is enforced by the caller (process_logs.py's
-    _check_quota_thresholds), not here.
+    """Monthly call-volume email. `level` is "warning" (80% of the tier's cap)
+    or "exceeded" (100%, scanning is paused until the monthly reset or an
+    upgrade). Idempotency (one email per threshold per billing month) is
+    enforced by the caller (process_logs.py's _check_quota_thresholds), not here.
     """
     db = SessionLocal()
     try:
@@ -230,15 +229,15 @@ def send_quota_warning_email(self, org_id: str, level: str) -> dict:
         used_display = f"{used:,}"
 
         if level == "exceeded":
-            subject = "You've reached your Clew monthly call volume"
-            heading = "Monthly call volume reached"
+            subject = "Clew has paused scanning: monthly call volume reached"
+            heading = "Scanning paused: monthly call volume reached"
             headline = f"Your organisation has processed {used_display} API calls this month, reaching {cap_display} call/month volume."
+            note = "Clew has paused scanning. Traffic after this point is not scanned, so new threats will not be detected until your monthly counter resets or you upgrade. Upgrading resumes scanning on the next poll."
         else:
             subject = "Approaching your Clew monthly call volume"
             heading = "Approaching your monthly call volume"
             headline = f"Your organisation has processed {used_display} API calls this month, over 80% of {cap_display} call/month volume."
-
-        note = "Clew keeps scanning your traffic regardless. Consider upgrading for a higher monthly volume."
+            note = "At 100% Clew pauses scanning until your monthly counter resets. Consider upgrading for a higher monthly volume."
         body_text = f"{headline}\n\n{note}\n{DASHBOARD_URL}/settings#billing"
         body_html = _email_html(
             heading=heading,

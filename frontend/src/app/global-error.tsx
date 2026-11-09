@@ -77,6 +77,9 @@ export default function GlobalError({
             >
               Try again
             </button>
+            {/* A full page load on purpose: the React tree has crashed, so
+                client-side routing is not trustworthy here. */}
+            {/* eslint-disable-next-line @next/next/no-html-link-for-pages */}
             <a
               href="/"
               style={{

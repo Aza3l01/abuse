@@ -49,9 +49,8 @@ except ImportError:
 
 # Module-level GeoIP reader (one open file handle per process)
 _geoip_reader: Optional[object] = None
-_MMDB_PATH = os.environ.get(
-    "GEOIP_MMDB_PATH",
-    os.path.join(os.path.dirname(__file__), "../../datasets/GeoLite2-City.mmdb"),
+_MMDB_PATH = os.environ.get("GEOIP_MMDB_PATH") or os.path.join(
+    os.path.dirname(__file__), "../../datasets/GeoLite2-City.mmdb"
 )
 
 # Per-process IP → country cache

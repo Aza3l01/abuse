@@ -1,17 +1,14 @@
 "use client";
 
 import { useTheme } from "next-themes";
-import { useEffect, useState } from "react";
 import Image from "next/image";
+import Link from "next/link";
 import { DASHBOARD_URL } from "@/lib/urls";
+import { useMounted } from "@/lib/useMounted";
 
 export function Navbar() {
   const { theme, setTheme } = useTheme();
-  const [mounted, setMounted] = useState(false);
-
-  useEffect(() => {
-    setMounted(true);
-  }, []);
+  const mounted = useMounted();
 
   // SVG is filled #f5f5f5 (light). Invert in light mode so it reads dark on light bg.
   const logoFilter = mounted && theme !== "dark" ? "invert(1)" : "none";
@@ -27,7 +24,7 @@ export function Navbar() {
         style={{ maxWidth: "1400px", margin: "0 auto", padding: "0 24px" }}
         className="h-14 flex items-center justify-between"
       >
-        <a href="/" aria-label="Clew home">
+        <Link href="/" aria-label="Clew home">
           <Image
             src="/clew-wordmark-dark.svg"
             alt="Clew"
@@ -36,7 +33,7 @@ export function Navbar() {
             priority
             style={{ filter: logoFilter, height: "20px", width: "auto" }}
           />
-        </a>
+        </Link>
 
         <div className="flex items-center gap-6">
           <a

@@ -1,31 +1,33 @@
-"""api/routes/billing.py: Stripe + Razorpay subscription management.
+"""api/routes/billing.py: Stripe + Razorpay billing routes.
 
-Stripe (USD, deferred to Month 2/3 per item 29, kept in place, untouched):
-  GET  /billing/status    → current tier and subscription metadata
+Stripe (USD, deferred, kept in place, untouched):
   POST /billing/checkout  → create Stripe Checkout Session, return redirect URL
   POST /billing/portal    → create Stripe Customer Portal Session, return redirect URL
   POST /billing/webhook   → Stripe signature-verified event handler (no auth cookie)
 
-Razorpay (INR, item 29, MVP scope, primary provider for now):
-  POST /billing/razorpay/create-subscription → create a Razorpay Subscription
-  POST /billing/razorpay/verify-payment      → verify checkout.js callback, activate tier
-  POST /billing/razorpay/webhook              → signature-verified event handler (no auth cookie)
+Razorpay (INR or USD, Orders API only, bill-then-pay; the rules live in
+api/billing_payments.py and api/billing_rules.py):
+  POST /billing/razorpay/create-order   → price a purchase server-side, create a Payment + order
+  POST /billing/razorpay/verify-payment → check the checkout.js signature, apply the captured payment
+  POST /billing/razorpay/webhook        → payment.captured / payment.failed / refund.processed
 
-Shared (item 29b):
+Owner-only plan management:
+  GET  /billing/status             → plan, currency, open bills, payment history, details, refund eligibility
+  GET  /billing/payments/{id}      → receipt data for one captured or refunded payment
+  POST /billing/quote              → the exact amount a purchase would charge, nothing is created
+  PUT  /billing/details            → billing legal name, address, GSTIN, billing country (set once)
+  GET/PUT /billing/notifications   → who receives billing emails, and whether routine reminders are on
+  POST /billing/schedule-downgrade → lower tier or annual to monthly, applied at the next bill
+  POST /billing/cancel             → cancel at the end of the paid period
+  POST /billing/undo-pending       → withdraw a scheduled cancel or downgrade
   POST /billing/refund-eligibility → {eligible, reason, window_expires_at}
-  POST /billing/cancel             → cancel, refunding only within the 72hr remorse window
+  POST /billing/refund             → full refund inside the 72 hour window
 
-Referrals (TODO.md priority item 5, api/referrals.py holds the discount math):
-  GET /billing/referral-status → this org's own code, live slot count, discount %
+Any member (viewers included):
+  GET  /billing/banner             → the small subset the dashboard banner needs
 
-Tier lifecycle (sole source of truth is this file + the two webhooks):
-  self-serve signup (no promo code)                 → tier = "free" (permanent, see item 53/section 4)
-  signup with a promo code                          → tier = "growth" (30-day trial, see item 53/section 4)
-  checkout.session.completed (Stripe)       → tier = <purchased tier>
-  razorpay verify-payment / subscription.activated → tier = <purchased tier>
-  customer.subscription.updated/deleted (non-active) → tier = "free"
-  razorpay subscription.cancelled                     → tier = "free"
-  invoice.payment_failed / payment.failed             → logged + emailed only
+Referrals (api/referrals.py; the discount is no longer applied to charges):
+  GET /billing/referral-status → this org's own code and live slot count
 """
 from __future__ import annotations
 
@@ -35,21 +37,37 @@ import json
 import logging
 import os
 import re
-from datetime import datetime, timedelta, timezone
+import uuid
+from datetime import datetime, timezone
+from typing import Literal
 
 import razorpay
 import stripe
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from api.auth_utils import send_payment_failed_email
+from api.billing_notify import notify
+from api.billing_payments import (
+    apply_captured_payment,
+    bill_summary,
+    lock_billing_currency,
+    min_order_minor,
+    on_paid_plan,
+    open_bills,
+    plan_for_order,
+    plan_label,
+    refund_window,
+    resolve_currency,
+)
+from api.billing_rules import PERIODS, classify_change, today_ist
 from api.deps import CurrentOrg, get_current_client, get_current_org, get_db, require_role
-from api.referrals import compute_referral_discount_pct, confirm_first_payment, referral_summary
-from api.tiers import MANUAL_BLOCK_TIERS
-from db.models import Client, Organization, OrganizationMember, ProcessedWebhookEvent
+from api.referrals import referral_summary
+from api.tiers import PURCHASABLE_PLANS, plan_price
+from db.models import Client, Organization, Payment, ProcessedWebhookEvent
 from db.session import SessionLocal
+from workers.tasks.billing_cycle import downgrade_org
 
 logger = logging.getLogger(__name__)
 
@@ -101,40 +119,172 @@ def _org_by_customer(customer_id: str, db: Session) -> Organization | None:
 
 
 # ---------------------------------------------------------------------------
-# GET /billing/status
+# GET /billing/status (owner only) and GET /billing/banner (any member)
 #
-# Billing is owner-only (item 8: admin has no billing tab).
+# Billing is owner-only (item 8: admin has no billing tab). The banner shows
+# the same states to every role, so its small subset sits on a route that only
+# needs a logged-in member, never on the owner-only one.
 # ---------------------------------------------------------------------------
+
+def _iso(moment: datetime | None) -> str | None:
+    return moment.isoformat() if moment else None
+
+
+class RefundEligibilityOut(BaseModel):
+    eligible: bool
+    reason: str  # remorse_window | already_refunded | not_eligible | no_payment
+    window_expires_at: str | None
+
 
 class BillingStatusOut(BaseModel):
     tier: str
+    billing_currency: str
+    billing_country: str | None
     stripe_customer_id: str | None
     stripe_subscription_id: str | None
-    razorpay_subscription_id: str | None
     tier_expires_at: str | None
     trial_source: str | None
     trial_ends_at: str | None
     billing_provider: str | None
     payment_method_display: str | None
     next_billing_date: str | None
+    # What the next bill will be, in minor units of billing_currency, from the
+    # plan that will be billed then (a scheduled downgrade counts). None when
+    # nothing will be billed: no paid plan, or a cancel is scheduled.
+    next_bill_amount_paise: int | None
+    next_bill_plan: str | None
+    billing_period: str | None
+    cancel_at_period_end: bool
+    pending_tier: str | None
+    pending_period: str | None
+    nonpayment_downgraded_at: str | None
+    retention_grace_until: str | None
+    open_bills: list[dict]
+    payments: list[dict]
+    billing_details: dict
+    refund: RefundEligibilityOut
+
+
+def _refund_out(org_id: str, db: Session) -> RefundEligibilityOut:
+    window = refund_window(org_id, db)
+    return RefundEligibilityOut(
+        eligible=window.eligible,
+        reason=window.reason,
+        window_expires_at=_iso(window.expires_at),
+    )
+
+
+def _payment_row(p: Payment) -> dict:
+    return {
+        "id": p.id,
+        "purpose": p.purpose,
+        "description": (p.line_items or {}).get("description"),
+        "amount_paise": p.amount_paise,
+        "currency": p.currency,
+        "status": p.status,
+        "created_at": _iso(p.created_at),
+        "captured_at": _iso(p.captured_at),
+        "refunded_at": _iso(p.refunded_at),
+    }
+
+
+def _billing_details(org: Organization) -> dict:
+    return {
+        "legal_name": org.billing_legal_name,
+        "address": org.billing_address,
+        "gstin": org.gstin,
+        "billing_country": org.billing_country,
+    }
+
+
+def _next_bill(org: Organization) -> tuple[int | None, str | None]:
+    """(amount in minor units, plan label) of the next bill, or (None, None)."""
+    if org.billing_provider == "stripe" or not on_paid_plan(org) or org.cancel_at_period_end:
+        return None, None
+    tier = org.pending_tier or org.tier
+    period = org.pending_period or org.billing_period
+    if (tier, period) not in PURCHASABLE_PLANS:
+        return None, None
+    return plan_price(org.billing_currency, tier, period), plan_label(tier, period)
 
 
 @router.get("/status", response_model=BillingStatusOut)
-def billing_status(current_org: CurrentOrg = Depends(require_role("owner"))):
+def billing_status(
+    current_org: CurrentOrg = Depends(require_role("owner")),
+    db: Session = Depends(get_db),
+):
     org = current_org.organization
+    payments = (
+        db.query(Payment)
+        .filter(Payment.org_id == org.id, Payment.status.in_(("captured", "refunded", "failed")))
+        .order_by(Payment.created_at.desc())
+        .limit(50)
+        .all()
+    )
+    next_amount, next_plan = _next_bill(org)
     return BillingStatusOut(
         tier=org.tier,
+        billing_currency=org.billing_currency,
+        billing_country=org.billing_country,
         stripe_customer_id=org.stripe_customer_id,
         stripe_subscription_id=org.stripe_subscription_id,
-        razorpay_subscription_id=org.razorpay_subscription_id,
-        tier_expires_at=(
-            org.tier_expires_at.isoformat() if org.tier_expires_at else None
-        ),
+        tier_expires_at=_iso(org.tier_expires_at),
         trial_source=org.trial_source,
-        trial_ends_at=org.trial_ends_at.isoformat() if org.trial_ends_at else None,
+        trial_ends_at=_iso(org.trial_ends_at),
         billing_provider=org.billing_provider,
         payment_method_display=org.payment_method_display,
-        next_billing_date=org.next_billing_date.isoformat() if org.next_billing_date else None,
+        next_billing_date=_iso(org.next_billing_date),
+        next_bill_amount_paise=next_amount,
+        next_bill_plan=next_plan,
+        billing_period=org.billing_period,
+        cancel_at_period_end=bool(org.cancel_at_period_end),
+        pending_tier=org.pending_tier,
+        pending_period=org.pending_period,
+        nonpayment_downgraded_at=_iso(org.nonpayment_downgraded_at),
+        retention_grace_until=_iso(org.retention_grace_until),
+        open_bills=[bill_summary(b) for b in open_bills(org.id, db)],
+        payments=[_payment_row(p) for p in payments],
+        billing_details=_billing_details(org),
+        refund=_refund_out(org.id, db),
+    )
+
+
+class BannerOut(BaseModel):
+    tier: str
+    role: str
+    billing_currency: str
+    billing_provider: str | None
+    billing_period: str | None
+    trial_ends_at: str | None
+    next_billing_date: str | None
+    cancel_at_period_end: bool
+    nonpayment_downgraded_at: str | None
+    retention_grace_until: str | None
+    # Today's date in IST, so the banner never decides "overdue" from the
+    # browser's clock or time zone (bills are due on IST calendar dates).
+    today_ist: str
+    open_bills: list[dict]
+
+
+@router.get("/banner", response_model=BannerOut)
+def billing_banner(
+    current_org: CurrentOrg = Depends(get_current_org),
+    db: Session = Depends(get_db),
+):
+    org = current_org.organization
+    return BannerOut(
+        tier=org.tier,
+        role=current_org.role,
+        billing_currency=org.billing_currency,
+        billing_provider=org.billing_provider,
+        billing_period=org.billing_period,
+        trial_ends_at=_iso(org.trial_ends_at),
+        next_billing_date=_iso(org.next_billing_date),
+        cancel_at_period_end=bool(org.cancel_at_period_end),
+        nonpayment_downgraded_at=_iso(org.nonpayment_downgraded_at),
+        retention_grace_until=_iso(org.retention_grace_until),
+        today_ist=today_ist().isoformat(),
+        open_bills=[bill_summary(b) for b in open_bills(org.id, db)],
     )
 
 
@@ -358,111 +508,12 @@ def _handle_event(event: dict, db: Session) -> None:
 # Razorpay init + shared helpers
 # ---------------------------------------------------------------------------
 
-_RAZORPAY_PLAN_ENV: dict[tuple[str, str], str] = {
-    ("starter", "monthly"): "RAZORPAY_PLAN_STARTER_MONTHLY_INR",
-    ("starter", "annual"):  "RAZORPAY_PLAN_STARTER_ANNUAL_INR",
-    ("growth",  "monthly"): "RAZORPAY_PLAN_GROWTH_MONTHLY_INR",
-    ("growth",  "annual"):  "RAZORPAY_PLAN_GROWTH_ANNUAL_INR",
-    ("pro",     "monthly"): "RAZORPAY_PLAN_PRO_MONTHLY_INR",
-    ("pro",     "annual"):  "RAZORPAY_PLAN_PRO_ANNUAL_INR",
-}
-
-# Upgrade/downgrade decision (item 29): no plan-change endpoint exists on
-# Razorpay subscriptions, so a tier change is always cancel-old + create-new.
-# "enterprise" (item 55) is contract-delivered, not reachable through this
-# self-serve create-subscription flow, but still needs a rank so it is never
-# misclassified as an upgrade relative to a lower self-serve tier.
-_TIER_RANK = {"free": 0, "starter": 1, "growth": 2, "pro": 3, "enterprise": 4}
-
-
 def _init_razorpay() -> "razorpay.Client":
     key_id = os.environ.get("RAZORPAY_KEY_ID", "")
     key_secret = os.environ.get("RAZORPAY_KEY_SECRET", "")
     if not (key_id and key_secret):
         raise HTTPException(503, "Razorpay is not configured on this server.")
     return razorpay.Client(auth=(key_id, key_secret))
-
-
-def _razorpay_plan_id(tier: str, period: str) -> str:
-    env_var = _RAZORPAY_PLAN_ENV.get((tier.lower(), period.lower()))
-    if not env_var:
-        raise HTTPException(400, f"Unknown tier/period combination: {tier}/{period}")
-    pid = os.environ.get(env_var, "")
-    if not pid:
-        raise HTTPException(503, f"Razorpay plan not configured ({env_var}).")
-    return pid
-
-
-def _org_by_razorpay_subscription(sub_id: str, db: Session) -> Organization | None:
-    return (
-        db.query(Organization)
-        .filter(Organization.razorpay_subscription_id == sub_id)
-        .first()
-    )
-
-
-def _owner_emails(db: Session, org_id: str) -> list[str]:
-    rows = (
-        db.query(Client.email)
-        .join(OrganizationMember, OrganizationMember.client_id == Client.id)
-        .filter(OrganizationMember.org_id == org_id, OrganizationMember.role == "owner")
-        .all()
-    )
-    return [r[0] for r in rows]
-
-
-def _first_of_next_month_ts(now: datetime) -> int:
-    """The 1st of next calendar month, 00:00 UTC, as a Unix timestamp."""
-    if now.month == 12:
-        next_month_start = now.replace(year=now.year + 1, month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
-    else:
-        next_month_start = now.replace(month=now.month + 1, day=1, hour=0, minute=0, second=0, microsecond=0)
-    return int(next_month_start.timestamp())
-
-
-def _next_calendar_anchor_start_at(now: datetime) -> int | None:
-    """Item 29b, generalised by item 53/section 4 to every tier change, not
-    just the first-ever subscription: added on/before the 15th, charge
-    immediately (None). Added after the 15th, defer to the 1st of next
-    calendar month, 00:00 UTC."""
-    if now.day <= 15:
-        return None
-    return _first_of_next_month_ts(now)
-
-
-def _plan_amount_paise(rp: "razorpay.Client", plan_id: str) -> int:
-    """Fetch a Razorpay Plan's per-cycle amount in paise."""
-    plan = rp.plan.fetch(plan_id)
-    return int((plan.get("item") or {}).get("amount", 0))
-
-
-def _discounted_plan_id(rp: "razorpay.Client", base_plan_id: str, discount_pct: float) -> str:
-    """TODO.md priority item 5: create a Razorpay Plan priced at a referral
-    discount off the given base plan, mirroring its period/interval/
-    currency/name. A pre-provisioned Razorpay Offer would need one created
-    per possible discount percentage; creating the discounted Plan object
-    here instead keeps the price correct even if the base plan's own amount
-    changes later, matching the "always a percentage against the current
-    price, never a stored amount" requirement. Not idempotent across calls
-    (no lookup-and-reuse of a previously created discounted plan), a small
-    amount of Plan-object sprawl in the Razorpay dashboard is an accepted
-    tradeoff given there is no live account to verify a reuse strategy
-    against yet.
-    """
-    base_plan = rp.plan.fetch(base_plan_id)
-    item = base_plan.get("item") or {}
-    discounted_amount = round(item.get("amount", 0) * (1 - discount_pct))
-    new_plan = rp.plan.create({
-        "period": base_plan.get("period"),
-        "interval": base_plan.get("interval"),
-        "item": {
-            "name": f"{item.get('name', 'Clew plan')} (referral discount)",
-            "amount": discounted_amount,
-            "currency": item.get("currency", "INR"),
-        },
-        "notes": {"clew_discount_pct": str(discount_pct), "clew_base_plan_id": base_plan_id},
-    })
-    return new_plan["id"]
 
 
 def _payment_method_display(payment: dict) -> str | None:
@@ -480,18 +531,8 @@ def _payment_method_display(payment: dict) -> str | None:
     return None
 
 
-def _refund_eligibility(org: Organization) -> tuple[bool, str, datetime | None]:
-    """Item 29b refund rules. Returns (eligible, reason, window_expires_at)."""
-    if org.first_charged_at is None:
-        return True, "pre_charge", None
-    window_expires_at = org.first_charged_at + timedelta(hours=72)
-    if datetime.now(timezone.utc) <= window_expires_at:
-        return True, "remorse_window", window_expires_at
-    return False, "not_eligible", None
-
-
 # ---------------------------------------------------------------------------
-# POST /billing/razorpay/create-subscription
+# POST /billing/razorpay/create-order
 # ---------------------------------------------------------------------------
 
 # Item 6e: two digits (state code), ten characters (PAN), one character
@@ -499,292 +540,192 @@ def _refund_eligibility(org: Organization) -> tuple[bool, str, datetime | None]:
 _GSTIN_RE = re.compile(r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$")
 
 
-class RazorpaySubscriptionBody(BaseModel):
-    tier: str      # "starter" | "growth" | "pro"
-    period: str    # "monthly" | "annual"
+class CreateOrderBody(BaseModel):
+    purpose: str  # initial | upgrade | bill | restore
+    tier: str | None = None
+    period: str | None = None
+    bill_id: str | None = None
+    accept_blocking_tos: bool = False
+    # Required for any annual purchase (initial, upgrade, restore): annual
+    # plans are non-refundable. Recorded on the Payment as evidence.
+    accept_annual_nonrefundable: bool = False
     gstin: str | None = None
+    # ISO 3166-1 alpha-2. Required until the org's billing country is set by
+    # its first checkout, then fixed (a different value is rejected).
+    billing_country: str | None = Field(default=None, max_length=2)
 
 
-class RazorpaySubscriptionOut(BaseModel):
-    subscription_id: str
+class CreateOrderOut(BaseModel):
+    order_id: str
+    amount: int  # minor units of `currency` (paise or cents)
+    currency: str
     key_id: str
-    # Item 53 (section 4): only set for a paid-to-paid upgrade on/before the
-    # 15th of the month, when a one-time Orders API charge for the price
-    # difference is needed alongside the subscription swap. The frontend
-    # must collect this payment (Razorpay Checkout in order mode) and post
-    # it to /billing/razorpay/verify-upgrade-order before finishing the
-    # subscription checkout below.
-    upgrade_order_id: str | None = None
-    upgrade_order_amount: int | None = None
+    payment_id: str
 
 
-@router.post("/razorpay/create-subscription", response_model=RazorpaySubscriptionOut)
-def razorpay_create_subscription(
-    body: RazorpaySubscriptionBody,
+def _clean_gstin(raw: str | None) -> str | None:
+    if not raw or not raw.strip():
+        return None
+    gstin = raw.strip().upper()
+    if not _GSTIN_RE.match(gstin):
+        raise HTTPException(400, "That doesn't look like a valid GSTIN. It should be 15 characters: state code, PAN, entity number, Z, and a checksum character.")
+    return gstin
+
+
+@router.post("/razorpay/create-order", response_model=CreateOrderOut)
+def razorpay_create_order(
+    body: CreateOrderBody,
     current_org: CurrentOrg = Depends(require_role("owner")),
     db: Session = Depends(get_db),
 ):
     org = current_org.organization
-    tier = body.tier.lower()
-    period = body.period.lower()
-    # Item 55: "enterprise" is contract-delivered, never self-serve checkout.
-    # Checked explicitly (not via _TIER_RANK membership) so adding enterprise
-    # to _TIER_RANK for billing-comparison purposes can't accidentally open
-    # this endpoint up to it.
-    if tier not in ("starter", "growth", "pro"):
-        raise HTTPException(400, f"Unknown tier: {body.tier}")
-    if period not in ("monthly", "annual"):
+    purpose = body.purpose.lower()
+    tier = body.tier.lower() if body.tier else None
+    period = body.period.lower() if body.period else None
+    if period is not None and period not in PERIODS:
         raise HTTPException(400, f"Unknown period: {body.period}")
+    gstin = _clean_gstin(body.gstin)
 
-    # Item 6e: validate before anything else needs Razorpay configured, so a
-    # malformed GSTIN always gets a clean 400 rather than a 503 from
-    # _init_razorpay() below on a server where Razorpay isn't set up yet.
-    if body.gstin:
-        gstin = body.gstin.strip().upper()
-        if not _GSTIN_RE.match(gstin):
-            raise HTTPException(400, "That doesn't look like a valid GSTIN. It should be 15 characters: state code, PAN, entity number, Z, and a checksum character.")
-        org.gstin = gstin
+    if period == "annual" and purpose != "bill" and not body.accept_annual_nonrefundable:
+        raise HTTPException(403, "Acknowledge that annual plans are non-refundable before continuing.")
 
-    # Item 28/69: any tier that can manually block requires the Blocking
-    # Subscription Agreement accepted first, the frontend shows the modal
-    # and posts acceptance before calling here.
-    if tier in MANUAL_BLOCK_TIERS and org.blocking_tos_accepted_at is None:
-        raise HTTPException(403, "Accept the Blocking Subscription Agreement before continuing.")
+    plan = plan_for_order(
+        org, purpose, tier, period, body.bill_id, body.accept_blocking_tos, db,
+        billing_country=body.billing_country,
+    )
+    key_id = os.environ.get("RAZORPAY_KEY_ID", "")
+
+    if plan.amount_paise < min_order_minor(plan.currency):
+        logger.error("billing: computed amount %s %s below the minimum for org %s", plan.amount_paise, plan.currency, org.id)
+        raise HTTPException(500, "Could not price this purchase.")
 
     rp = _init_razorpay()
-    plan_id = _razorpay_plan_id(tier, period)
-
-    # TODO.md priority item 5: recomputed fresh on every call, never cached
-    # or stored, so a slot that filled or freed since the last checkout is
-    # always reflected in the very next charge.
-    discount_pct = compute_referral_discount_pct(org, period, db)
-    if discount_pct > 0:
-        plan_id = _discounted_plan_id(rp, plan_id, discount_pct)
-
-    old_sub_id = org.razorpay_subscription_id
-    old_sub: dict = {}
-    if old_sub_id:
-        try:
-            old_sub = rp.subscription.fetch(old_sub_id)
-        except Exception:
-            logger.exception("billing: failed to fetch old Razorpay subscription %s", old_sub_id)
-            old_sub = {}
-
-    # Item 53 (section 4): no existing real Razorpay subscription (whether
-    # the org is on free or on a Growth-pilot trial with no real subscription
-    # of its own yet) always counts as an upgrade for anchor purposes, there
-    # is nothing to prorate against. Otherwise, a real tier-rank comparison.
-    is_upgrade = old_sub_id is None or _TIER_RANK.get(tier, 0) > _TIER_RANK.get(org.tier, 0)
-
-    start_at: int | None = None
-    upgrade_order: dict | None = None
-
-    if is_upgrade:
-        # Access always applies immediately once verify-payment runs below,
-        # regardless of the day of month. Only payment timing is affected by
-        # the anchor: reuses item 29b's exact day<=15-vs->15 mechanism now
-        # for every tier change, not only the first-ever subscription.
-        anchor_start_at = _next_calendar_anchor_start_at(datetime.now(timezone.utc))
-        if old_sub_id:
-            # New plan swaps in immediately, old one cancelled outright (no
-            # refund on the old cycle, matches today's behavior).
-            try:
-                rp.subscription.cancel(old_sub_id, {"cancel_at_cycle_end": 0})
-            except Exception:
-                logger.exception("billing: failed to cancel old Razorpay subscription %s", old_sub_id)
-
-        if anchor_start_at is None and old_sub_id:
-            # On/before the 15th, upgrading from an existing paid tier: charge
-            # only the price difference right now via a one-time Orders API
-            # charge, and defer the new subscription's own first invoice to
-            # the 1st of next month so the customer is never charged the new
-            # tier's full price twice inside one cycle.
-            try:
-                old_amount = _plan_amount_paise(rp, old_sub["plan_id"]) if old_sub.get("plan_id") else 0
-                new_amount = _plan_amount_paise(rp, plan_id)
-                delta = new_amount - old_amount
-                if delta > 0:
-                    order = rp.order.create({
-                        "amount": delta,
-                        "currency": "INR",
-                        "notes": {
-                            "clew_org_id": org.id,
-                            "kind": "tier_upgrade_delta",
-                            "from_tier": org.tier,
-                            "to_tier": tier,
-                        },
-                    })
-                    upgrade_order = {"id": order["id"], "amount": delta}
-            except Exception:
-                logger.exception("billing: failed to create upgrade delta order for org %s", org.id)
-            start_at = _first_of_next_month_ts(datetime.now(timezone.utc))
-        elif anchor_start_at is not None:
-            # After the 15th: no charge now, first real charge lands on the
-            # 1st of next month via the subscription itself, same as a
-            # brand-new subscriber gets today.
-            start_at = anchor_start_at
-        # else: anchor_start_at is None and old_sub_id is None, i.e. coming
-        # from free (or a pilot trial with no real subscription) with
-        # nothing to prorate against. start_at stays None: the new
-        # subscription's own first invoice already equals "the difference"
-        # (full new-tier price), same as today.
-    else:
-        # Downgrade: unchanged. Current tier's access continues to cycle
-        # end, then the lower tier's price applies from the next renewal.
-        if old_sub_id:
-            try:
-                rp.subscription.cancel(old_sub_id, {"cancel_at_cycle_end": 1})
-            except Exception:
-                logger.exception("billing: failed to schedule cancel on Razorpay subscription %s", old_sub_id)
-            start_at = old_sub.get("current_end")
-
-    sub_params: dict = {
-        "plan_id": plan_id,
-        "customer_notify": 1,
-        # Total billing cycles Razorpay will run before requiring renewal setup.
-        "total_count": 120 if period == "monthly" else 10,
-        "notes": {"clew_org_id": org.id, "tier": tier, "gstin": org.gstin or ""},
-    }
-    if start_at:
-        sub_params["start_at"] = start_at
-
+    payment_id = str(uuid.uuid4())
     try:
-        subscription = rp.subscription.create(sub_params)
+        order = rp.order.create({
+            "amount": plan.amount_paise,
+            "currency": plan.currency,
+            "receipt": payment_id,
+            "notes": {"org_id": org.id, "purpose": purpose, "payment_id": payment_id},
+        })
     except Exception:
-        logger.exception("billing: Razorpay subscription creation failed for org %s", org.id)
+        logger.exception("billing: Razorpay order creation failed for org %s", org.id)
         raise HTTPException(502, "Could not start Razorpay checkout. Please try again.")
 
-    org.razorpay_subscription_id = subscription["id"]
+    # The first checkout fixes the org's billing country and currency for good.
+    if plan.billing_country:
+        lock_billing_currency(org, plan.currency, plan.billing_country)
+
+    line_items = dict(plan.line_items)
+    if period == "annual" and purpose != "bill":
+        line_items["annual_nonrefundable_accepted"] = True
+
+    # The order id is required on the row, so the Payment is inserted right after the order exists.
+    db.add(Payment(
+        id=payment_id,
+        org_id=org.id,
+        org_name_snapshot=org.company_name,
+        razorpay_order_id=order["id"],
+        amount_paise=plan.amount_paise,
+        currency=plan.currency,
+        purpose=purpose,
+        status="created",
+        line_items=line_items,
+        tos_accepted=purpose != "bill" and (body.accept_blocking_tos or org.blocking_tos_accepted_at is not None),
+        gstin_snapshot=gstin or org.gstin,
+        legal_name_snapshot=org.billing_legal_name,
+        address_snapshot=org.billing_address,
+    ))
     db.commit()
 
-    return RazorpaySubscriptionOut(
-        subscription_id=subscription["id"],
-        key_id=os.environ.get("RAZORPAY_KEY_ID", ""),
-        upgrade_order_id=upgrade_order["id"] if upgrade_order else None,
-        upgrade_order_amount=upgrade_order["amount"] if upgrade_order else None,
+    return CreateOrderOut(
+        order_id=order["id"],
+        amount=plan.amount_paise,
+        currency=plan.currency,
+        key_id=key_id,
+        payment_id=payment_id,
     )
-
-
-# ---------------------------------------------------------------------------
-# POST /billing/razorpay/verify-upgrade-order (item 53/section 4)
-#
-# Verifies the one-time Orders API charge for an upgrade's price difference
-# (see razorpay_create_subscription's upgrade_order_id above). This does not
-# itself change org.tier: the subscription created alongside this order still
-# goes through the normal checkout + /billing/razorpay/verify-payment flow
-# right after, which is the single place tier changes are applied. This
-# endpoint only confirms the delta payment is genuine before the frontend
-# proceeds to that second checkout step.
-# ---------------------------------------------------------------------------
-
-class RazorpayVerifyOrderBody(BaseModel):
-    razorpay_order_id: str
-    razorpay_payment_id: str
-    razorpay_signature: str
-
-
-class VerifyOrderOut(BaseModel):
-    status: str
-
-
-@router.post("/razorpay/verify-upgrade-order", response_model=VerifyOrderOut)
-def razorpay_verify_upgrade_order(
-    body: RazorpayVerifyOrderBody,
-    current_org: CurrentOrg = Depends(require_role("owner")),
-):
-    key_secret = os.environ.get("RAZORPAY_KEY_SECRET", "")
-    if not key_secret:
-        raise HTTPException(503, "Razorpay is not configured on this server.")
-    payload = f"{body.razorpay_order_id}|{body.razorpay_payment_id}"
-    expected_signature = hmac.new(key_secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(expected_signature, body.razorpay_signature):
-        raise HTTPException(400, "Payment verification failed.")
-    return VerifyOrderOut(status="verified")
 
 
 # ---------------------------------------------------------------------------
 # POST /billing/razorpay/verify-payment
+#
+# HMAC-SHA256(key_secret, order_id + "|" + payment_id) must match the
+# signature from checkout.js. The payment is then fetched from Razorpay and
+# must be captured for exactly the stored amount before anything is applied.
 # ---------------------------------------------------------------------------
 
-class RazorpayVerifyBody(BaseModel):
-    tier: str
-    razorpay_payment_id: str
-    razorpay_subscription_id: str
-    razorpay_signature: str
+class VerifyPaymentBody(BaseModel):
+    razorpay_order_id: str | None = None
+    razorpay_payment_id: str | None = None
+    razorpay_signature: str | None = None
 
 
-@router.post("/razorpay/verify-payment", response_model=BillingStatusOut)
+class VerifyPaymentOut(BaseModel):
+    status: str  # captured
+    payment_id: str
+    applied: bool  # False when the webhook (or an earlier call) already applied it
+
+
+def _checkout_signature_ok(order_id: str, payment_id: str, signature: str) -> bool:
+    key_secret = os.environ.get("RAZORPAY_KEY_SECRET", "")
+    expected = hmac.new(key_secret.encode(), f"{order_id}|{payment_id}".encode(), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, signature)
+
+
+@router.post("/razorpay/verify-payment", response_model=VerifyPaymentOut)
 def razorpay_verify_payment(
-    body: RazorpayVerifyBody,
+    body: VerifyPaymentBody,
     current_org: CurrentOrg = Depends(require_role("owner")),
     db: Session = Depends(get_db),
 ):
     org = current_org.organization
-    if body.razorpay_subscription_id != org.razorpay_subscription_id:
-        raise HTTPException(400, "Subscription mismatch.")
-
-    key_secret = os.environ.get("RAZORPAY_KEY_SECRET", "")
-    if not key_secret:
+    if not (body.razorpay_order_id and body.razorpay_payment_id and body.razorpay_signature):
+        raise HTTPException(400, "Missing payment details.")
+    if not os.environ.get("RAZORPAY_KEY_SECRET"):
         raise HTTPException(503, "Razorpay is not configured on this server.")
-    payload = f"{body.razorpay_payment_id}|{body.razorpay_subscription_id}"
-    expected_signature = hmac.new(key_secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(expected_signature, body.razorpay_signature):
+    if not _checkout_signature_ok(body.razorpay_order_id, body.razorpay_payment_id, body.razorpay_signature):
         raise HTTPException(400, "Payment verification failed.")
 
+    payment = (
+        db.query(Payment)
+        .filter(Payment.razorpay_order_id == body.razorpay_order_id, Payment.org_id == org.id)
+        .first()
+    )
+    if payment is None:
+        raise HTTPException(404, "Unknown order.")
+    if payment.status in ("captured", "refunded"):
+        return VerifyPaymentOut(status="captured", payment_id=payment.id, applied=False)
+
     rp = _init_razorpay()
-    now = datetime.now(timezone.utc)
     try:
-        payment = rp.payment.fetch(body.razorpay_payment_id)
+        rz_payment = rp.payment.fetch(body.razorpay_payment_id)
     except Exception:
         logger.exception("billing: failed to fetch Razorpay payment %s", body.razorpay_payment_id)
-        payment = {}
-    try:
-        subscription = rp.subscription.fetch(body.razorpay_subscription_id)
-    except Exception:
-        logger.exception("billing: failed to fetch Razorpay subscription %s", body.razorpay_subscription_id)
-        raise HTTPException(502, "Could not verify subscription with Razorpay. Please retry shortly.")
+        raise HTTPException(502, "Could not verify the payment with Razorpay. Please retry shortly.")
 
-    notes_tier = (subscription.get("notes") or {}).get("tier")
-    if not notes_tier:
+    if rz_payment.get("order_id") != body.razorpay_order_id:
+        raise HTTPException(400, "Payment verification failed.")
+    if rz_payment.get("status") != "captured":
+        raise HTTPException(409, "The payment is not captured yet.")
+    if rz_payment.get("amount") != payment.amount_paise or rz_payment.get("currency") != payment.currency:
         logger.error(
-            "billing: Razorpay subscription %s has no tier in notes", body.razorpay_subscription_id
+            "billing: payment %s mismatch, stored %s %s, Razorpay %s %s",
+            payment.id, payment.amount_paise, payment.currency,
+            rz_payment.get("amount"), rz_payment.get("currency"),
         )
-        raise HTTPException(502, "Could not verify subscription with Razorpay. Please retry shortly.")
-    if notes_tier != body.tier.lower():
-        logger.warning(
-            "billing: verify-payment tier mismatch for org %s, body.tier=%s notes.tier=%s, using notes",
-            org.id, body.tier, notes_tier,
-        )
+        raise HTTPException(400, "Payment verification failed.")
+    _flag_international(payment, rz_payment)
 
-    org.tier = notes_tier
-    org.billing_provider = "razorpay"
-    org.payment_method_display = _payment_method_display(payment) or org.payment_method_display
-    if payment.get("customer_id"):
-        org.razorpay_customer_id = payment["customer_id"]
-    if org.first_charged_at is None:
-        org.first_charged_at = now
-        # TODO.md priority item 5: a referral only counts once the referred
-        # org's first invoice is genuinely paid, this is that moment, not
-        # registration. Sits right next to the first_charged_at guard so it
-        # only ever fires once per org, same as that field.
-        confirm_first_payment(org, db)
-    current_end = subscription.get("current_end")
-    if current_end:
-        org.next_billing_date = datetime.fromtimestamp(current_end, tz=timezone.utc)
-    db.commit()
-
-    return BillingStatusOut(
-        tier=org.tier,
-        stripe_customer_id=org.stripe_customer_id,
-        stripe_subscription_id=org.stripe_subscription_id,
-        razorpay_subscription_id=org.razorpay_subscription_id,
-        tier_expires_at=org.tier_expires_at.isoformat() if org.tier_expires_at else None,
-        trial_source=org.trial_source,
-        trial_ends_at=org.trial_ends_at.isoformat() if org.trial_ends_at else None,
-        billing_provider=org.billing_provider,
-        payment_method_display=org.payment_method_display,
-        next_billing_date=org.next_billing_date.isoformat() if org.next_billing_date else None,
+    applied = apply_captured_payment(
+        payment, db,
+        razorpay_payment_id=body.razorpay_payment_id,
+        method_display=_payment_method_display(rz_payment),
     )
+    db.commit()
+    if applied:
+        notify("payment_received", org, payment=payment)
+    return VerifyPaymentOut(status="captured", payment_id=payment.id, applied=applied)
 
 
 # ---------------------------------------------------------------------------
@@ -818,11 +759,18 @@ async def razorpay_webhook(request: Request):
         if not _record_webhook_event(db, "razorpay", event_id):
             logger.info("razorpay_webhook: duplicate event %s, skipping", event_id)
             return Response(status_code=200)
-        _handle_razorpay_event(event, db)
+        applied_payment_ids = _handle_razorpay_event(event, db)
         # Belt-and-suspenders: some event branches take no DB-writing action
         # of their own (no internal db.commit()), commit here too so the
         # processed-event row above is never silently rolled back on close.
         db.commit()
+        # Emails only after the commit, so they never describe a change that
+        # was rolled back.
+        for payment_id in applied_payment_ids:
+            payment = db.get(Payment, payment_id)
+            org = db.get(Organization, payment.org_id) if payment and payment.org_id else None
+            if payment is not None and org is not None:
+                notify("payment_received", org, payment=payment)
     except Exception:
         db.rollback()
         logger.exception("razorpay_webhook: error processing event %s", event.get("event"))
@@ -833,169 +781,436 @@ async def razorpay_webhook(request: Request):
     return Response(status_code=200)
 
 
-def _handle_razorpay_event(event: dict, db: Session) -> None:
+def _payment_for_order(order_id: str | None, db: Session) -> Payment | None:
+    if not order_id:
+        return None
+    return db.query(Payment).filter(Payment.razorpay_order_id == order_id).first()
+
+
+def _flag_international(payment: Payment, rz_payment: dict) -> None:
+    """An INR order paid with an international card is a possible sign of
+    someone claiming India to get the INR price. Logged for review only: a
+    real customer can have a foreign card, so nothing is blocked."""
+    if payment.currency == "INR" and rz_payment.get("international") is True:
+        logger.error(
+            "billing: INR payment %s for org %s was paid with an international card, review",
+            payment.id, payment.org_id,
+        )
+
+
+def _handle_razorpay_event(event: dict, db: Session) -> list[str]:
+    """Orders model: only payment.captured, payment.failed and refund.processed
+    matter. Every other event type is ignored. Nothing here commits, the
+    webhook route does. Returns the ids of payments this call newly applied,
+    so the route can send the payment emails after its commit."""
     etype = event.get("event", "")
     payload = event.get("payload", {})
     now = datetime.now(timezone.utc)
+    applied_ids: list[str] = []
 
-    if etype == "subscription.activated":
-        entity = (payload.get("subscription") or {}).get("entity", {})
-        sub_id = entity.get("id")
-        if not sub_id:
-            return
-        org = _org_by_razorpay_subscription(sub_id, db)
-        if not org:
-            logger.warning("billing: unknown Razorpay subscription %s from webhook", sub_id)
-            return
-        tier = (entity.get("notes") or {}).get("tier")
-        if tier:
-            org.tier = tier
-        org.billing_provider = "razorpay"
-        current_end = entity.get("current_end")
-        if current_end:
-            org.next_billing_date = datetime.fromtimestamp(current_end, tz=timezone.utc)
-        if org.first_charged_at is None:
-            org.first_charged_at = now
-            # TODO.md priority item 5: same hook as verify-payment, this is
-            # the authoritative reconciliation path for the same "first
-            # charge" moment, idempotent for the same reason.
-            confirm_first_payment(org, db)
-        db.commit()
-        logger.info("billing: org %s Razorpay subscription activated (tier=%s)", org.id, org.tier)
-
-    elif etype == "subscription.halted":
-        entity = (payload.get("subscription") or {}).get("entity", {})
-        sub_id = entity.get("id")
-        if not sub_id:
-            return
-        org = _org_by_razorpay_subscription(sub_id, db)
-        if not org:
-            return
-        logger.warning("billing: Razorpay subscription %s halted for org %s", sub_id, org.id)
-        for email in _owner_emails(db, org.id):
-            send_payment_failed_email(email)
-
-    elif etype == "subscription.cancelled":
-        entity = (payload.get("subscription") or {}).get("entity", {})
-        sub_id = entity.get("id")
-        if not sub_id:
-            return
-        org = _org_by_razorpay_subscription(sub_id, db)
-        if not org:
-            return
-        org.tier = "free"
-        org.razorpay_subscription_id = None
-        org.next_billing_date = None
-        db.commit()
-        logger.info("billing: org %s downgraded to free (Razorpay subscription cancelled)", org.id)
+    if etype == "payment.captured":
+        entity = (payload.get("payment") or {}).get("entity") or {}
+        payment = _payment_for_order(entity.get("order_id"), db)
+        if payment is None:
+            logger.warning("billing: payment.captured for unknown order %s", entity.get("order_id"))
+            return applied_ids
+        if entity.get("amount") != payment.amount_paise or entity.get("currency") != payment.currency:
+            logger.error(
+                "billing: payment.captured mismatch for payment %s, stored %s %s, Razorpay %s %s",
+                payment.id, payment.amount_paise, payment.currency,
+                entity.get("amount"), entity.get("currency"),
+            )
+            return applied_ids
+        _flag_international(payment, entity)
+        applied = apply_captured_payment(
+            payment, db,
+            razorpay_payment_id=entity.get("id"),
+            method_display=_payment_method_display(entity),
+            now=now,
+        )
+        if applied:
+            applied_ids.append(payment.id)
+        logger.info("billing: payment.captured for payment %s (applied=%s)", payment.id, applied)
 
     elif etype == "payment.failed":
-        entity = (payload.get("payment") or {}).get("entity", {})
-        sub_id = entity.get("subscription_id") if entity else None
-        if not sub_id:
-            return
-        org = _org_by_razorpay_subscription(sub_id, db)
-        if org:
-            logger.warning("billing: Razorpay payment failed for org %s", org.id)
-            for email in _owner_emails(db, org.id):
-                send_payment_failed_email(email)
+        # A failed attempt changes nothing on the org. The order stays usable,
+        # so a later successful attempt is still applied.
+        entity = (payload.get("payment") or {}).get("entity") or {}
+        payment = _payment_for_order(entity.get("order_id"), db)
+        if payment is not None and payment.status == "created":
+            payment.status = "failed"
+            logger.warning("billing: Razorpay payment failed for payment %s", payment.id)
+
+    elif etype == "refund.processed":
+        entity = (payload.get("refund") or {}).get("entity") or {}
+        rz_payment_id = entity.get("payment_id")
+        payment = (
+            db.query(Payment).filter(Payment.razorpay_payment_id == rz_payment_id).first()
+            if rz_payment_id else None
+        )
+        if payment is None:
+            logger.warning("billing: refund.processed for unknown payment %s", rz_payment_id)
+            return applied_ids
+        if entity.get("amount") is not None and entity["amount"] < payment.amount_paise:
+            logger.warning("billing: partial refund on payment %s ignored, needs manual handling", payment.id)
+            return applied_ids
+        if payment.status != "refunded":
+            payment.status = "refunded"
+        if payment.refunded_at is None:
+            payment.refunded_at = now
+
+    return applied_ids
 
 
 # ---------------------------------------------------------------------------
-# POST /billing/refund-eligibility, POST /billing/cancel   (item 29b)
+# POST /billing/refund-eligibility, POST /billing/refund
 # ---------------------------------------------------------------------------
-
-class RefundEligibilityOut(BaseModel):
-    eligible: bool
-    reason: str  # "pre_charge" | "remorse_window" | "not_eligible"
-    window_expires_at: str | None
-
 
 @router.post("/refund-eligibility", response_model=RefundEligibilityOut)
-def refund_eligibility(current_org: CurrentOrg = Depends(require_role("owner"))):
-    eligible, reason, window_expires_at = _refund_eligibility(current_org.organization)
-    return RefundEligibilityOut(
-        eligible=eligible,
-        reason=reason,
-        window_expires_at=window_expires_at.isoformat() if window_expires_at else None,
+def refund_eligibility(
+    current_org: CurrentOrg = Depends(require_role("owner")),
+    db: Session = Depends(get_db),
+):
+    return _refund_out(current_org.organization.id, db)
+
+
+class RefundOut(BaseModel):
+    status: str  # refunded
+    refunded_paise: int
+    failed_payments: int  # refunds Razorpay rejected, need manual dashboard action
+
+
+@router.post("/refund", response_model=RefundOut)
+def refund_first_payment(
+    current_org: CurrentOrg = Depends(require_role("owner")),
+    db: Session = Depends(get_db),
+):
+    """Full refund of every payment captured inside the 72 hour window after
+    the org's first payment, then the org drops to free. The refund is
+    finalised on the refund.processed webhook, which finds the payment already
+    marked refunded and does nothing."""
+    org = current_org.organization
+    window = refund_window(org.id, db)
+    if not window.eligible:
+        raise HTTPException(409, f"Not eligible for a refund ({window.reason}).")
+
+    # Lock the payment rows so a double click cannot refund twice.
+    ids = [p.id for p in window.payments]
+    locked = (
+        db.query(Payment)
+        .filter(Payment.id.in_(ids), Payment.status == "captured")
+        .populate_existing()
+        .with_for_update()
+        .all()
+    )
+    if not locked:
+        db.rollback()
+        raise HTTPException(409, "Not eligible for a refund (already_refunded).")
+
+    rp = _init_razorpay()
+    now = datetime.now(timezone.utc)
+    refunded = 0
+    failed = 0
+    for p in locked:
+        try:
+            rp.payment.refund(
+                p.razorpay_payment_id,
+                {"amount": p.amount_paise, "notes": {"payment_id": p.id, "reason": "remorse_window"}},
+            )
+        except Exception:
+            failed += 1
+            logger.exception("billing: refund failed for payment %s, needs manual dashboard action", p.id)
+            continue
+        p.status = "refunded"
+        p.refunded_at = now
+        refunded += p.amount_paise
+
+    if refunded == 0:
+        db.rollback()
+        raise HTTPException(502, "Razorpay could not process the refund. Please retry shortly.")
+
+    downgrade_org(org, db, "refund", now, amount_paise=refunded)
+    db.commit()
+    return RefundOut(status="refunded", refunded_paise=refunded, failed_payments=failed)
+
+
+# ---------------------------------------------------------------------------
+# POST /billing/cancel, POST /billing/schedule-downgrade
+#
+# Both only record intent. The daily billing cycle (workers/tasks/
+# billing_cycle.py) applies it at the next bill date. The latest request
+# wins: scheduling a downgrade withdraws a pending cancel and vice versa.
+# ---------------------------------------------------------------------------
+
+class PlanChangeOut(BaseModel):
+    status: str
+    cancel_at_period_end: bool
+    pending_tier: str | None
+    pending_period: str | None
+    next_billing_date: str | None
+
+
+def _plan_change_out(org: Organization, status: str) -> PlanChangeOut:
+    return PlanChangeOut(
+        status=status,
+        cancel_at_period_end=bool(org.cancel_at_period_end),
+        pending_tier=org.pending_tier,
+        pending_period=org.pending_period,
+        next_billing_date=_iso(org.next_billing_date),
     )
 
 
-class CancelOut(BaseModel):
-    status: str
-    refunded: bool
-    reason: str
+def _require_razorpay_paid_plan(org: Organization) -> None:
+    if org.billing_provider == "stripe":
+        raise HTTPException(409, "This account is billed through Stripe. Use the billing portal.")
+    if org.tier == "enterprise":
+        raise HTTPException(409, "Enterprise plans are managed by Clew. Contact support.")
+    if not on_paid_plan(org):
+        raise HTTPException(400, "There is no paid plan to change.")
 
 
-def _cancel_razorpay_subscription_core(org: Organization, db: Session, *, immediate: bool) -> CancelOut:
-    """Shared Razorpay cancel logic (item 29b), reused by both the self-serve
-    POST /billing/cancel route and account deletion (item 40, `immediate=True`).
-
-    `immediate=True` always cancels right away regardless of refund
-    eligibility, since a deleted account shouldn't keep being billed until a
-    cycle end its owner can no longer log in to see.
-    """
-    rp = _init_razorpay()
-    eligible, reason, _ = _refund_eligibility(org)
-    sub_id = org.razorpay_subscription_id
-    refunded = False
-
-    if reason == "pre_charge":
-        # Nothing has ever been charged: cancel outright, nothing to refund.
-        try:
-            rp.subscription.cancel(sub_id, {"cancel_at_cycle_end": 0})
-        except Exception:
-            logger.exception("billing: failed to cancel pre-charge Razorpay subscription %s", sub_id)
-        org.razorpay_subscription_id = None
-
-    elif reason == "remorse_window":
-        # Full refund on the first payment, one-time only (item 29b point 2).
-        try:
-            invoices = rp.invoice.all({"subscription_id": sub_id}).get("items", [])
-            paid = [inv for inv in invoices if inv.get("status") == "paid" and inv.get("payment_id")]
-            paid.sort(key=lambda inv: inv.get("paid_at") or 0, reverse=True)
-            if paid:
-                rp.payment.refund(paid[0]["payment_id"], {})
-                refunded = True
-            else:
-                logger.warning("billing: remorse-window cancel for org %s found no paid invoice to refund, refund needs manual dashboard action", org.id)
-        except Exception:
-            logger.exception("billing: refund failed for org %s, refund needs manual dashboard action", org.id)
-        try:
-            rp.subscription.cancel(sub_id, {"cancel_at_cycle_end": 0})
-        except Exception:
-            logger.exception("billing: failed to cancel Razorpay subscription %s", sub_id)
-        org.tier = "free"
-        org.razorpay_subscription_id = None
-        org.billing_provider = None
-        org.next_billing_date = None
-
-    else:
-        # Past the remorse window, or a later renewal: no refund. Self-serve
-        # cancel leaves access until the paid cycle ends; account deletion
-        # always cancels right away instead.
-        try:
-            rp.subscription.cancel(sub_id, {"cancel_at_cycle_end": 0 if immediate else 1})
-        except Exception:
-            logger.exception("billing: failed to cancel Razorpay subscription %s", sub_id)
-        if immediate:
-            org.razorpay_subscription_id = None
-
-    return CancelOut(status="cancelled", refunded=refunded, reason=reason)
-
-
-@router.post("/cancel", response_model=CancelOut)
+@router.post("/cancel", response_model=PlanChangeOut)
 def cancel_subscription(
     current_org: CurrentOrg = Depends(require_role("owner")),
     db: Session = Depends(get_db),
 ):
     org = current_org.organization
-    if not org.razorpay_subscription_id:
-        raise HTTPException(400, "No active subscription to cancel.")
-
-    result = _cancel_razorpay_subscription_core(org, db, immediate=False)
+    _require_razorpay_paid_plan(org)
+    org.cancel_at_period_end = True
+    org.pending_tier = None
+    org.pending_period = None
     db.commit()
-    return result
+    return _plan_change_out(org, "cancel_scheduled")
+
+
+class ScheduleDowngradeBody(BaseModel):
+    tier: str
+    period: str
+
+
+@router.post("/schedule-downgrade", response_model=PlanChangeOut)
+def schedule_downgrade(
+    body: ScheduleDowngradeBody,
+    current_org: CurrentOrg = Depends(require_role("owner")),
+    db: Session = Depends(get_db),
+):
+    org = current_org.organization
+    _require_razorpay_paid_plan(org)
+    tier, period = body.tier.lower(), body.period.lower()
+    kind = classify_change((org.tier, org.billing_period), (tier, period))
+    if kind != "downgrade":
+        raise HTTPException(400, f"That change is not a downgrade ({kind}).")
+    org.pending_tier = tier
+    org.pending_period = period
+    org.cancel_at_period_end = False
+    db.commit()
+    return _plan_change_out(org, "downgrade_scheduled")
+
+
+@router.post("/undo-pending", response_model=PlanChangeOut)
+def undo_pending_change(
+    current_org: CurrentOrg = Depends(require_role("owner")),
+    db: Session = Depends(get_db),
+):
+    """Withdraw a scheduled cancel or downgrade, so the plan simply carries on
+    and is billed as normal at the next bill date. Harmless when nothing is
+    scheduled."""
+    org = current_org.organization
+    _require_razorpay_paid_plan(org)
+    had_pending = bool(org.cancel_at_period_end or org.pending_tier or org.pending_period)
+    org.cancel_at_period_end = False
+    org.pending_tier = None
+    org.pending_period = None
+    db.commit()
+    return _plan_change_out(org, "pending_cleared" if had_pending else "nothing_pending")
+
+
+# ---------------------------------------------------------------------------
+# PUT /billing/details
+# ---------------------------------------------------------------------------
+
+class BillingDetailsBody(BaseModel):
+    legal_name: str | None = Field(default=None, max_length=255)
+    address: str | None = Field(default=None, max_length=1000)
+    gstin: str | None = Field(default=None, max_length=20)
+    # ISO 3166-1 alpha-2. Sets the billing country (and so the currency) once;
+    # afterwards only the same value is accepted.
+    billing_country: str | None = Field(default=None, max_length=2)
+
+
+@router.put("/details")
+def update_billing_details(
+    body: BillingDetailsBody,
+    current_org: CurrentOrg = Depends(require_role("owner")),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Only the fields present in the request change. An empty string clears a
+    field. Details are printed on later receipts, past receipts keep the values
+    snapshotted on their Payment. The billing country is the exception: it is
+    set once and then fixed, a different value is a 409 (a support action)."""
+    org = current_org.organization
+    sent = body.model_fields_set
+    gstin = _clean_gstin(body.gstin) if "gstin" in sent else None
+    if "billing_country" in sent and body.billing_country and body.billing_country.strip():
+        currency, country = resolve_currency(org, body.billing_country)
+        lock_billing_currency(org, currency, country)
+    if "legal_name" in sent:
+        org.billing_legal_name = (body.legal_name or "").strip() or None
+    if "address" in sent:
+        org.billing_address = (body.address or "").strip() or None
+    if "gstin" in sent:
+        org.gstin = gstin
+    db.commit()
+    return _billing_details(org)
+
+
+# ---------------------------------------------------------------------------
+# POST /billing/quote: the exact amount a purchase would charge
+#
+# Runs the same plan_for_order as create-order, so what the dialog shows is
+# what is charged. Creates nothing and locks nothing. The blocking agreement
+# is not required here (the user has not ticked it yet), create-order checks it.
+# ---------------------------------------------------------------------------
+
+class QuoteOut(BaseModel):
+    amount: int  # minor units of `currency`
+    currency: str
+    billing_country: str | None
+    description: str
+
+
+@router.post("/quote", response_model=QuoteOut)
+def billing_quote(
+    body: CreateOrderBody,
+    current_org: CurrentOrg = Depends(require_role("owner")),
+    db: Session = Depends(get_db),
+):
+    org = current_org.organization
+    purpose = body.purpose.lower()
+    tier = body.tier.lower() if body.tier else None
+    period = body.period.lower() if body.period else None
+    if period is not None and period not in PERIODS:
+        raise HTTPException(400, f"Unknown period: {body.period}")
+    plan = plan_for_order(
+        org, purpose, tier, period, body.bill_id, True, db,
+        billing_country=body.billing_country,
+    )
+    return QuoteOut(
+        amount=plan.amount_paise,
+        currency=plan.currency,
+        billing_country=plan.billing_country,
+        description=plan.line_items.get("description", ""),
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /billing/payments/{payment_id}: receipt data (owner only)
+#
+# A receipt, not a tax invoice. The customer details are the values snapshotted
+# on the Payment when it was made, never the org's current details.
+# ---------------------------------------------------------------------------
+
+class ReceiptOut(BaseModel):
+    id: str
+    razorpay_payment_id: str | None
+    status: str
+    purpose: str
+    currency: str
+    amount_paise: int
+    created_at: str | None
+    captured_at: str | None
+    refunded_at: str | None
+    lines: list[dict]
+    customer_name: str
+    customer_address: str | None
+    customer_gstin: str | None
+    customer_country: str | None
+
+
+def _receipt_lines(p: Payment) -> list[dict]:
+    items = p.line_items or {}
+    if p.purpose == "restore" and items.get("bills_paise") is not None:
+        bills_paise = items["bills_paise"]
+        count = len(items.get("bill_ids", []))
+        return [
+            {"description": f"Open bills ({count})", "amount_paise": bills_paise},
+            {
+                "description": f"{plan_label(items['tier'], items['period'])} (new period)",
+                "amount_paise": p.amount_paise - bills_paise,
+            },
+        ]
+    return [{"description": items.get("description") or "Clew", "amount_paise": p.amount_paise}]
+
+
+@router.get("/payments/{payment_id}", response_model=ReceiptOut)
+def billing_receipt(
+    payment_id: str,
+    current_org: CurrentOrg = Depends(require_role("owner")),
+    db: Session = Depends(get_db),
+):
+    org = current_org.organization
+    p = (
+        db.query(Payment)
+        .filter(
+            Payment.id == payment_id,
+            Payment.org_id == org.id,
+            Payment.status.in_(("captured", "refunded")),
+        )
+        .first()
+    )
+    if p is None:
+        raise HTTPException(404, "Receipt not found.")
+    return ReceiptOut(
+        id=p.id,
+        razorpay_payment_id=p.razorpay_payment_id,
+        status=p.status,
+        purpose=p.purpose,
+        currency=p.currency,
+        amount_paise=p.amount_paise,
+        created_at=_iso(p.created_at),
+        captured_at=_iso(p.captured_at),
+        refunded_at=_iso(p.refunded_at),
+        lines=_receipt_lines(p),
+        customer_name=p.legal_name_snapshot or p.org_name_snapshot,
+        customer_address=p.address_snapshot,
+        customer_gstin=p.gstin_snapshot,
+        customer_country=org.billing_country,
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET / PUT /billing/notifications: who gets billing emails (owner only)
+# ---------------------------------------------------------------------------
+
+class NotificationSettings(BaseModel):
+    mode: str  # owner | selected | all
+    reminders_enabled: bool
+
+
+class NotificationSettingsBody(BaseModel):
+    mode: Literal["owner", "selected", "all"]
+    reminders_enabled: bool
+
+
+@router.get("/notifications", response_model=NotificationSettings)
+def get_notification_settings(current_org: CurrentOrg = Depends(require_role("owner"))):
+    org = current_org.organization
+    return NotificationSettings(
+        mode=org.billing_emails_mode, reminders_enabled=bool(org.billing_reminders_enabled)
+    )
+
+
+@router.put("/notifications", response_model=NotificationSettings)
+def put_notification_settings(
+    body: NotificationSettingsBody,
+    current_org: CurrentOrg = Depends(require_role("owner")),
+    db: Session = Depends(get_db),
+):
+    org = current_org.organization
+    org.billing_emails_mode = body.mode
+    org.billing_reminders_enabled = body.reminders_enabled
+    db.commit()
+    return NotificationSettings(mode=org.billing_emails_mode, reminders_enabled=body.reminders_enabled)
 
 
 def _cancel_stripe_subscription_now(org: Organization) -> None:
@@ -1020,9 +1235,8 @@ def _cancel_stripe_subscription_now(org: Organization) -> None:
 def cancel_org_subscriptions_for_deletion(org: Organization, db: Session) -> None:
     """Item 40: cancel whatever active subscription an org has. Called
     directly by account deletion (api/routes/auth.py), not through the
-    authenticated HTTP routes above."""
-    if org.razorpay_subscription_id:
-        _cancel_razorpay_subscription_core(org, db, immediate=True)
+    authenticated HTTP routes above. Razorpay needs no cancel (there is no
+    subscription object), only Stripe does."""
     if org.stripe_subscription_id:
         _cancel_stripe_subscription_now(org)
 

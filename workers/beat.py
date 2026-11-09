@@ -48,4 +48,21 @@ celery_app.conf.beat_schedule = {
         "task":     "workers.tasks.purge_expired_data.purge_expired_data",
         "schedule": crontab(hour=4, minute=0),
     },
+    # Phase 3: daily bill engine. 19:00 UTC is 00:30 IST, just after the IST
+    # midnight the billing rules (the 1st, 17th, 20th) are evaluated at.
+    "billing-cycle-daily": {
+        "task":     "workers.tasks.billing_cycle.billing_cycle",
+        "schedule": crontab(hour=19, minute=0),
+    },
+    # Phase 6: daily business metrics snapshot, 30 minutes after billing_cycle.
+    "metrics-snapshot-daily": {
+        "task":     "workers.tasks.metrics_snapshot.metrics_snapshot",
+        "schedule": crontab(hour=19, minute=30),
+    },
+    # Phase 10: daily Razorpay vs local payments check, 19:45 UTC (01:15 IST).
+    # Reports differences to the ops panel, applies nothing.
+    "reconcile-payments-daily": {
+        "task":     "workers.tasks.reconcile_payments.reconcile_payments",
+        "schedule": crontab(hour=19, minute=45),
+    },
 }

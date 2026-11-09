@@ -8,30 +8,34 @@ export const metadata: Metadata = {
 
 export default function RefundPolicyPage() {
   return (
-    <LegalLayout title="Refund Policy" lastUpdated="October 1, 2026">
+    <LegalLayout title="Refund Policy" lastUpdated="November 9, 2026">
       <h2 style={legalH2Style}>1. Cancelling before your first charge</h2>
       <p style={legalPStyle}>
-        If you were onboarded with a promotional Growth trial, you can
-        cancel it at any time before it would convert to a paid subscription
-        at no cost: your account simply reverts to the free Starter plan.
-        No charge occurs, so there is nothing to refund.
+        A promotional Growth trial is free and is never charged
+        automatically. If you do not choose a paid plan, your account
+        simply reverts to the free Starter plan when the trial ends. No
+        charge occurs, so there is nothing to refund.
       </p>
 
       <h2 style={legalH2Style}>2. First payment (72-hour remorse window)</h2>
       <p style={legalPStyle}>
-        Within 72 hours of your first payment, you can request a full refund
-        for any reason. This is a one-time allowance: it applies only to the
-        first charge on an account and is not repeated on any later renewal.
+        You can request a full refund for any reason within 72 hours of the
+        first payment ever captured on your account. This is a one-time
+        allowance: it runs from that first payment only and is not repeated
+        on any later bill. Any other payment captured inside the same 72
+        hours (for example an upgrade) is refunded with it. A refund returns
+        the amount to the original payment method through Razorpay, and your
+        account moves to the free Starter plan.
       </p>
 
       <h2 style={legalH2Style}>3. Everything beyond that</h2>
       <p style={legalPStyle}>
         Outside the 72-hour window on your first payment, and for every
-        renewal charge from month two onward regardless of timing, charges
-        are non-refundable. This is the same policy most subscription
-        software uses: cancelling stops future billing only. Your access
-        continues until the end of the billing cycle you already paid for,
-        it does not end immediately.
+        later bill regardless of timing, charges are non-refundable.
+        Cancelling stops future billing only. Your access continues until
+        the end of the period you already paid for, it does not end
+        immediately. A bill you did not pay is not a charge, so there is
+        nothing to refund; it stays open and payable.
       </p>
 
       <h2 style={legalH2Style}>4. Annual billing</h2>
@@ -39,17 +43,25 @@ export default function RefundPolicyPage() {
         Annual plans are billed once, upfront, for the full year at a 50%
         discount against the monthly price. The 72-hour remorse window in
         Section 2 applies in exactly the same way to an annual charge as it
-        does to a monthly one: if your first payment on the account is an
+        does to a monthly one: if the first payment on the account is an
         annual charge, you can request a full refund within 72 hours of that
-        charge. Outside that window, an annual charge is non-refundable for
+        payment. Outside that window, an annual charge is non-refundable for
         the remainder of the year, including if you stop using the service or
-        cancel partway through, consistent with Section 3. Your access
-        continues for the full year you already paid for.
+        cancel partway through, consistent with Section 3. You acknowledge
+        this at checkout, and your access continues for the full year you
+        already paid for.
+      </p>
+      <p style={legalPStyle}>
+        If you upgrade to an annual plan, from monthly or from a lower annual
+        plan, the full annual price is charged, a new year starts on the day
+        you pay, and the time left on your previous plan is forfeited. It is
+        not credited and not refunded.
       </p>
 
-      <h2 style={legalH2Style}>5. How to cancel</h2>
+      <h2 style={legalH2Style}>5. How to cancel or request a refund</h2>
       <p style={legalPStyle}>
-        Cancel any time from your account settings, or by emailing{" "}
+        Account owners can cancel, and request a refund while the 72-hour
+        window is open, from Settings, or by emailing{" "}
         <a href="mailto:support@clewsec.com" style={{ color: "var(--color-text)" }}>support@clewsec.com</a>.
       </p>
 

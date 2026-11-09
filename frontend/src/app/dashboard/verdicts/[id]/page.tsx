@@ -6,6 +6,7 @@ import Link from "next/link";
 import { apiFetch } from "@/lib/api";
 import { SITE_URL } from "@/lib/urls";
 import { LoadingCursor } from "@/components/dashboard/LoadingCursor";
+import { AgentRadar } from "@/components/dashboard/charts/AgentRadar";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -109,7 +110,6 @@ export default function VerdictDetailPage() {
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
-    setLoading(true);
     apiFetch(`/verdicts/${id}`)
       .then(async r => {
         if (r.status === 404) {
@@ -133,9 +133,9 @@ export default function VerdictDetailPage() {
     try {
       const action = v.blocked ? "unblock" : "block";
       const r = await apiFetch(`/verdicts/${v.id}/${action}`, { method: "POST" });
-      if (r.status === 403) {
+      if (r.status === 400 || r.status === 403) {
         const d = await r.json().catch(() => ({}));
-        setBlockError(d?.detail ?? "Blocking is not available on your plan.");
+        setBlockError(typeof d?.detail === "string" ? d.detail : "Blocking is not available on your plan.");
         return;
       }
       if (!r.ok) {
@@ -257,7 +257,17 @@ export default function VerdictDetailPage() {
               How the agents work →
             </Link>
           </div>
-          <div style={{ border: "1px solid var(--color-border)", background: "var(--color-surface)" }}>
+          <div style={{ display: "flex", gap: "12px", flexWrap: "wrap", alignItems: "stretch" }}>
+          {v.agent_scores.length >= 3 && (
+            <div style={{ flex: "1 1 300px", border: "1px solid var(--color-border)", background: "var(--color-surface)", padding: "16px" }}>
+              <AgentRadar axes={v.agent_scores.map(a => ({
+                name: a.agent_name.replace(/Agent$/, ""),
+                score: a.score,
+                triggered: a.triggered,
+              }))} />
+            </div>
+          )}
+          <div style={{ flex: "1 1 300px", border: "1px solid var(--color-border)", background: "var(--color-surface)" }}>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
               <thead>
                 <tr>
@@ -282,6 +292,7 @@ export default function VerdictDetailPage() {
                 ))}
               </tbody>
             </table>
+          </div>
           </div>
         </div>
       )}

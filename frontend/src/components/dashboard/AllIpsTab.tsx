@@ -4,6 +4,8 @@ import { useEffect, useState, useCallback } from "react";
 import Link from "next/link";
 import { apiFetch } from "@/lib/api";
 import { LoadingCursor } from "@/components/dashboard/LoadingCursor";
+import { Donut } from "@/components/dashboard/charts/Donut";
+import { RiskScatter } from "@/components/dashboard/charts/Scatter";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -104,13 +106,12 @@ export function AllIpsTab() {
   const [order,   setOrder]   = useState<"asc" | "desc">("desc");
   const [country, setCountry] = useState("");
   const [data,    setData]    = useState<IpList | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loadedKey, setLoadedKey] = useState<string | null>(null);
   const [error,   setError]   = useState<string | null>(null);
+  const queryKey = `${page}|${sort}|${order}|${country}`;
+  const loading = loadedKey !== queryKey;
 
   const load = useCallback(() => {
-    setLoading(true);
-    setError(null);
-
     const qs = new URLSearchParams({ page: String(page), limit: String(LIMIT), sort, order });
     if (country) qs.set("country", country);
 
@@ -119,10 +120,10 @@ export function AllIpsTab() {
         if (!r.ok) throw new Error("API error");
         return r.json();
       })
-      .then(d => { if (d) setData(d); })
+      .then(d => { setError(null); if (d) setData(d); })
       .catch(() => setError("Failed to load IP data."))
-      .finally(() => setLoading(false));
-  }, [page, sort, order, country]);
+      .finally(() => setLoadedKey(queryKey));
+  }, [queryKey, page, sort, order, country]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -137,6 +138,8 @@ export function AllIpsTab() {
   }
 
   const totalPages = data ? Math.ceil(data.total / LIMIT) : 0;
+  const chartRows = !loading && !error && data ? data.items : [];
+  const blockedOnPage = chartRows.filter(r => r.waf_blocked || r.cloudflare_blocked).length;
 
   return (
     <div>
@@ -167,6 +170,42 @@ export function AllIpsTab() {
           </span>
         )}
       </div>
+
+      {/* Charts cover only the rows on the current page, and say so. */}
+      {chartRows.length > 0 && (
+        <div style={{ display: "flex", gap: "12px", marginBottom: "20px", flexWrap: "wrap" }}>
+          <div style={{ flex: "2 1 320px", minWidth: "280px", border: "1px solid var(--color-border)", background: "var(--color-surface)", padding: "20px" }}>
+            <p style={{ fontSize: "11px", textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--color-text-muted)", marginBottom: "16px" }}>
+              Risk vs requests, IPs on this page
+            </p>
+            <RiskScatter
+              xLabel="Requests"
+              xScaleType="symlog"
+              caption="Hover a mark for the IP. Mark size is the threat count."
+              points={chartRows.map(r => ({
+                id: r.id,
+                label: r.ip,
+                x: r.total_requests,
+                y: r.risk_score,
+                size: r.threat_count,
+                severity: r.highest_severity,
+              }))}
+            />
+          </div>
+          <div style={{ flex: "1 1 260px", minWidth: "240px", border: "1px solid var(--color-border)", background: "var(--color-surface)", padding: "20px" }}>
+            <p style={{ fontSize: "11px", textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--color-text-muted)", marginBottom: "16px" }}>
+              Blocked, IPs on this page
+            </p>
+            <Donut
+              centerLabel="IPs"
+              slices={[
+                { key: "blocked", label: "Blocked", value: blockedOnPage, color: "var(--color-low)" },
+                { key: "open", label: "Not blocked", value: chartRows.length - blockedOnPage, color: "var(--color-text-muted)" },
+              ]}
+            />
+          </div>
+        </div>
+      )}
 
       {/* Table */}
       <div style={{ border: "1px solid var(--color-border)", background: "var(--color-surface)", overflowX: "auto" }}>

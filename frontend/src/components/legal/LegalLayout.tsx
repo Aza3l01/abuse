@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import Link from "next/link";
 import { Navbar } from "@/components/layout/Navbar";
 import { Footer } from "@/components/layout/Footer";
 
@@ -112,6 +113,12 @@ export function LegalLayout({ title, lastUpdated, children }: LegalLayoutProps) 
           )}
 
           <article style={{ maxWidth: "720px", flex: 1, minWidth: 0 }}>
+            <Link
+              href="/legal"
+              style={{ display: "inline-block", fontSize: "13px", color: "var(--color-text-muted)", textDecoration: "none", marginBottom: "16px" }}
+            >
+              &larr; All legal documents
+            </Link>
             <h1
               style={{
                 fontFamily: "var(--font-brand)",

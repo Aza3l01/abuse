@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { headers } from "next/headers";
 import { GeistSans } from "geist/font/sans";
 import { GeistMono } from "geist/font/mono";
 import { Courier_Prime } from "next/font/google";
@@ -39,11 +40,16 @@ export const metadata: Metadata = {
   },
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
+  // The Content Security Policy carries a per-request nonce (src/proxy.ts), and
+  // Next.js can only stamp it on scripts when the page renders per request.
+  // Reading the header also opts the route into dynamic rendering. The nonce
+  // goes to the theme bootstrap script, the one inline script we own.
+  const nonce = (await headers()).get("x-nonce") ?? undefined;
   return (
     <html
       lang="en"
@@ -51,7 +57,7 @@ export default function RootLayout({
       className={`${GeistSans.variable} ${GeistMono.variable} ${courierPrime.variable}`}
     >
       <body>
-        <ThemeProvider>{children}</ThemeProvider>
+        <ThemeProvider nonce={nonce}>{children}</ThemeProvider>
       </body>
     </html>
   );

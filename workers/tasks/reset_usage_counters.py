@@ -3,7 +3,7 @@ workers/tasks/reset_usage_counters.py: item 30 (section 5) monthly counter
 reset.
 
 Runs on the 1st of each month at 00:00 UTC. Zeroes every org's
-monthly_requests_processed and clears the quota_warning_sent_at /
+monthly_requests_processed and monthly_llm_calls and clears the quota_warning_sent_at / 
 quota_exceeded_sent_at idempotency flags, so a new billing month starts
 clean and can re-trigger the 80%/100% soft-limit emails if the org crosses
 them again.
@@ -36,6 +36,7 @@ def reset_monthly_counters() -> dict:
             .update(
                 {
                     Organization.monthly_requests_processed: 0,
+                    Organization.monthly_llm_calls: 0,
                     Organization.monthly_requests_reset_at: now,
                     Organization.quota_warning_sent_at: None,
                     Organization.quota_exceeded_sent_at: None,

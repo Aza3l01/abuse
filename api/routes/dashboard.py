@@ -58,6 +58,7 @@ class TopIp(BaseModel):
 
 class DashboardSummary(BaseModel):
     period_days:      int
+    tier:             str
     total_threats:    int
     new_threats_today: int
     by_severity:      dict[str, int]
@@ -246,6 +247,7 @@ def get_summary(
     org = current_org.organization
     return DashboardSummary(
         period_days=days,
+        tier=org.tier,
         total_threats=total_threats,
         new_threats_today=new_today,
         by_severity=by_severity,

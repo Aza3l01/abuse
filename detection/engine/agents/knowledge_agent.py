@@ -63,10 +63,13 @@ class KnowledgeAgent:
     # Confidence decay per batch (older history matters less)
     _CONFIDENCE_DECAY = 0.95
 
-    def __init__(self, memory: SharedMemory):
+    def __init__(self, memory: SharedMemory, intel_client: Optional[Any] = None):
         self.memory = memory
         self._lock = threading.Lock()
         self._started = False
+        # Optional live reputation client (engine.intel.abuseipdb). None means
+        # the static seed file is the only source, as in the offline eval.
+        self._intel = intel_client
 
     # ── Public boot ────────────────────────────────────────────────────────
 
@@ -95,13 +98,19 @@ class KnowledgeAgent:
         """
         history = self._get_ip_history(ip)
         known_bad = self._is_known_bad(ip)
-        prior_conf = self._compute_prior_confidence(ip, history)
+        live_bad = False
+        if not known_bad and self._intel is not None:
+            live_bad = bool(self._intel.is_known_bad(ip))
+            known_bad = live_bad
+        prior_conf = self._compute_prior_confidence(ip, history, known_bad)
 
         owasp_context = None
         if endpoint:
             owasp_context = self._match_owasp(endpoint)
 
         summary = self._summarise_history(ip, history, known_bad)
+        if live_bad:
+            summary = summary.replace("IP is in known-bad seed list.", "IP is flagged by AbuseIPDB.")
 
         return {
             "known_bad": known_bad,
@@ -181,9 +190,13 @@ class KnowledgeAgent:
             self.memory.ltm._knowledge_ip_history: Dict[str, List] = {}
         self.memory.ltm._knowledge_ip_history[ip] = history
 
-    def _compute_prior_confidence(self, ip: str, history: List[Dict]) -> float:
+    def _compute_prior_confidence(
+        self, ip: str, history: List[Dict], known_bad: Optional[bool] = None
+    ) -> float:
+        if known_bad is None:
+            known_bad = self._is_known_bad(ip)
         if not history:
-            return 0.85 if self._is_known_bad(ip) else 0.0
+            return 0.85 if known_bad else 0.0
         # Decay-weighted average of past attack confidences
         total_weight = 0.0
         weighted_conf = 0.0
@@ -235,11 +248,10 @@ class KnowledgeAgent:
             except Exception as exc:
                 logger.warning("[KnowledgeAgent] Failed to load cache: %s", exc)
 
-        # Optional: AbuseIPDB / GreyNoise enrichment (env-gated)
-        abuseipdb_key = os.environ.get("ABUSEIPDB_API_KEY")
-        if abuseipdb_key:
-            # Stub — wire in actual HTTP call when live API key is available
-            logger.info("[KnowledgeAgent] AbuseIPDB key found — live enrichment stub (not yet wired)")
+        # Optional live AbuseIPDB enrichment: done per queried IP in query(),
+        # not here, so warm-up stays offline and fast.
+        if self._intel is not None:
+            logger.info("[KnowledgeAgent] Live AbuseIPDB lookups enabled")
 
         # Persist to LTM
         self.memory.ltm._knowledge_known_bad = known_bad

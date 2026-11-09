@@ -66,20 +66,17 @@ class BaseAgent(ABC):
     Abstract base. Subclasses implement the six OODA methods.
     The run() method drives the loop with a configurable max_iterations guard.
 
-    Optional LLM integration:
-      Pass an LLMClient instance as `llm_client`. After the rule-based OODA loop
-      completes, the LLM is called once with all gathered metrics + tool evidence
-      and its verdict overrides the rule-based finding. The rule-based result is
-      included in the prompt as a calibration hint.
+    Agents are rule-only. The LLM never sees or alters an agent's finding
+    (Phase 2 guardrail); it is used only by MetaAgentOrchestrator, and only to
+    write the explanation text of an already-decided attack verdict.
     """
 
     MAX_ITERATIONS: int = 3
 
-    def __init__(self, memory: SharedMemory, tools: ToolRegistry, llm_client=None):
+    def __init__(self, memory: SharedMemory, tools: ToolRegistry):
         self.memory = memory
         self.tools = tools
         self.name = self.__class__.__name__
-        self._llm = llm_client   # Optional[LLMClient]
 
     # ── Public entry point ─────────────────────────────────────────────────
 
@@ -123,10 +120,6 @@ class BaseAgent(ABC):
 
         # ⑥ CONCLUDE
         finding = self.conclude(ctx)
-
-        # ⑦ LLM OVERRIDE (if client is wired in)
-        if self._llm is not None:
-            finding = self._llm_conclude(ctx, finding)
 
         logger.debug("[%s] finding=%s conf=%.2f", self.name, finding.threat_type, finding.confidence_score)
         return finding
@@ -192,62 +185,3 @@ class BaseAgent(ABC):
             tags=tags or [],
         )
 
-    # ── LLM override ──────────────────────────────────────────────────────
-
-    def _llm_conclude(self, ctx: AgentContext, rule_finding: AgentFinding) -> AgentFinding:
-        """
-        Call the LLM with all gathered evidence and return an LLM-driven finding.
-        Falls back to rule_finding on any LLM error.
-        """
-        from engine.llm.prompts import AGENT_SYSTEM_PROMPTS, build_agent_user_prompt
-        from engine.llm.client import LLMError
-
-        system = AGENT_SYSTEM_PROMPTS.get(self.name)
-        if system is None:
-            logger.warning("[%s] No LLM system prompt registered — using rule-based verdict", self.name)
-            return rule_finding
-
-        user = build_agent_user_prompt(
-            agent_name=self.name,
-            raw_metrics=ctx.raw_metrics,
-            indicators=ctx.indicators,
-            rule_verdict=rule_finding.threat_detected,
-            rule_confidence=rule_finding.confidence_score,
-            reasoning_trace=ctx.reasoning_trace,
-        )
-
-        try:
-            result = self._llm.reason(system, user)
-        except LLMError as exc:
-            logger.warning("[%s] org=%s LLM call failed: %s, falling back to rule-based", self.name, self.memory.tenant_key, exc)
-            return rule_finding
-
-        # Parse and validate LLM output
-        is_attack   = bool(result.get("is_attack", rule_finding.threat_detected))
-        raw_threat  = str(result.get("threat_type", rule_finding.threat_type.value))
-        confidence  = float(result.get("confidence", rule_finding.confidence_score))
-        reasoning   = str(result.get("reasoning", ""))
-
-        try:
-            threat_type = ThreatType(raw_threat)
-        except ValueError:
-            threat_type = rule_finding.threat_type
-            logger.warning("[%s] LLM returned unknown threat_type '%s'", self.name, raw_threat)
-
-        # Clamp confidence
-        confidence = max(0.0, min(1.0, confidence))
-
-        # Append LLM reasoning to trace
-        ctx.reasoning_trace.append(f"[LLM] {reasoning}")
-
-        logger.debug(
-            "[%s] LLM verdict: is_attack=%s threat=%s conf=%.2f (rule was: %s %.2f)",
-            self.name, is_attack, threat_type, confidence,
-            rule_finding.threat_detected, rule_finding.confidence_score,
-        )
-
-        # Build updated AgentContext for _make_finding
-        ctx.confidence_score = confidence
-        ctx.threat_type = threat_type if is_attack else ThreatType.NONE
-
-        return self._make_finding(ctx, is_attack)

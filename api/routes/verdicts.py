@@ -6,6 +6,7 @@ Routes
 GET  /verdicts             : paginated list, filterable by severity / threat_type /
                             date range / IP, scoped to the current client
 GET  /verdicts/threat-types : distinct threat_type values seen by this org (item 18's filter dropdown)
+GET  /verdicts/would-have-blocked : Phase 8 dry-run list
 GET  /verdicts/{id}        : single verdict detail, enriched with ip_memory context (item 19)
 POST /verdicts/manual-block : item 21, block an IP with no existing verdict
 """
@@ -24,6 +25,16 @@ from api.tiers import MANUAL_BLOCK_TIERS
 from db.models import IpMemory, Verdict
 
 router = APIRouter()
+
+_NO_INTEGRATION_DETAIL = (
+    "No blocking integration is set up. Connect AWS WAF or Cloudflare in Settings before blocking IPs."
+)
+
+
+def _has_block_integration(org) -> bool:
+    """True when push_block has at least one place to push a block to: a WAF
+    IP set, or a complete Cloudflare zone + token pair."""
+    return bool(org.waf_ip_set_id) or bool(org.cloudflare_zone_id and org.cloudflare_token)
 
 _SEVERITY_ORDER = case(
     (Verdict.severity == "critical", 0),
@@ -52,6 +63,9 @@ class VerdictOut(BaseModel):
     blocked:          bool
     cost_prevented:   Optional[float]
     created_at:       datetime
+    # Phase 8 dry-run: set when automatic blocking would have blocked this
+    # verdict's IP but dry-run mode was on, so nothing was pushed.
+    would_have_blocked_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
@@ -203,9 +217,27 @@ def list_threat_types(
     return sorted(r[0] for r in rows if r[0])
 
 
+@router.get("/verdicts/would-have-blocked", response_model=list[VerdictOut])
+def list_would_have_blocked(
+    limit:       int = Query(50, ge=1, le=100),
+    db:          Session    = Depends(get_db),
+    current_org: CurrentOrg = Depends(get_current_org),
+):
+    """Phase 8 dry-run: the most recent verdicts automatic blocking would have
+    blocked but did not because dry-run mode was on. Declared before
+    /verdicts/{verdict_id} so the path is not parsed as a verdict id."""
+    return (
+        db.query(Verdict)
+        .filter(Verdict.org_id == current_org.id, Verdict.would_have_blocked_at.isnot(None))
+        .order_by(Verdict.would_have_blocked_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+
 @router.get("/verdicts/{verdict_id}", response_model=VerdictDetailOut)
 def get_verdict(
-    verdict_id:  str,
+    verdict_id:  uuid.UUID,
     db:          Session    = Depends(get_db),
     current_org: CurrentOrg = Depends(get_current_org),
 ):
@@ -213,7 +245,7 @@ def get_verdict(
     with ip_memory context for item 19's detail page."""
     v = (
         db.query(Verdict)
-        .filter(Verdict.id == verdict_id, Verdict.org_id == current_org.id)
+        .filter(Verdict.id == str(verdict_id), Verdict.org_id == current_org.id)
         .first()
     )
     if v is None:
@@ -257,6 +289,8 @@ def manual_block_ip(
         raise HTTPException(status_code=403, detail="Blocking requires an active paid plan.")
     if current_org.organization.blocking_tos_accepted_at is None:
         raise HTTPException(status_code=403, detail="Accept the Blocking Subscription Agreement before blocking IPs.")
+    if not _has_block_integration(current_org.organization):
+        raise HTTPException(status_code=400, detail=_NO_INTEGRATION_DETAIL)
 
     ip_str = str(body.ip)
 
@@ -304,14 +338,14 @@ def manual_block_ip(
 
 @router.post("/verdicts/{verdict_id}/block", response_model=VerdictOut)
 def manual_block(
-    verdict_id:  str,
+    verdict_id:  uuid.UUID,
     db:          Session    = Depends(get_db),
     current_org: CurrentOrg = Depends(require_role("owner", "admin")),
 ):
     """Manually trigger a block for this verdict's IP."""
     v = (
         db.query(Verdict)
-        .filter(Verdict.id == verdict_id, Verdict.org_id == current_org.id)
+        .filter(Verdict.id == str(verdict_id), Verdict.org_id == current_org.id)
         .first()
     )
     if v is None:
@@ -320,21 +354,23 @@ def manual_block(
         raise HTTPException(status_code=403, detail="Blocking requires an active paid plan.")
     if current_org.organization.blocking_tos_accepted_at is None:
         raise HTTPException(status_code=403, detail="Accept the Blocking Subscription Agreement before blocking IPs.")
+    if not _has_block_integration(current_org.organization):
+        raise HTTPException(status_code=400, detail=_NO_INTEGRATION_DETAIL)
     from workers.tasks.push_blocks import push_block
-    push_block.delay(verdict_id, current_org.id)
+    push_block.delay(str(verdict_id), current_org.id)
     return v
 
 
 @router.post("/verdicts/{verdict_id}/unblock", response_model=VerdictOut)
 def manual_unblock(
-    verdict_id:  str,
+    verdict_id:  uuid.UUID,
     db:          Session    = Depends(get_db),
     current_org: CurrentOrg = Depends(require_role("owner", "admin")),
 ):
     """Manually remove the block for this verdict's IP."""
     v = (
         db.query(Verdict)
-        .filter(Verdict.id == verdict_id, Verdict.org_id == current_org.id)
+        .filter(Verdict.id == str(verdict_id), Verdict.org_id == current_org.id)
         .first()
     )
     if v is None:
@@ -342,5 +378,5 @@ def manual_unblock(
     # Item 55: unblocking is not tier-gated. An org that has since downgraded
     # must still be able to remove blocks it created while on a higher tier.
     from workers.tasks.push_blocks import push_unblock
-    push_unblock.delay(verdict_id, current_org.id)
+    push_unblock.delay(str(verdict_id), current_org.id)
     return v

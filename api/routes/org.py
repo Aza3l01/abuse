@@ -20,6 +20,7 @@ POST   /org/invite/{token}/accept    — public: accept an invite
 """
 import os
 import secrets
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal, Optional
@@ -52,9 +53,8 @@ try:
 except ImportError:
     _MAXMIND_AVAILABLE = False
 
-_GEOIP_CITY_PATH = os.environ.get(
-    "GEOIP_MMDB_PATH",
-    str(Path(__file__).resolve().parent.parent.parent / "detection" / "datasets" / "GeoLite2-City.mmdb"),
+_GEOIP_CITY_PATH = os.environ.get("GEOIP_MMDB_PATH") or str(
+    Path(__file__).resolve().parent.parent.parent / "detection" / "datasets" / "GeoLite2-City.mmdb"
 )
 _geoip_reader = None
 
@@ -182,7 +182,7 @@ def create_organization(
         # (a geolocation-based guess previously pre-filled this, which
         # silently marked the onboarding "set your home country" step done
         # before the user ever touched it).
-        home_country=_geolocate_country(remote_ip),
+        home_country=None,
         # Phase 2: every org gets its own External ID from the moment it
         # exists, including orgs that never configure S3/AWS at all, so the
         # value is stable and can be shown in Settings immediately, never
@@ -365,14 +365,14 @@ async def list_invites(
 @limiter.limit("20/hour")
 async def resend_invite(
     request: Request,
-    invite_id: str,
+    invite_id: uuid.UUID,
     current_org: CurrentOrg = Depends(require_role("owner", "admin")),
     client: Client = Depends(get_current_client),
     db: Session = Depends(get_db),
 ):
     invite = (
         db.query(OrgInvite)
-        .filter(OrgInvite.id == invite_id, OrgInvite.org_id == current_org.id)
+        .filter(OrgInvite.id == str(invite_id), OrgInvite.org_id == current_org.id)
         .first()
     )
     if invite is None or invite.accepted_at is not None:
@@ -406,13 +406,13 @@ async def resend_invite(
 @limiter.limit("30/hour")
 async def cancel_invite(
     request: Request,
-    invite_id: str,
+    invite_id: uuid.UUID,
     current_org: CurrentOrg = Depends(require_role("owner", "admin")),
     db: Session = Depends(get_db),
 ):
     invite = (
         db.query(OrgInvite)
-        .filter(OrgInvite.id == invite_id, OrgInvite.org_id == current_org.id)
+        .filter(OrgInvite.id == str(invite_id), OrgInvite.org_id == current_org.id)
         .first()
     )
     if invite is None:
@@ -443,11 +443,45 @@ async def list_members(
             "id":         member.id,
             "client_id":  member.client_id,
             "email":      cli.email,
+            "full_name":  cli.full_name,
             "role":       member.role,
+            "is_billing_contact": bool(member.is_billing_contact),
             "created_at": member.created_at,
         }
         for member, cli in rows
     ]
+
+
+# ---------------------------------------------------------------------------
+# PATCH /org/members/{member_id}/billing-contact: owner only
+#
+# Marks whether a member receives billing emails when the org's recipient
+# setting is "selected" (see api/billing_emails.py).
+# ---------------------------------------------------------------------------
+
+class BillingContactBody(BaseModel):
+    is_billing_contact: bool
+
+
+@router.patch("/org/members/{member_id}/billing-contact")
+@limiter.limit("60/hour")
+async def set_billing_contact(
+    request: Request,
+    member_id: uuid.UUID,
+    body: BillingContactBody,
+    current_org: CurrentOrg = Depends(require_role("owner")),
+    db: Session = Depends(get_db),
+):
+    member = (
+        db.query(OrganizationMember)
+        .filter(OrganizationMember.id == str(member_id), OrganizationMember.org_id == current_org.id)
+        .first()
+    )
+    if member is None:
+        raise HTTPException(status_code=404, detail="Member not found.")
+    member.is_billing_contact = body.is_billing_contact
+    db.commit()
+    return {"is_billing_contact": member.is_billing_contact}
 
 
 # ---------------------------------------------------------------------------
@@ -462,14 +496,14 @@ class RoleChangeBody(BaseModel):
 @limiter.limit("30/hour")
 async def change_member_role(
     request: Request,
-    member_id: str,
+    member_id: uuid.UUID,
     body: RoleChangeBody,
     current_org: CurrentOrg = Depends(require_role("owner")),
     db: Session = Depends(get_db),
 ):
     member = (
         db.query(OrganizationMember)
-        .filter(OrganizationMember.id == member_id, OrganizationMember.org_id == current_org.id)
+        .filter(OrganizationMember.id == str(member_id), OrganizationMember.org_id == current_org.id)
         .first()
     )
     if member is None:
@@ -499,13 +533,13 @@ async def change_member_role(
 @limiter.limit("30/hour")
 async def remove_member(
     request: Request,
-    member_id: str,
+    member_id: uuid.UUID,
     current_org: CurrentOrg = Depends(require_role("owner")),
     db: Session = Depends(get_db),
 ):
     member = (
         db.query(OrganizationMember)
-        .filter(OrganizationMember.id == member_id, OrganizationMember.org_id == current_org.id)
+        .filter(OrganizationMember.id == str(member_id), OrganizationMember.org_id == current_org.id)
         .first()
     )
     if member is None:
@@ -532,14 +566,14 @@ async def remove_member(
 @limiter.limit("10/hour")
 async def transfer_ownership(
     request: Request,
-    member_id: str,
+    member_id: uuid.UUID,
     client: Client = Depends(get_current_client),
     current_org: CurrentOrg = Depends(require_role("owner")),
     db: Session = Depends(get_db),
 ):
     new_owner = (
         db.query(OrganizationMember)
-        .filter(OrganizationMember.id == member_id, OrganizationMember.org_id == current_org.id)
+        .filter(OrganizationMember.id == str(member_id), OrganizationMember.org_id == current_org.id)
         .first()
     )
     if new_owner is None:

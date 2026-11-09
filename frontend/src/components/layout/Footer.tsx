@@ -26,9 +26,8 @@ const COLUMNS: { heading: string; links: { href: string; label: string; external
     links: [
       { href: "/legal/terms", label: "Terms of Service" },
       { href: "/legal/privacy", label: "Privacy Policy" },
-      { href: "/legal/dpa", label: "DPA" },
       { href: "/legal/refund-policy", label: "Refund Policy" },
-      { href: "/legal/subscription-agreement", label: "Subscription Agreement" },
+      { href: "/legal", label: "Other legal documents" },
     ],
   },
   {

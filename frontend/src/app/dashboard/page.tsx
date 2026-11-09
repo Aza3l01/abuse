@@ -1,11 +1,15 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { apiFetch } from "@/lib/api";
 import { SITE_URL } from "@/lib/urls";
 import Link from "next/link";
 import { GuidedOnboardingButton } from "@/components/dashboard/GuidedOnboardingButton";
 import { LoadingCursor } from "@/components/dashboard/LoadingCursor";
+import { TrendLines } from "@/components/dashboard/charts/TrendLines";
+import { Donut } from "@/components/dashboard/charts/Donut";
+import { RiskScatter } from "@/components/dashboard/charts/Scatter";
+import { tierDisplayName } from "@/lib/pricing";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -31,6 +35,7 @@ interface TopIp {
 
 interface Summary {
   period_days: number;
+  tier: string;
   total_threats: number;
   new_threats_today: number;
   by_severity: { critical: number; high: number; medium: number; low: number };
@@ -42,6 +47,9 @@ interface Summary {
   s3_connected_at: string | null;
   s3_status: string | null;
   s3_status_message: string | null;
+  monthly_requests_processed: number;
+  // null for tiers with no fixed call volume (enterprise).
+  monthly_requests_cap: number | null;
 }
 
 interface Verdict {
@@ -115,54 +123,54 @@ function StatCard({ label, value, sub, note, noteHref }: { label: string; value:
   );
 }
 
-// CSS flexbox stacked bar chart (no SVG scaling): bars/labels stay a fixed
-// small pixel size; with few days the columns grow to fill the available
-// width, with many days they shrink to a floor width and the row scrolls
-// horizontally instead of clipping.
-function TrendChart({ trend }: { trend: TrendDay[] }) {
-  if (!trend.length) return null;
-
-  const H = 64;
-  const SEV_ORDER = ["low", "medium", "high", "critical"] as const;
-  const COLORS = { critical: "#E53E3E", high: "#DD6B20", medium: "#D69E2E", low: "#38A169" };
-  const maxTotal = Math.max(1, ...trend.map(d =>
-    SEV_ORDER.reduce((s, k) => s + (d[k] || 0), 0)
-  ));
-  // Bars always render for every day; date labels are thinned to a max of
-  // ~8 visible so a 30/90-day window stays readable instead of packing a
-  // label under every single bar. Hidden labels keep their layout space
-  // (visibility, not display) so column widths/alignment stay identical.
-  const labelStep = Math.max(1, Math.ceil(trend.length / 8));
-
+// Monthly call volume against the tier's cap. Scanning pauses at the cap
+// (same rule as UsageBanner). Enterprise has no fixed cap.
+function UsageBar({ used, cap }: { used: number; cap: number | null }) {
+  const ratio = cap ? used / cap : 0;
+  const color = ratio >= 1 ? "var(--color-critical)" : ratio >= 0.8 ? "var(--color-high)" : "var(--color-text)";
   return (
-    <div style={{ overflowX: "auto" }}>
-      <div style={{ display: "flex", alignItems: "flex-end", gap: "4px" }}>
-        {trend.map((day, i) => (
-          <div
-            key={day.date}
-            style={{ flex: "1 1 0%", minWidth: "22px", display: "flex", flexDirection: "column", alignItems: "center", gap: "6px" }}
-          >
-            <div style={{ width: "10px", height: `${H}px`, display: "flex", flexDirection: "column-reverse" }}>
-              {SEV_ORDER.map(sev => {
-                const count = day[sev] || 0;
-                if (!count) return null;
-                const barH = Math.max(1, (count / maxTotal) * H);
-                return <div key={sev} style={{ width: "100%", height: `${barH}px`, background: COLORS[sev] }} />;
-              })}
-            </div>
-            <span
-              style={{
-                fontSize: "10px",
-                color: "var(--color-text-muted)",
-                whiteSpace: "nowrap",
-                visibility: i % labelStep === 0 ? "visible" : "hidden",
-              }}
-            >
-              {day.date.slice(5)}
-            </span>
-          </div>
-        ))}
+    <div style={{
+      border: "1px solid var(--color-border)",
+      background: "var(--color-surface)",
+      padding: "20px",
+      marginBottom: "28px",
+    }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: "8px", marginBottom: "12px" }}>
+        <p style={{ fontSize: "11px", textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--color-text-muted)" }}>
+          Monthly call volume
+        </p>
+        <p style={{ fontSize: "12px", fontFamily: "var(--font-mono)" }}>
+          {used.toLocaleString("en-US")}
+          {cap ? ` / ${cap.toLocaleString("en-US")}` : " calls, no fixed cap"}
+          {cap ? <span style={{ color: "var(--color-text-muted)" }}>{` (${Math.floor(ratio * 100)}%)`}</span> : null}
+        </p>
       </div>
+      {cap ? (
+        <>
+          <div
+            role="progressbar"
+            aria-valuemin={0}
+            aria-valuemax={cap}
+            aria-valuenow={Math.min(used, cap)}
+            aria-label="Monthly call volume used"
+            style={{ height: "8px", border: "1px solid var(--color-border)", background: "var(--color-bg)" }}
+          >
+            <div style={{ height: "100%", width: `${Math.min(100, ratio * 100)}%`, background: color }} />
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "8px" }}>
+            <p style={{ fontSize: "11px", color: "var(--color-text-muted)" }}>
+              {ratio >= 1
+                ? "Cap reached. Scanning is paused until your counter resets or you upgrade."
+                : "Resets with your billing month. Scanning pauses at the cap."}
+            </p>
+            {ratio >= 0.8 && (
+              <Link href="/settings#billing" style={{ fontSize: "11px", color, textDecoration: "underline" }}>
+                Upgrade plan →
+              </Link>
+            )}
+          </div>
+        </>
+      ) : null}
     </div>
   );
 }
@@ -207,8 +215,19 @@ function NotConfiguredBox() {
 // Page
 // ---------------------------------------------------------------------------
 
+function subscribeNever() {
+  return () => {};
+}
+
+function readIsIndia() {
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const lang = navigator.language || "";
+  return tz.includes("Kolkata") || tz.includes("Calcutta") || lang === "hi" || lang.endsWith("-IN");
+}
+
 export default function DashboardOverview() {
   const [days,     setDays]     = useState(7);
+  const [lockedHint, setLockedHint] = useState(false);
   const [summary,  setSummary]  = useState<Summary | null>(null);
   const [recent,   setRecent]   = useState<Verdict[]>([]);
   const [loading,  setLoading]  = useState(true);
@@ -221,13 +240,7 @@ export default function DashboardOverview() {
   // Matches Settings' own locale/timezone heuristic for INR vs USD, so
   // "Cost prevented" doesn't show a flat USD figure to an org whose billing
   // (and everywhere else in the product) is already showing INR.
-  const [isIndia, setIsIndia] = useState(false);
-
-  useEffect(() => {
-    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    const lang = navigator.language || "";
-    setIsIndia(tz.includes("Kolkata") || tz.includes("Calcutta") || lang === "hi" || lang.endsWith("-IN"));
-  }, []);
+  const isIndia = useSyncExternalStore(subscribeNever, readIsIndia, () => false);
 
   const load = () => {
     return Promise.all([
@@ -255,8 +268,6 @@ export default function DashboardOverview() {
   };
 
   useEffect(() => {
-    setLoading(true);
-    setError(null);
     load().finally(() => setLoading(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [days]);
@@ -341,22 +352,48 @@ export default function DashboardOverview() {
             </>
           )}
           <div style={{ display: "flex", gap: "4px" }}>
-            {[7, 30].map(d => (
-              <button
-                key={d}
-                onClick={() => setDays(d)}
-                style={{
-                  padding: "4px 12px",
-                  fontSize: "12px",
-                  border: "1px solid var(--color-border)",
-                  background: days === d ? "var(--color-text)" : "transparent",
-                  color:      days === d ? "var(--color-bg)"   : "var(--color-text-muted)",
-                  cursor: "pointer",
-                }}
-              >
-                {d}d
-              </button>
-            ))}
+            {[7, 30].map(d => {
+              // The free tier (Starter) keeps 7 days of history, so 30d is a Basic feature.
+              const locked = d === 30 && s.tier === "free";
+              return (
+                <div
+                  key={d}
+                  style={{ position: "relative" }}
+                  onMouseEnter={() => { if (locked) setLockedHint(true); }}
+                  onMouseLeave={() => setLockedHint(false)}
+                >
+                  <button
+                    aria-disabled={locked}
+                    onClick={() => {
+                      if (locked || d === days) return;
+                      setLoading(true);
+                      setError(null);
+                      setDays(d);
+                    }}
+                    style={{
+                      padding: "4px 12px",
+                      fontSize: "12px",
+                      border: "1px solid var(--color-border)",
+                      background: days === d ? "var(--color-text)" : "transparent",
+                      color:      days === d ? "var(--color-bg)"   : "var(--color-text-muted)",
+                      cursor: locked ? "not-allowed" : "pointer",
+                      opacity: locked ? 0.4 : 1,
+                    }}
+                  >
+                    {d}d
+                  </button>
+                  {locked && lockedHint && (
+                    <div style={{
+                      position: "absolute", top: "100%", right: 0, marginTop: "4px", zIndex: 10,
+                      padding: "4px 8px", fontSize: "11px", whiteSpace: "nowrap",
+                      border: "1px solid var(--color-border)", background: "var(--color-surface)", color: "var(--color-text)",
+                    }}>
+                      Available in {tierDisplayName("starter")}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </div>
       </div>
@@ -393,9 +430,13 @@ export default function DashboardOverview() {
         />
       </div>
 
-      {/* Trend chart + top IPs */}
       {s.s3_configured && (
-      <div style={{ display: "flex", gap: "12px", marginBottom: "28px", flexWrap: "wrap" }}>
+        <UsageBar used={s.monthly_requests_processed} cap={s.monthly_requests_cap} />
+      )}
+
+      {/* Trend chart + severity split */}
+      {s.s3_configured && (
+      <div style={{ display: "flex", gap: "12px", marginBottom: "12px", flexWrap: "wrap" }}>
         {/* Chart */}
         <div style={{
           flex: "2 1 320px",
@@ -416,25 +457,66 @@ export default function DashboardOverview() {
               No threats detected in this period
             </p>
           ) : (
-            <>
-              <TrendChart trend={s.trend} />
-              {/* Legend */}
-              <div style={{ display: "flex", gap: "12px", marginTop: "12px" }}>
-                {(["critical", "high", "medium", "low"] as const).map(sev => (
-                  <div key={sev} style={{ display: "flex", alignItems: "center", gap: "4px" }}>
-                    <span style={{ width: "8px", height: "8px", background: SEV_COLOR[sev], display: "inline-block" }} />
-                    <span style={{ fontSize: "10px", color: "var(--color-text-muted)", textTransform: "capitalize" }}>{sev}</span>
-                  </div>
-                ))}
-              </div>
-            </>
+            <TrendLines trend={s.trend} />
           )}
         </div>
 
-        {/* Top IPs */}
+        {/* Severity split */}
         <div style={{
-          flex: "1 1 220px",
-          minWidth: "220px",
+          flex: "1 1 260px",
+          minWidth: "240px",
+          border: "1px solid var(--color-border)",
+          background: "var(--color-surface)",
+          padding: "20px",
+        }}>
+          <p style={{ fontSize: "11px", textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--color-text-muted)", marginBottom: "16px" }}>
+            Severity split, {days}d
+          </p>
+          <Donut
+            centerLabel="Threats"
+            slices={(["critical", "high", "medium", "low"] as const).map(sev => ({
+              key: sev,
+              label: sev.charAt(0).toUpperCase() + sev.slice(1),
+              value: s.by_severity[sev],
+              color: SEV_COLOR[sev],
+            }))}
+          />
+        </div>
+      </div>
+      )}
+
+      {/* Top IPs: risk against hits, then the clickable list */}
+      {s.s3_configured && (
+      <div style={{ display: "flex", gap: "12px", marginBottom: "28px", flexWrap: "wrap" }}>
+        <div style={{
+          flex: "2 1 320px",
+          minWidth: "280px",
+          border: "1px solid var(--color-border)",
+          background: "var(--color-surface)",
+          padding: "20px",
+        }}>
+          <p style={{ fontSize: "11px", textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--color-text-muted)", marginBottom: "16px" }}>
+            Top threat IPs, risk vs hits
+          </p>
+          {s.top_ips.length === 0 ? (
+            <p style={{ fontSize: "13px", color: "var(--color-text-muted)", padding: "24px 0", textAlign: "center" }}>No IPs flagged yet</p>
+          ) : (
+            <RiskScatter
+              xLabel="Hits"
+              points={s.top_ips.map(tip => ({
+                id: tip.ip,
+                label: tip.ip,
+                x: tip.count,
+                y: tip.risk_score,
+                severity: tip.highest_severity,
+              }))}
+            />
+          )}
+        </div>
+
+        <div style={{
+          flex: "1 1 260px",
+          minWidth: "240px",
           border: "1px solid var(--color-border)",
           background: "var(--color-surface)",
           padding: "20px",
@@ -460,7 +542,7 @@ export default function DashboardOverview() {
                   </div>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "2px" }}>
                     <span style={{ fontSize: "11px", color: "var(--color-text-muted)" }}>
-                      {tip.count} hit{tip.count !== 1 ? "s" : ""}
+                      {tip.count} hit{tip.count !== 1 ? "s" : ""} · risk {(tip.risk_score * 100).toFixed(0)}%
                     </span>
                     <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
                       {tip.highest_severity && <SeverityBadge severity={tip.highest_severity} />}
@@ -468,17 +550,6 @@ export default function DashboardOverview() {
                         <span style={{ fontSize: "10px", color: "var(--color-low)", textTransform: "uppercase", letterSpacing: "0.05em" }}>Blocked</span>
                       )}
                     </div>
-                  </div>
-                  {/* Risk bar */}
-                  <div style={{ height: "2px", background: "var(--color-border)", marginTop: "4px" }}>
-                    <div style={{
-                      height: "100%",
-                      width: `${(tip.risk_score * 100).toFixed(0)}%`,
-                      background: tip.risk_score >= 0.8 ? SEV_COLOR.critical
-                                : tip.risk_score >= 0.6 ? SEV_COLOR.high
-                                : tip.risk_score >= 0.4 ? SEV_COLOR.medium
-                                : SEV_COLOR.low,
-                    }} />
                   </div>
                 </Link>
               ))}

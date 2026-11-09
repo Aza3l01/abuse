@@ -55,11 +55,20 @@ for _p in [str(_REPO_ROOT), str(_ENGINE_ROOT)]:
 from db.models import AlertSent, IpMemory, Organization, ScanRun, Verdict
 from db.session import SessionLocal
 from api.aws import aws_session_for_org
-from api.tiers import AUTO_BLOCK_TIERS, CALL_VOLUME_CAPS, LLM_EXPLANATION_TIERS, LTM_TTL_DAYS
+from api.billing_rules import effective_retention_tier
+from api.detection_config import DEFAULT_BLOCK_CONFIDENCE_THRESHOLD, effective_detection_config, endpoint_minimum
+from api.tiers import (
+    AUTO_BLOCK_TIERS, CALL_VOLUME_CAPS, CUSTOM_THRESHOLD_TIERS, LLM_CALL_CAPS, LLM_EXPLANATION_TIERS, LTM_TTL_DAYS,
+)
 
 from engine.ingestion.s3_reader import S3Reader
 from engine.ingestion.normalizer import chunk, group_by_ip, parse_lines
-from engine.pipeline.run import run_pipeline
+from engine.ingestion.suspicion import top_suspicious_lines
+from engine.intel.abuseipdb import AbuseIpdbClient
+from engine.llm.cache import ExplanationCache
+from engine.pipeline.cluster import detect_distributed_cluster
+from engine.pipeline.run import _severity as _verdict_severity
+from engine.pipeline.run import PipelineRunner, run_pipeline
 
 _FORMAT_DISPLAY_NAMES = {"apigw": "API Gateway", "alb": "ALB"}
 
@@ -123,14 +132,8 @@ def _sweep_stale_in_progress(org_id: str) -> None:
 # Uses maxminddb directly; geoip2 is NOT a dependency and must not be added.
 # ---------------------------------------------------------------------------
 
-_GEOIP_CITY_PATH = os.environ.get(
-    "GEOIP_MMDB_PATH",
-    str(_ENGINE_ROOT / "datasets" / "GeoLite2-City.mmdb"),
-)
-_GEOIP_ASN_PATH = os.environ.get(
-    "GEOIP_ASN_DB_PATH",
-    str(_ENGINE_ROOT / "datasets" / "GeoLite2-ASN.mmdb"),
-)
+_GEOIP_CITY_PATH = os.environ.get("GEOIP_MMDB_PATH") or str(_ENGINE_ROOT / "datasets" / "GeoLite2-City.mmdb")
+_GEOIP_ASN_PATH = os.environ.get("GEOIP_ASN_DB_PATH") or str(_ENGINE_ROOT / "datasets" / "GeoLite2-ASN.mmdb")
 
 _city_reader = None
 _asn_reader = None
@@ -321,6 +324,16 @@ def process_logs(self, org_id: str) -> dict:
             _mark_scan_success(db, org)
             return {"status": "ok", "records": 0, "verdicts": 0}
 
+        # Hard cap: at the tier's monthly call volume nothing is scanned. The
+        # cursor still moves past the new objects, so scanning resumes on live
+        # traffic after an upgrade or the monthly reset, not on a stale backlog.
+        volume_remaining = _volume_remaining(org)
+        if volume_remaining == 0:
+            _update_last_key(db, org, objects[-1]["Key"])
+            _mark_scan_paused(db, org)
+            logger.info("process_logs: org %s is at its monthly volume cap, skipped %d objects", org_id, len(objects))
+            return {"status": "ok", "records": 0, "verdicts": 0, "note": "volume_cap_reached"}
+
         # ------------------------------------------------------------------
         # 2. Item 5: on first connection, sanity-check the configured log
         #    format against the most recent object before processing anything.
@@ -359,6 +372,8 @@ def process_logs(self, org_id: str) -> dict:
         # 4. Parse lines once — shared by Pass A (window) and Pass B (focus)
         # ------------------------------------------------------------------
         records = parse_lines(lines, org.log_format, org_id, keys=keys)
+        if volume_remaining is not None:
+            records = records[:volume_remaining]
         batches = chunk(records)
 
         if not batches:
@@ -368,8 +383,33 @@ def process_logs(self, org_id: str) -> dict:
             return {"status": "ok", "records": len(lines), "verdicts": 0, "note": "all_unparseable"}
 
         total_records = sum(len(b) for b in batches)
-        ltm_ttl_seconds = _ltm_ttl_seconds_for_tier(org.tier)
+        ltm_ttl_seconds = _ltm_ttl_seconds_for_tier(effective_retention_tier(org))
         enable_llm_explanations = _enable_llm_explanations_for_tier(org.tier)
+        # Phase 2: remaining monthly LLM calls (None = unlimited). One runner
+        # holds the shared budget for every batch below, so a single poll
+        # can't overshoot it.
+        llm_budget = _llm_budget_remaining(org)
+
+        # Phase 8: the org's own detection tuning (Pro and Enterprise only,
+        # everything else resolves to {} and the engine defaults), passed into
+        # the engine as plain arguments. The runner (Phase 8 hoist) builds the
+        # memory and orchestrator once for the whole poll, and shares one
+        # explanation cache and one live intel client across every batch.
+        detection_cfg = effective_detection_config(org.tier, org.detection_config)
+        block_threshold = detection_cfg.get("block_confidence_threshold", DEFAULT_BLOCK_CONFIDENCE_THRESHOLD)
+        runner = PipelineRunner(
+            org_id,
+            redis_conn,
+            home_country=org.home_country or "",
+            ltm_ttl_seconds=ltm_ttl_seconds,
+            enable_llm_explanations=enable_llm_explanations,
+            llm_call_budget=llm_budget,
+            attack_threshold=detection_cfg.get("attack_threshold"),
+            agent_min_confidence=detection_cfg.get("agent_min_confidence"),
+            explanation_cache=ExplanationCache(org_id, redis_conn) if enable_llm_explanations else None,
+            intel_client=_build_intel_client(redis_conn),
+        )
+        cluster_verdict_ids: set[str] = set()
 
         # ------------------------------------------------------------------
         # 5. Pass A — mixed-IP window batches (unchanged semantics, writes LTM)
@@ -377,11 +417,8 @@ def process_logs(self, org_id: str) -> dict:
         verdicts_written: list[str] = []
 
         for batch in batches:
-            verdict_dict = run_pipeline(
-                batch, org_id, redis_conn,
-                home_country=org.home_country or "", ltm_ttl_seconds=ltm_ttl_seconds,
-                enable_llm_explanations=enable_llm_explanations,
-            )
+            verdict_dict = runner.run(batch)
+            _apply_endpoint_minimum(verdict_dict, detection_cfg)
 
             # Item 5e: only actual detections go into `verdicts`. Clean
             # batches write a ScanRun row instead (the "we scanned and found
@@ -405,15 +442,49 @@ def process_logs(self, org_id: str) -> dict:
         # multiple original batches/objects, so there's no single file to key on.
         # ------------------------------------------------------------------
         for ip, ip_records in group_by_ip(records, min_requests=20).items():
-            focus_verdict = run_pipeline(
-                ip_records, org_id, redis_conn,
-                home_country=org.home_country or "", mode="focus", ltm_ttl_seconds=ltm_ttl_seconds,
-                enable_llm_explanations=enable_llm_explanations,
-            )
+            focus_verdict = runner.run(ip_records, mode="focus")
+            _apply_endpoint_minimum(focus_verdict, detection_cfg)
             if focus_verdict.get("is_attack"):
                 verdict_id = _persist_verdict(db, org_id, ip_records, focus_verdict)
                 if verdict_id is not None:
                     verdicts_written.append(verdict_id)
+
+        # Persist the LTM once for the whole poll (one Redis write, not one
+        # per batch).
+        runner.flush()
+        llm_calls_used = runner.llm_calls_used
+
+        # ------------------------------------------------------------------
+        # 6b. Pass C (Phase 8, Pro and Enterprise): cross-IP clustering for
+        # distributed low-and-slow attacks: many addresses, one or two failed
+        # attempts each, which Pass A and Pass B both miss. Alert only: the
+        # verdict is never auto-blocked (the members are listed in the
+        # explanation for the customer to act on). No LLM call, the
+        # explanation is the template text from the detector.
+        # ------------------------------------------------------------------
+        if org.tier in CUSTOM_THRESHOLD_TIERS:
+            cluster = detect_distributed_cluster(records)
+            if cluster is not None:
+                cluster_ips = set(cluster["cluster_ips"])
+                cluster_batch = [
+                    dict(r, source_key=f"cluster:{r['source_key']}" if r.get("source_key") else None)
+                    for r in records
+                    if r.get("ip") in cluster_ips
+                    and (r.get("endpoint_template") or r.get("endpoint")) == cluster["endpoint"]
+                ]
+                cluster_dict = {
+                    **cluster,
+                    "severity": _verdict_severity(cluster["confidence"]),
+                    "is_attack": True,
+                    "cost_prevented": 0.0,
+                    "agent_scores": None,
+                }
+                _apply_endpoint_minimum(cluster_dict, detection_cfg)
+                if cluster_dict["is_attack"]:
+                    verdict_id = _persist_verdict(db, org_id, cluster_batch, cluster_dict)
+                    if verdict_id is not None:
+                        verdicts_written.append(verdict_id)
+                        cluster_verdict_ids.add(verdict_id)
 
         # Item 30: meter call volume in the same transaction as the scan's
         # other writes below, so a rolled-back poll never inflates the
@@ -421,6 +492,7 @@ def process_logs(self, org_id: str) -> dict:
         # was skipped as a source_key duplicate (item 3), since the
         # customer's API still served that traffic either way.
         org.monthly_requests_processed = (org.monthly_requests_processed or 0) + total_records
+        org.monthly_llm_calls = (org.monthly_llm_calls or 0) + llm_calls_used
         _check_quota_thresholds(org)
 
         # Commit everything before advancing the S3 cursor
@@ -443,23 +515,32 @@ def process_logs(self, org_id: str) -> dict:
             if v and org.alert_email:
                 from workers.tasks.send_alerts import send_alert_email
                 send_alert_email.delay(verdict_id, org_id)
-            # Push block for high/critical on Growth+ tiers only, item 55's
-            # AUTO_BLOCK_TIERS, a separate, more conservative gate than the
-            # alert threshold. TODO.md priority items 1/2: also require the
-            # Blocking Subscription Agreement already accepted and the org's
-            # own auto_block_enabled opt-in, so unattended blocking never
-            # fires with no agreement accepted and never fires at all unless
-            # explicitly turned on, even on an eligible tier with an
-            # integration configured.
+            # Push block for verdicts at or above the org's block confidence
+            # (default 0.75, Pro and Enterprise can change it, Phase 8) on
+            # Growth+ tiers only, item 55's AUTO_BLOCK_TIERS, a separate, more
+            # conservative gate than the alert threshold. TODO.md priority
+            # items 1/2: also require the Blocking Subscription Agreement
+            # already accepted and the org's own auto_block_enabled opt-in, so
+            # unattended blocking never fires with no agreement accepted and
+            # never fires at all unless explicitly turned on, even on an
+            # eligible tier with an integration configured. Pass C cluster
+            # verdicts are alert-only. Phase 8 dry-run: when auto_block_dry_run
+            # is on, a verdict that passes every gate is stamped
+            # would_have_blocked_at and nothing is pushed to the edge.
             if (
                 v
-                and v.severity in ("high", "critical")
+                and verdict_id not in cluster_verdict_ids
+                and v.confidence >= block_threshold
                 and org.tier in AUTO_BLOCK_TIERS
                 and org.auto_block_enabled
                 and org.blocking_tos_accepted_at is not None
             ):
-                from workers.tasks.push_blocks import push_block
-                push_block.delay(verdict_id, org_id)
+                if org.auto_block_dry_run:
+                    v.would_have_blocked_at = datetime.now(timezone.utc)
+                    db.commit()
+                else:
+                    from workers.tasks.push_blocks import push_block
+                    push_block.delay(verdict_id, org_id, block_threshold)
 
         logger.info(
             "process_logs: org=%s records=%d batches=%d verdicts=%d",
@@ -554,7 +635,7 @@ def calibrate_client(self, org_id: str) -> dict:
         batches = chunk(records)
 
         redis_conn = _get_redis()
-        ltm_ttl_seconds = _ltm_ttl_seconds_for_tier(org.tier)
+        ltm_ttl_seconds = _ltm_ttl_seconds_for_tier(effective_retention_tier(org))
         for batch in batches:
             # Window mode writes LTM exactly like Pass A does; the verdict
             # dict is discarded on purpose — no _persist_verdict/_persist_scan_run/
@@ -640,31 +721,13 @@ def _detect_format_mismatch(
 def _sample_logs(batch: list[dict], verdict_dict: dict) -> list[str]:
     """Item 19's "5 most suspicious requests" raw log sample.
 
-    No per-record suspicion score exists anywhere in the engine, batches are
-    scored as a whole, not line by line. Approximated instead: prefer lines
-    matching the verdict's attributed ip/endpoint (the ones that actually
-    drove this detection), padded with the batch's own first lines if fewer
-    than 5 match. Each line truncated at 512 chars. Lines predating item 19
-    (no `raw_line` key, e.g. re-processed old data) are skipped.
+    Phase 8: each record is scored (engine/ingestion/suspicion.py: attributed
+    ip and endpoint, injection patterns, 401/403, 404, 5xx, very slow) and the
+    top 5 lines win, so the sample shows the requests that actually looked
+    hostile rather than whichever lines matched first. Each line is truncated
+    at 512 chars. Lines predating item 19 (no `raw_line` key) are skipped.
     """
-    ip = verdict_dict.get("ip")
-    endpoint = verdict_dict.get("endpoint")
-
-    matching = [
-        r["raw_line"] for r in batch
-        if r.get("raw_line") and (r.get("ip") == ip or r.get("endpoint") == endpoint)
-    ]
-    fallback = [r["raw_line"] for r in batch if r.get("raw_line")]
-
-    sample: list[str] = []
-    for line in matching + fallback:
-        if line in sample:
-            continue
-        sample.append(line)
-        if len(sample) >= 5:
-            break
-
-    return [line[:512] for line in sample]
+    return top_suspicious_lines(batch, verdict_dict.get("ip"), verdict_dict.get("endpoint"))
 
 
 def _persist_verdict(
@@ -717,7 +780,7 @@ def _persist_verdict(
         blocked=False,
         cost_prevented=verdict_dict.get("cost_prevented"),
         source_key=source_key,
-        sample_logs=_sample_logs(batch, verdict_dict),
+        sample_logs=verdict_dict.get("sample_logs") or _sample_logs(batch, verdict_dict),
         agent_scores=verdict_dict.get("agent_scores"),
     )
     if source_key is not None:
@@ -864,12 +927,54 @@ def _enable_llm_explanations_for_tier(tier: str) -> bool:
     return tier in LLM_EXPLANATION_TIERS
 
 
+def _llm_budget_remaining(org: Organization) -> int | None:
+    """Phase 2: calls left under the org's monthly LLM ceiling
+    (LLM_CALL_CAPS in api/tiers.py). None means unlimited. A tier with no
+    entry gets 0, so nothing is ever called for it. Never negative.
+    """
+    if org.tier not in LLM_CALL_CAPS:
+        return 0
+    cap = LLM_CALL_CAPS[org.tier]
+    if cap is None:
+        return None
+    return max(cap - (org.monthly_llm_calls or 0), 0)
+
+
+def _build_intel_client(redis_conn) -> AbuseIpdbClient | None:
+    """Phase 8: live AbuseIPDB lookups, only when ABUSEIPDB_API_KEY is set.
+    With no key the KnowledgeAgent keeps using the static seed file alone."""
+    api_key = os.environ.get("ABUSEIPDB_API_KEY", "").strip()
+    if not api_key:
+        return None
+    return AbuseIpdbClient(api_key, redis_conn)
+
+
+def _apply_endpoint_minimum(verdict_dict: dict, detection_cfg: dict) -> None:
+    """Phase 8: a detection on an endpoint with a customer-set minimum
+    confidence is dropped (treated as clean) if it falls below that minimum.
+    The engine's own verdict is untouched, only what gets recorded changes."""
+    if not verdict_dict.get("is_attack"):
+        return
+    minimum = endpoint_minimum(detection_cfg, verdict_dict.get("endpoint"))
+    if minimum is not None and float(verdict_dict.get("confidence", 0.0)) < minimum:
+        verdict_dict["is_attack"] = False
+        verdict_dict["severity"] = "none"
+
+
+def _volume_remaining(org: Organization) -> int | None:
+    """Records this org may still scan this month, or None when its tier has no cap."""
+    cap = CALL_VOLUME_CAPS.get(org.tier)
+    if not cap:
+        return None
+    return max(0, cap - (org.monthly_requests_processed or 0))
+
+
 def _check_quota_thresholds(org: Organization) -> None:
-    """Item 30 soft limits: never hard-cut a security tool, only warn.
-    80% of the tier's monthly call-volume cap sends one amber-banner email,
-    100% sends one red-banner email, both idempotent per billing month via
+    """Monthly call-volume warnings. 80% of the tier's cap sends one amber-banner
+    email, 100% sends one red-banner email (scanning stops there, see
+    _volume_remaining), both idempotent per billing month via
     quota_warning_sent_at/quota_exceeded_sent_at (cleared monthly by
-    reset_monthly_counters). Scanning is never paused by this check.
+    reset_monthly_counters).
     """
     cap = CALL_VOLUME_CAPS.get(org.tier)
     if not cap:
@@ -891,6 +996,13 @@ def _mark_scan_success(db, org: Organization) -> None:
     """Item 17: record a clean run, even one that found nothing new."""
     org.last_scan_status = "success"
     org.last_scan_completed_at = datetime.now(timezone.utc)
+    org.last_scan_error = None
+    db.commit()
+
+
+def _mark_scan_paused(db, org: Organization) -> None:
+    """Volume cap reached: last_scan_completed_at keeps the last real scan time."""
+    org.last_scan_status = "paused"
     org.last_scan_error = None
     db.commit()
 

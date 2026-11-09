@@ -1,13 +1,15 @@
 """
 Abuse Engine LLM Prompts
 
-Prompt templates for each detection agent and the MetaAgent fusion step.
+Prompt templates for the MetaAgent explanation step (the only live LLM call).
+
+Phase 2 guardrail: the LLM never decides anything. The rule verdict is given
+to it as final and it only writes the customer-facing explanation text.
+AGENT_SYSTEM_PROMPTS and build_agent_user_prompt are no longer called by the
+engine (agents are rule-only) and are kept only for reference.
 
 Design principles:
-  - System prompts are short — just the agent's mandate and output schema.
-  - User prompts inject the raw_metrics, indicators, and rule-based hint.
-  - The rule-based verdict is included as a "prior" to help the LLM calibrate,
-    not as a ground truth (LLM is free to override).
+  - System prompts are short, just the mandate and output schema.
   - JSON schema is enforced in the system prompt to reduce parsing failures.
 """
 
@@ -31,13 +33,9 @@ Output ONLY a JSON object with these exact keys:
 Do not include any text outside the JSON object."""
 
 _META_SCHEMA = """\
-Output ONLY a JSON object with these exact keys:
+Output ONLY a JSON object with exactly this key:
 {
-  "is_attack": <bool>,
-  "threat_type": <one of: NONE | DOS | BRUTE_FORCE | CREDENTIAL_STUFFING | BOT_ACTIVITY | SCRAPING | UNKNOWN_ABUSE>,
-  "confidence": <float 0.0 – 1.0>,
-  "compound_signal": <string or null, e.g. "High Volume + Bot Timing → Scraping Bot">,
-  "reasoning": <string, max 4 sentences>
+  "explanation": <string, 2 to 4 sentences>
 }
 Do not include any text outside the JSON object."""
 
@@ -80,19 +78,20 @@ high failure ratio (>80% of IP requests are failures).
 # ---------------------------------------------------------------------------
 
 META_SYSTEM_PROMPT = f"""\
-You are MetaAgent, the orchestrating security analyst for the Abuse Engine.
-Your mandate: fuse findings from the specialist agents into a single
-authoritative verdict.
-Apply conflict resolution (trust the highest-confidence agent on its area of expertise),
-detect compound threats (e.g. DoS + Bot Timing → Scraping Bot), and assess overall
-attack probability.
-If multiple agents agree, weight their confidence. A single low-confidence agent is
-insufficient to call ATTACK unless its confidence is ≥ 0.80.
-The "reasoning" field is shown directly to the customer who owns this traffic, not
-to a security analyst. Write it in plain language, 2 to 4 sentences, describing the
-specific observed behaviour (request rate, endpoints touched, failed-login counts,
-payload patterns, country, and ASN) that made this look like an attack. Do not
-mention agent names, internal confidence scores, or this system's own architecture.
+You are a security analyst writing the explanation for a detection that the
+rule-based engine has already made. The verdict (attack, threat type, confidence)
+is final and is given to you as context. You cannot change it, you must not
+question or restate a different verdict, and you must not output one.
+Your only job is to explain it. The "explanation" field is shown directly to the
+customer who owns this traffic, not to a security analyst. Write it in plain
+language, 2 to 4 sentences, describing the kind of behaviour observed (request
+pattern, the sort of endpoints touched, failed-login pressure, payload patterns,
+country, and network owner) that made this look like an attack. Use only facts
+present in the evidence given. Do not state exact counts, rates, percentages,
+IP addresses or timestamps: the same text is reused for later detections of the
+same kind, and the customer sees the exact figures elsewhere on the page.
+Do not mention agent names, internal confidence scores, or this system's own
+architecture.
 {_META_SCHEMA}"""
 
 
@@ -133,8 +132,9 @@ def build_meta_user_prompt(
     rule_is_attack: bool,
     rule_confidence: float,
     rule_compound: List[str],
+    rule_threat_type: str = "",
 ) -> str:
-    """Build the user prompt for the MetaAgent fusion LLM call."""
+    """Build the user prompt for the MetaAgent explanation LLM call."""
     findings_block = json.dumps(agent_findings, indent=2)
     board_block = json.dumps(
         [{"key": e["key"], "confidence": e["confidence"]} for e in evidence_board],
@@ -147,11 +147,11 @@ def build_meta_user_prompt(
         "=== Evidence board summary ===",
         board_block,
         "",
-        "=== Rule-based fusion hint ===",
-        f"  verdict: {'ATTACK' if rule_is_attack else 'CLEAN'} | confidence: {rule_confidence:.2f}",
+        "=== Final verdict (already decided, do not change) ===",
+        f"  verdict: {'ATTACK' if rule_is_attack else 'CLEAN'} | threat_type: {rule_threat_type or 'unspecified'} | confidence: {rule_confidence:.2f}",
         f"  compound_signals: {rule_compound or 'none'}",
         "",
-        "Fuse the agent findings and produce the final verdict as JSON.",
+        "Write the customer-facing explanation of this verdict as JSON.",
     ]
     return "\n".join(lines)
 

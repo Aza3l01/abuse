@@ -499,13 +499,29 @@ def send_mfa_enabled_email(to: str, enabled: bool) -> bool:
     )
 
 
-def send_trial_reminder_email(to: str, days_remaining: int, trial_days_total: int) -> bool:
-    """Item 11 trial-expiry schedule. Sent from billing@ rather than noreply@."""
+def send_trial_reminder_email(
+    to: str, days_remaining: int, trial_days_total: int, checkout_available: bool = True
+) -> bool:
+    """Item 11 trial-expiry schedule. Sent from billing@ rather than noreply@.
+    `checkout_available` False (the org's billing currency has no checkout)
+    swaps the "choose a plan" link for a contact-support line."""
+    if checkout_available:
+        cta_text = f"Choose a plan to keep scanning your logs without interruption.\n{DASHBOARD_URL}/settings#billing"
+        cta_html = (
+            _p("Choose a plan to keep scanning your logs without interruption.")
+            + _p(f'<a href="{DASHBOARD_URL}/settings#billing" style="color:#0D0D0D;">Choose a plan &rarr;</a>')
+        )
+    else:
+        cta_text = "To keep scanning your logs without interruption, email support@clewsec.com and we will set up your plan."
+        cta_html = _p(
+            "To keep scanning your logs without interruption, email "
+            '<a href="mailto:support@clewsec.com" style="color:#0D0D0D;">support@clewsec.com</a> '
+            "and we will set up your plan."
+        )
     body_text = (
         f"Your Clew {trial_days_total}-day trial ends in {days_remaining} day"
         f"{'s' if days_remaining != 1 else ''}.\n\n"
-        "Add a payment method to keep scanning your logs without interruption.\n"
-        f"{DASHBOARD_URL}/settings#billing"
+        f"{cta_text}"
     )
     body_html = _email_html(
         heading="Your Clew trial is ending soon",
@@ -514,45 +530,13 @@ def send_trial_reminder_email(to: str, days_remaining: int, trial_days_total: in
                 f"Your Clew {trial_days_total}-day trial ends in "
                 f"<strong>{days_remaining} day{'s' if days_remaining != 1 else ''}</strong>."
             )
-            + _p("Add a payment method to keep scanning your logs without interruption.")
-            + _p(
-                f'<a href="{DASHBOARD_URL}/settings#billing" style="color:#0D0D0D;">Add payment method &rarr;</a>'
-            )
+            + cta_html
         ),
         footer_note="You are receiving this because your organisation has an active Clew trial.",
     )
     return send_email(
         to=to,
         subject=f"Your Clew trial ends in {days_remaining} day{'s' if days_remaining != 1 else ''}",
-        body_text=body_text,
-        body_html=body_html,
-        from_address=FROM_BILLING,
-        reply_to=REPLY_TO_BILLING,
-    )
-
-
-def send_payment_failed_email(to: str) -> bool:
-    """Item 29: immediate Clew-branded notice on a Razorpay/Stripe payment
-    failure, beyond whatever auto-retry the provider itself does."""
-    body_text = (
-        "A recent payment on your Clew subscription did not go through.\n\n"
-        "Please update your payment method to avoid an interruption to your service.\n"
-        f"{DASHBOARD_URL}/settings#billing"
-    )
-    body_html = _email_html(
-        heading="Your Clew payment failed",
-        body_html=(
-            _p("A recent payment on your Clew subscription did not go through.")
-            + _p("Please update your payment method to avoid an interruption to your service.")
-            + _p(
-                f'<a href="{DASHBOARD_URL}/settings#billing" style="color:#0D0D0D;">Update payment method &rarr;</a>'
-            )
-        ),
-        footer_note="You are receiving this because your organisation has an active Clew subscription.",
-    )
-    return send_email(
-        to=to,
-        subject="Action needed: your Clew payment failed",
         body_text=body_text,
         body_html=body_html,
         from_address=FROM_BILLING,

@@ -28,6 +28,10 @@ celery_app = Celery(
         "workers.tasks.purge_deleted_accounts",
         "workers.tasks.reset_usage_counters",
         "workers.tasks.purge_expired_data",
+        "workers.tasks.billing_cycle",
+        "workers.tasks.billing_emails",
+        "workers.tasks.metrics_snapshot",
+        "workers.tasks.reconcile_payments",
     ],
 )
 
@@ -50,3 +54,6 @@ celery_app.conf.update(
 
     # Beat schedule — polled from beat.py via beat_schedule attr
 )
+
+# Registers the task_postrun handler behind the ops panel's last-run times.
+import workers.task_runs  # noqa: E402,F401

@@ -21,11 +21,11 @@ module.exports = {
     // ─────────────────────────────────────────────────────────────────────
     {
       name: 'clew-api',
-      cwd: '/home/ubuntu/clew',
-      interpreter: '/home/ubuntu/clew/.venv/bin/python',
-      script: '/home/ubuntu/clew/.venv/bin/uvicorn',
+      cwd: '/home/ubuntu/abuse',
+      interpreter: '/home/ubuntu/abuse/.venv/bin/python',
+      script: '/home/ubuntu/abuse/.venv/bin/uvicorn',
       args: 'api.main:app --host 127.0.0.1 --port 8000 --workers 2',
-      env_file: '/home/ubuntu/clew/.env',
+      env_file: '/home/ubuntu/abuse/.env',
       // Restart on crash, wait 5 s before restart
       autorestart: true,
       restart_delay: 5000,
@@ -37,7 +37,7 @@ module.exports = {
     // ─────────────────────────────────────────────────────────────────────
     {
       name: 'clew-frontend',
-      cwd: '/home/ubuntu/clew/frontend',
+      cwd: '/home/ubuntu/abuse/frontend',
       script: 'node_modules/.bin/next',
       args: 'start --port 3000',
       env: {
@@ -48,6 +48,8 @@ module.exports = {
         NEXT_PUBLIC_DASHBOARD_URL: 'https://dashboard.clewsec.com',
         // Server-side only (read by the Next.js proxy).
         DASHBOARD_HOST: 'dashboard.clewsec.com',
+        // Phase 6 staff ops panel: /internal pages are served only on this host.
+        INTERNAL_HOST: 'internal.clewsec.com',
         HOME_URL: 'https://www.clewsec.com',
         API_INTERNAL_URL: 'http://127.0.0.1:8000',
       },
@@ -61,11 +63,11 @@ module.exports = {
     // ─────────────────────────────────────────────────────────────────────
     {
       name: 'clew-worker',
-      cwd: '/home/ubuntu/clew',
-      interpreter: '/home/ubuntu/clew/.venv/bin/python',
-      script: '/home/ubuntu/clew/.venv/bin/celery',
+      cwd: '/home/ubuntu/abuse',
+      interpreter: '/home/ubuntu/abuse/.venv/bin/python',
+      script: '/home/ubuntu/abuse/.venv/bin/celery',
       args: '-A workers.celery_app worker --loglevel=info --concurrency=4',
-      env_file: '/home/ubuntu/clew/.env',
+      env_file: '/home/ubuntu/abuse/.env',
       autorestart: true,
       restart_delay: 5000,
       max_restarts: 10,
@@ -78,11 +80,11 @@ module.exports = {
     // ─────────────────────────────────────────────────────────────────────
     {
       name: 'clew-beat',
-      cwd: '/home/ubuntu/clew',
-      interpreter: '/home/ubuntu/clew/.venv/bin/python',
-      script: '/home/ubuntu/clew/.venv/bin/celery',
+      cwd: '/home/ubuntu/abuse',
+      interpreter: '/home/ubuntu/abuse/.venv/bin/python',
+      script: '/home/ubuntu/abuse/.venv/bin/celery',
       args: '-A workers.celery_app beat --loglevel=info',
-      env_file: '/home/ubuntu/clew/.env',
+      env_file: '/home/ubuntu/abuse/.env',
       autorestart: true,
       restart_delay: 5000,
       max_restarts: 10,

@@ -5,6 +5,7 @@ import { DashboardGate } from "@/components/dashboard/DashboardGate";
 import { DashboardContentShell } from "@/components/dashboard/DashboardContentShell";
 import { MfaNudgeBanner } from "@/components/dashboard/MfaNudgeBanner";
 import { TrialBanner } from "@/components/dashboard/TrialBanner";
+import { BillingBanner } from "@/components/dashboard/BillingBanner";
 import { UsageBanner } from "@/components/dashboard/UsageBanner";
 import { SessionExpiredModal } from "@/components/dashboard/SessionExpiredModal";
 import { StatusHeader } from "@/components/dashboard/StatusHeader";
@@ -34,6 +35,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
         <DashboardContentShell>
           <StatusHeader />
           <TrialBanner />
+          <BillingBanner />
           <UsageBanner />
           <MfaNudgeBanner />
           <PlanCheckoutTrigger />

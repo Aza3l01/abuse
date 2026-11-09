@@ -4,7 +4,10 @@ from sqlalchemy.orm import sessionmaker, DeclarativeBase
 from dotenv import load_dotenv
 
 load_dotenv()
-
+# .env.local wins over .env when both exist, matching api/main.py,
+# workers/celery_app.py and db/migrations/env.py. Without this a script or test
+# that imports db.session alone connects with the production .env values.
+load_dotenv(".env.local", override=True)
 DATABASE_URL = os.environ["DATABASE_URL"]
 
 engine = create_engine(

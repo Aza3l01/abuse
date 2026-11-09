@@ -22,6 +22,13 @@ function minutesAgo(iso: string): number {
 }
 
 function ScanStatus({ s }: { s: StatusSummary }) {
+  if (s.last_scan_status === "paused") {
+    return (
+      <Link href="/settings#billing" style={{ color: "var(--color-critical)", textDecoration: "none", fontSize: "12px" }}>
+        Scanning paused, monthly cap reached
+      </Link>
+    );
+  }
   if (s.last_scan_status === "error") {
     return (
       <Link href="/settings#s3" style={{ color: "var(--color-critical)", textDecoration: "none", fontSize: "12px" }}>

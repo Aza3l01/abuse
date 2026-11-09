@@ -9,6 +9,12 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@visx/axis": "^4.0.0",
+    "@visx/grid": "^4.0.0",
+    "@visx/group": "^4.0.0",
+    "@visx/responsive": "^4.0.0",
+    "@visx/scale": "^4.0.0",
+    "@visx/shape": "^4.0.0",
     "geist": "^1.7.0",
     "jose": "^6.2.3",
     "next": "^16.3.3",

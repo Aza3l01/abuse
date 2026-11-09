@@ -41,7 +41,8 @@ abuse/                         <- project root (repo: "abuse", product: Clew)
 │       ├── verdicts.py        <- list/detail/manual-block/block/unblock/threat-types
 │       ├── dashboard.py       <- GET /dashboard/summary
 │       ├── ips.py             <- GET /ips, POST /ips/{ip}/unblock
-│       ├── billing.py         <- Stripe (pending keys) + Razorpay (live) + shared cancel/refund
+│       ├── billing.py         <- Razorpay Orders (payments, refunds, cancel, details); Stripe code kept but unused
+│       │                         (payment rules live in api/billing_payments.py + api/billing_rules.py)
 │       ├── org.py             <- create org, invites, team members, role changes, ownership transfer
 │       ├── settings.py        <- POST /settings/test-waf, /settings/test-cloudflare
 │       ├── newsletter.py      <- POST /newsletter/subscribe, /newsletter/confirm (Resend Audiences)
@@ -127,7 +128,7 @@ abuse/                         <- project root (repo: "abuse", product: Clew)
 │
 ├── scripts/
 │   ├── download_geoip.sh      <- fetches GeoLite2-City + GeoLite2-ASN .mmdb files
-│   └── generate_promo_codes.py <- idempotent launch promo-code generator
+│   └── create_staff_user.py   <- creates a staff user + TOTP for the internal ops panel (CLI only)
 │
 ├── .env.example               <- all env vars with descriptions
 ├── requirements.txt           <- Python dependencies
@@ -148,7 +149,7 @@ abuse/                         <- project root (repo: "abuse", product: Clew)
 | Styling | Tailwind + CSS variables | No component library, custom design system |
 | Auth | httpOnly JWTs + bcrypt | Cookies unreadable by JS — no XSS token theft |
 | Email | AWS SES (via Resend) | Transactional verification + alert emails |
-| Billing | Razorpay (INR) + Stripe (USD) | Razorpay first target; Stripe pending company registration |
+| Billing | Razorpay (USD default, INR for India) | Stripe is not used; the old Stripe code is kept for a possible later provider |
 | Detection | Custom multi-agent engine | Validated on CICIDS2017, CTU-13, CSIC |
 | Blocking | AWS WAF v2 + Cloudflare | Growth/Pro tiers |
 | Process manager | PM2 | Manages all 4 server processes |
@@ -294,20 +295,17 @@ grants a trial, not a charge, so it works whether or not Razorpay is live.
 Separate from referral codes (`kind="referral"`), which are auto-generated per
 org for self-serve sharing, see `api/referrals.py`.
 
-Generate a batch with `scripts/generate_promo_codes.py`, idempotent (only
-tops up to `--count` total, never regenerates or deletes existing rows), 5
+Generate codes from the internal ops panel (internal.clewsec.com, Pilots
+page): 1 to 50 per action, each needs a reason that goes to the audit log. 5
 uppercase alphanumeric chars after `CLEW-`, ambiguous characters 0/O/1/I
-excluded:
+excluded. Each code is single-use (`max_redemptions=1`); track who you've
+handed an unredeemed code to yourself, the system only records
+`redeemed_at`/`redeemed_by_org_id` once a code is actually used, not before.
+The panel does not enforce a lifetime total.
 
-```bash
-python scripts/generate_promo_codes.py --count 500
-```
-
-500 is the agreed total for Clew's lifetime, decided 2026-11-01, run this
-once rather than repeatedly topping up in small batches. Each code is
-single-use (`max_redemptions=1`); track who you've handed an unredeemed code
-to yourself, the system only records `redeemed_at`/`redeemed_by_org_id` once
-a code is actually used, not before.
+The panel itself needs a staff user, created only on the server with
+`python scripts/create_staff_user.py you@example.com` (password plus TOTP
+enrolment). There is no API to create one.
 
 ---
 
@@ -356,7 +354,7 @@ signup creates one org and stays there.
 | `trial_source` / `trial_ends_at` / `pilot_code_used` / `trial_reminder_{5,2}d_sent` | | Promo-code Growth trial only; self-serve signups get no trial |
 | `billing_provider` | varchar | `stripe` / `razorpay` / `pilot` |
 | `stripe_customer_id` / `stripe_subscription_id` | varchar | Pending live keys |
-| `razorpay_customer_id` / `razorpay_subscription_id` / `next_billing_date` / `first_charged_at` | | Live billing path |
+| `razorpay_customer_id` / `razorpay_subscription_id` / `next_billing_date` / `first_charged_at` | | Billing state. `razorpay_subscription_id` and `razorpay_customer_id` are legacy columns, unused since Phase 4 (Orders have no subscription), kept so no migration is needed |
 | `gstin` | varchar | Optional, India only |
 | `monthly_requests_processed` / `monthly_requests_reset_at` | int / timestamptz | Live call-volume metering, enforced against `CALL_VOLUME_CAPS` |
 | `quota_warning_sent_at` / `quota_exceeded_sent_at` | timestamptz | 80% and 100% soft-limit email idempotency, cleared monthly |
@@ -515,18 +513,21 @@ POST /newsletter/confirm     Public, confirms the opt-in token and adds the cont
 
 ### Billing: `api/routes/billing.py`
 ```
-GET  /billing/status                          Current tier + subscription state
+GET  /billing/status                          Plan, period, open bills, payment history, billing details, refund eligibility (owner)
+GET  /billing/banner                          Small subset for the dashboard banner (any member, viewers included)
+PUT  /billing/details                         Billing legal name, address, GSTIN (owner)
 POST /billing/checkout                        Stripe Checkout Session (pending live keys)
 POST /billing/portal                          Stripe Customer Portal Session
 POST /billing/webhook                         Stripe webhook (verify signature + update tier)
 
-POST /billing/razorpay/create-subscription    Create/upgrade/downgrade a Razorpay subscription
-POST /billing/razorpay/verify-payment         Optimistic tier update right after checkout
-POST /billing/razorpay/verify-upgrade-order   Verify the one-time proration order payment (HMAC)
-POST /billing/razorpay/webhook                Authoritative tier reconciliation (HMAC verified)
+POST /billing/razorpay/create-order           Price a purchase server-side (initial, upgrade, bill, restore), create a Payment + Razorpay order
+POST /billing/razorpay/verify-payment         Check the checkout.js HMAC, fetch the payment, apply it (idempotent)
+POST /billing/razorpay/webhook                payment.captured / payment.failed / refund.processed (HMAC verified)
 
-POST /billing/refund-eligibility              72h remorse-window check
-POST /billing/cancel                          Cancel (Razorpay), immediate or at-cycle-end
+POST /billing/refund-eligibility              72h window from the first captured payment
+POST /billing/refund                          Full refund of the payments inside that window, org drops to free
+POST /billing/schedule-downgrade              Lower tier or annual to monthly, applied at the next bill
+POST /billing/cancel                          Cancel at the end of the paid period
 ```
 
 ---
@@ -669,8 +670,10 @@ reuses one in-process memory object and never round-trips through Redis.
 ### Known limitation
 
 Pass B's per-IP focus pass needs ≥20 requests/IP/poll to trigger; thousands of
-low-volume IPs can evade both passes. Cross-IP clustering to catch this is a
-Pro-tier roadmap item, not built yet.
+low-volume IPs can evade both passes. Pass C (cross-IP clustering, Pro and
+Enterprise only) groups similar low-volume IPs, but it is alert only (no
+auto-block, template explanation, `cluster:`-prefixed `source_key`) and has not
+been validated on real distributed traffic.
 
 ### Import path setup
 
@@ -847,24 +850,38 @@ state independently in `ip_memory` (one can fail while the other succeeds).
 
 ## Billing
 
-Razorpay (INR) is the live path; Stripe (USD) is fully written but pending
-live API keys (see "What Is Not Yet Active" below).
+Razorpay is the only live provider. Orgs are billed in USD by default and in
+INR when the billing country is India. The Stripe code is kept but unused (it
+is subscription based and would need adapting to the bill-then-pay rules).
 
-**Razorpay flow:**
-1. User picks a plan in Settings → `POST /billing/razorpay/create-subscription`
-   → Razorpay Checkout opens client-side (`lib/razorpay.ts`)
-2. On success, the frontend calls `POST /billing/razorpay/verify-payment`
-   (optimistic tier update for immediate UX)
-3. Razorpay also sends `subscription.activated`/`halted`/`cancelled` and
-   `payment.failed` webhooks to `POST /billing/razorpay/webhook` (HMAC
-   verified against `RAZORPAY_WEBHOOK_SECRET`), authoritative, reconciles
-   any case the checkout-time call missed (e.g. a deferred downgrade)
-4. Upgrade = cancel old subscription now + start new immediately. Downgrade =
-   cancel old at cycle end + start new then. First-ever payment method uses a
-   calendar-anchor rule instead (on/before the 15th → immediate, after → 1st
-   of next month)
-5. Cancel: `POST /billing/cancel`. Refund-eligible within a 72-hour remorse
-   window from `first_charged_at` (`POST /billing/refund-eligibility`)
+**Razorpay flow (Orders, bill then pay; no Razorpay subscriptions or Plans):**
+1. The customer picks a plan, a bill to pay, an upgrade or a restore. The
+   frontend calls `POST /billing/razorpay/create-order` with the purpose and
+   plan only. The server computes the amount from `PLAN_PRICES`
+   (`api/tiers.py`, keyed by currency, tier and period) and the rules in `api/billing_rules.py`, writes a
+   `payments` row (`status='created'`) and creates the Razorpay order.
+2. Razorpay Checkout opens client-side. On success the frontend calls
+   `POST /billing/razorpay/verify-payment` with the order id, payment id and
+   signature. The server checks the HMAC-SHA256 of `order_id|payment_id`,
+   fetches the payment from Razorpay, requires status `captured` and the
+   stored amount, then calls `apply_captured_payment`.
+3. Razorpay also sends `payment.captured`, `payment.failed` and
+   `refund.processed` to `POST /billing/razorpay/webhook` (HMAC verified
+   against `RAZORPAY_WEBHOOK_SECRET`, replay guarded by
+   `processed_webhook_events`). `payment.captured` calls the same
+   `apply_captured_payment`, which is row-locked and idempotent, so the
+   browser callback and the webhook together credit a payment exactly once.
+4. `apply_captured_payment` (`api/billing_payments.py`) is the only place a
+   payment changes an org: plan purchase, upgrade, bill payment or restore.
+   The Blocking Agreement and GSTIN are recorded here, not before the charge.
+   A failed or abandoned checkout changes nothing on the org.
+5. The daily `billing_cycle` task (`workers/tasks/billing_cycle.py`) issues
+   bills, applies scheduled downgrades, cancels at period end and downgrades
+   orgs whose bill is unpaid past its cancel date.
+6. Refund: `POST /billing/refund` refunds every payment captured within 72
+   hours of the first one, in full, and drops the org to free.
+   `POST /billing/refund-eligibility` reports the window. `POST /billing/cancel`
+   and `POST /billing/schedule-downgrade` only record intent for the next bill.
 
 **Stripe flow (code complete, not live):**
 1. User clicks Upgrade → `POST /billing/checkout` → FastAPI creates a Stripe
@@ -987,28 +1004,37 @@ sending via Resend. Do not set this in production.
 `RESEND_API_KEY`: get from [resend.com](https://resend.com) dashboard → API Keys.
 For S3/WAF, use `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` + `AWS_DEFAULT_REGION`.
 For Razorpay billing, `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET` /
-`RAZORPAY_WEBHOOK_SECRET` + 6 `RAZORPAY_PLAN_*` IDs (see "Adding Razorpay Later").
+`RAZORPAY_WEBHOOK_SECRET` (no Plan IDs are needed, see "Adding Razorpay Later").
 
 ---
 
 ## What Is Not Yet Active
 
-- **Stripe billing (USD)**: code complete, DB migration applied, but blocked on
-  live API keys pending company registration. Razorpay (INR) is the live path
-  today; see "Adding Stripe Later" once keys exist. Non-INR visitors are shown
-  an India-only panel rather than a checkout that cannot complete.
-- **Razorpay itself is not live yet**: the integration is code complete and
-  verified against a mocked client, but the six Plan objects do not exist and
-  all `RAZORPAY_*` env vars are blank, pending bank and KYC approval. Every
-  code path degrades to a clean 503 with blank keys. The two-step upgrade
-  checkout (a one-time Orders API proration charge followed by the subscription
-  mandate) has never run against a live or sandbox account.
+- **Stripe billing**: not used. The code is kept and the DB columns exist, but
+  the decision is to stay on Razorpay only (it handles USD and INR). Adding
+  Stripe later means adapting it to the bill-then-pay rules; see "Adding Stripe
+  Later".
+- **Razorpay is not live yet**: the Orders integration is code complete and
+  tested against a fake client, but the live `RAZORPAY_*` env vars are blank,
+  pending bank and KYC approval. Every code path degrades to a clean 503 with
+  blank keys. Test-mode keys work from `.env.local`. Live mode also needs
+  auto-capture switched on in the Razorpay dashboard and the webhook URL
+  pointed at `/billing/razorpay/webhook`.
 - **Automatic blocking has no on/off switch and does not check the blocking
   agreement.** Configuring a WAF IP set on Growth or above turns unattended
   blocking on implicitly. See TODO2.md, "Blocking".
-- **Pro's "lower detection confidence threshold" and "custom thresholds"**: sold
-  on the pricing page, not built. Every agent's confidence constant is global,
-  nothing is tier-aware on confidence.
+- **Pro's "lower detection confidence threshold" and "custom thresholds"** are
+  built (Phase 8) and gated to Pro and Enterprise by `CUSTOM_THRESHOLD_TIERS`
+  in `api/tiers.py`. Settings live in `Client.detection_config`, validated by
+  `api/detection_config.py` (attack 0.40 to 0.90, default 0.60; block 0.50 to
+  0.95, default 0.75; per-agent minimums; up to 20 endpoint minimums). The
+  block threshold applies to the automatic path only; manual blocks keep 0.75.
+  Growth and above can also turn on `auto_block_dry_run`, which records
+  `Verdict.would_have_blocked_at` instead of pushing a block
+  (`GET /verdicts/would-have-blocked`). The LLM only writes the explanation
+  after the rules decide (`LLM_ENABLED` is the kill switch, `LLM_MODEL`
+  defaults to `openai/gpt-oss-20b`). `ABUSEIPDB_API_KEY` is optional; the code
+  caps lookups at 900 a day against the free plan's 1000.
 - **Sentry / exception tracking, a public status page, an internal ops panel,
   and a staging environment**: all post-MVP. None block onboarding a first real
   client; revisit when there is an actual client or audience to justify them.
@@ -1544,25 +1570,61 @@ pm2 restart all
 #### Database Backups
 
 PostgreSQL runs on a single EC2 instance with no managed backup, so a nightly
-`pg_dump` to S3 is the MVP backup strategy.
+`pg_dump` to S3 is the MVP backup strategy. Two scripts do the work:
+`scripts/backup_postgres.sh` (dump, gzip, check, upload; exits non-zero on any failure) and
+`scripts/restore_postgres.sh` (restore into a new, named throwaway database, never the live one).
+Neither script contains a secret. Both read `DATABASE_URL` from the environment or the repo `.env`.
 
 **Set up the backup bucket (once):**
-1. S3 → Create bucket → `clew-db-backups`
-2. Add a lifecycle rule on the bucket deleting objects older than 30 days
-3. Attach `s3:PutObject` on this bucket to the `clew-server` IAM user (step 1.1), in addition to its existing WAF permissions, as a separate statement scoped to the backup bucket only
+1. S3 → Create bucket → `clew-db-backups`, Block all public access on, default encryption on
+2. Add a lifecycle rule on the bucket that expires objects 30 days after creation. This is the only thing that ever deletes a backup
+3. Give the `clew-server` IAM user (step 1.1) one extra statement, scoped to the backup bucket, that is **write-only**: `s3:PutObject` and nothing else. No `s3:DeleteObject`, no `s3:GetObject`, no `s3:ListBucket`, so a compromised server cannot wipe or read the backups
 
-**Add the nightly backup to crontab:**
+```json
+{
+  "Effect": "Allow",
+  "Action": "s3:PutObject",
+  "Resource": "arn:aws:s3:::clew-db-backups/db-backups/*"
+}
+```
+
+4. Reading backups back needs a separate identity that is not on the server (your own IAM user or SSO profile with `s3:GetObject` and `s3:ListBucket` on this bucket)
+
+**Server settings.** The server needs the `postgresql-client` tools and the AWS CLI v2 on `PATH`. Add one line to `.env`:
 ```bash
+BACKUP_S3_BUCKET=clew-db-backups
+```
+`BACKUP_S3_PREFIX` is optional (default `db-backups`). The script reuses `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_DEFAULT_REGION` from `.env` (the `clew-server` user), so cron needs no extra credentials. Objects are named `db-backups/clew_YYYYMMDDTHHMMSSZ.sql.gz` (UTC).
+
+**Add the nightly backup to crontab** (no password on the command line):
+```bash
+chmod +x scripts/backup_postgres.sh scripts/restore_postgres.sh
 crontab -e
 # Add this line:
-0 2 * * * pg_dump postgresql://clew:PASSWORD@localhost/clew | gzip > /tmp/clew_$(date +\%Y\%m\%d).sql.gz && aws s3 cp /tmp/clew_$(date +\%Y\%m\%d).sql.gz s3://clew-db-backups/db-backups/ && rm /tmp/clew_$(date +\%Y\%m\%d).sql.gz
+0 2 * * * cd /home/ubuntu/abuse && ./scripts/backup_postgres.sh >> /home/ubuntu/clew_backup.log 2>&1
+```
+Run it once by hand first (`./scripts/backup_postgres.sh`); it prints the S3 key it wrote. A failed run ends with an `ERROR:` line in `clew_backup.log` and a non-zero exit code. Check the log after the first few nights, and glance at it weekly.
+
+**Restore drill (before the first paying customer, then now and then):**
+```bash
+# The restore reads from S3, so use the read-capable profile, not the server key:
+AWS_PROFILE=clew-restore ./scripts/restore_postgres.sh --compare-live \
+  s3://clew-db-backups/db-backups/clew_YYYYMMDDTHHMMSSZ.sql.gz clew_restore_drill
+```
+The script refuses to touch the live database name, refuses to reuse a name that already exists, creates the database, restores in one transaction, and prints the row count of every table. `--compare-live` also diffs those counts against the live database. Small differences are expected (the live database moved on after the backup); a missing table or a count near zero is a failed drill. The `clew` role needs `CREATEDB` for the script (`sudo -u postgres psql -c 'ALTER ROLE clew CREATEDB;'`, and `NOCREATEDB` again afterwards). Drop the throwaway database when done: `psql "$DATABASE_URL" -c 'DROP DATABASE clew_restore_drill'`.
+
+**After any restore (drill or real recovery):** two tasks are timestamp driven and must be run by hand against the restored database, otherwise data that should be gone comes back. Set `DATABASE_URL` to the restored database for these commands only:
+```bash
+source .venv/bin/activate
+python -c "from workers.tasks.purge_expired_data import purge_expired_data as t; print(t())"
+python -c "from workers.tasks.purge_deleted_accounts import purge_deleted_accounts as t; print(t())"
 ```
 
-**Test restore before the first paying customer:**
-```bash
-aws s3 cp s3://clew-db-backups/db-backups/clew_YYYYMMDD.sql.gz .
-gunzip < clew_YYYYMMDD.sql.gz | psql postgresql://clew:PASSWORD@localhost/clew
-```
+**Secrets are not in the backup.** Keep `TOTP_ENCRYPTION_KEY`, `JWT_SECRET` and the other `.env` secrets in a password manager that is not on the server. Without the original `TOTP_ENCRYPTION_KEY`, a restored database has unreadable MFA secrets and Cloudflare tokens.
+
+**Redis is not backed up.** Accepted: the agents re-learn each customer in about 15 batches.
+
+**Status:** the scripts are built and tested locally. Installing the cron line on the server, taking the first real backup and running the restore drill there are done at go-live (TODO.md Phase 16 B).
 
 **When to upgrade:** once monthly recurring revenue justifies it, migrate Postgres to RDS with automated daily snapshots and point-in-time recovery. On a t3.small with fewer than 10 customers, pg_dump to S3 is sufficient and costs nothing.
 
@@ -1599,6 +1661,89 @@ UPDATE clients SET tier = 'growth' WHERE email = 'your@email.com';
 ```
 
 Valid values: `starter`, `growth`, `pro`
+
+---
+
+### Staging (same EC2 server)
+
+Staging is a second copy of the stack on the production box, used to try billing, migrations and
+the CSP before they reach production. It shares the machine and nothing else.
+
+| | Production | Staging |
+|---|---|---|
+| Checkout | `/home/ubuntu/abuse` | `/home/ubuntu/abuse-staging` |
+| Postgres | database `clew` | database `clew_staging`, role `clew_staging` |
+| Redis | database index 0 | database index 1 (`REDIS_URL=redis://localhost:6379/1`) |
+| FastAPI port | 8000 | 8100 |
+| Next.js port | 3000 | 3100 |
+| Hosts | `www`, `dashboard`, `internal`, `api` | `stg`, `stg-dashboard`, `stg-internal`, `stg-api` (all under `clewsec.com`) |
+| PM2 names | `clew-*` | `clew-stg-*` |
+| Razorpay | live keys | test keys only |
+| Secrets | production values | fresh values (`JWT_SECRET`, `TOTP_ENCRYPTION_KEY`), never copied from production |
+| Email | Resend | `LOG_EMAILS=1` (printed to the log, nothing sent) |
+
+The repo carries the templates: [docker/nginx.staging.conf](docker/nginx.staging.conf),
+[docker/ecosystem.staging.config.js](docker/ecosystem.staging.config.js) and
+[docker/staging.env.example](docker/staging.env.example) (backend `.env` plus the frontend
+`.env.local` values).
+
+**Set up (founder, once; this is the `[EXTERNAL]` part, nothing here runs from the repo):**
+1. DNS: four A records (`stg`, `stg-dashboard`, `stg-internal`, `stg-api`) to the same Elastic IP
+2. Postgres: `CREATE ROLE clew_staging ...` and `CREATE DATABASE clew_staging OWNER clew_staging` (commands are in `docker/staging.env.example`)
+3. `git clone` the repo to `/home/ubuntu/abuse-staging`, create `.venv`, `pip install -r requirements.txt`, copy `.env` and `frontend/.env.local` from the template, `./scripts/download_geoip.sh` (or copy the two `.mmdb` files from production)
+4. `alembic upgrade head` with the staging `.env`, then `cd frontend && npm ci && npm run build`
+5. Nginx: copy `docker/nginx.staging.conf` to `sites-available/clew-staging`, enable it, `nginx -t`, reload, then run the `certbot --expand` line at the top of that file
+6. `pm2 start docker/ecosystem.staging.config.js && pm2 save`
+7. Razorpay dashboard in **test mode**: webhook `https://stg-api.clewsec.com/billing/razorpay/webhook` with events `payment.captured`, `payment.failed`, `refund.processed`, and its own signing secret
+8. Create a staff user against the staging database (`scripts/create_staff_user.py` with the staging `DATABASE_URL`)
+
+**Rules that keep it safe:**
+- Never put a live Razorpay key, the production `JWT_SECRET` or the production `DATABASE_URL` in the staging `.env`. The JWT secret being different means a staging cookie cannot authenticate on production
+- Deploy to staging first, run the checks below, then deploy production: `git pull`, `pip install`, `alembic upgrade head`, `npm run build`, `pm2 restart clew-stg-api clew-stg-frontend clew-stg-worker clew-stg-beat`
+- Always name the process: `pm2 restart all` restarts production **and** staging
+
+**Check after a staging deploy:**
+```bash
+curl -s http://127.0.0.1:8100/health          # {"status":"ok"}
+curl -sI http://127.0.0.1:3100/ | head -1     # HTTP/1.1 200 OK
+source .venv/bin/activate && alembic current  # the same head as the code
+pm2 status                                    # every clew-stg-* process online
+```
+Then in a browser: register on `https://stg-dashboard.clewsec.com` (Turnstile test key always passes), run one test-mode Razorpay payment with a Razorpay test card, and confirm the bill turns paid, the receipt opens and the webhook shows as delivered in the Razorpay dashboard.
+
+**Status:** the templates are written and checked for syntax only. Provisioning and "a staging deploy works end to end" are not done (TODO.md Phase 10).
+
+---
+
+### Clew Audit delivery (runbook)
+
+Clew Audit is the one-time, sales-assisted retrospective scan (INR 49,999 / USD 599). There is no
+self-serve flow and no report generator. The pricing callout is hidden until you are ready to sell;
+when you are, restore it with the price above and `mailto:support@clewsec.com`.
+
+What the code does today, because the runbook has to work inside it:
+- A first connection reads only the **last 7 days** of the bucket (`workers/tasks/process_logs.py`, `list_objects_since`)
+- After that, each poll reads at most **500 objects**, oldest first, forward from the cursor (`last_processed_key`)
+- If `last_processed_key` names an object that no longer exists, the reader starts from the **oldest** object (`S3Reader.list_new_objects`). The runbook relies on this to reach history older than 7 days
+- At the plan's monthly call volume scanning stops. The audit organization therefore needs a tier with enough volume
+
+**Procedure (run it on the STAGING stack, never on production, so a prospect's history never touches customer data, quotas or the production Redis):**
+1. Agree the window and the bucket with the prospect, and send them the normal read-only trust policy (Customer Onboarding, below). Read access only, no write, no delete
+2. On staging, register an organization for the prospect (`Audit - <company>`), complete the S3 settings with their role ARN, bucket, prefix and region
+3. Lift the cap for the run (staging database only): `UPDATE organizations SET tier = 'pro' WHERE id = '...';`. If the history is larger than 200M calls, split it by prefix and run it in parts
+4. To go further back than 7 days, point the cursor at a key that does not exist, so the reader starts from the oldest object: `UPDATE organizations SET last_processed_key = '__audit_start__' WHERE id = '...';`
+5. Let the staging worker run. Each 15-minute poll consumes up to 500 objects. Watch progress with `pm2 logs clew-stg-worker` and `SELECT last_processed_key, last_scan_status FROM organizations WHERE id = '...';`. It is finished when polls report no new objects
+6. Build the findings from the `verdicts` table (columns `timestamp`, `ip`, `endpoint`, `threat_type`, `severity`, `confidence`, `explanation`, `would_have_blocked_at`, `cost_prevented`). Start with:
+   ```sql
+   SELECT threat_type, severity, count(*) AS verdicts, count(DISTINCT ip) AS ips
+   FROM verdicts WHERE org_id = '...' GROUP BY 1, 2 ORDER BY verdicts DESC;
+   ```
+   Write the report by hand: summary, top attack types, top offending IPs with example endpoints, an estimate of cost prevented, and what a live subscription would have blocked
+7. Send the report. Then disconnect and delete: remove the audit organization from staging (that cascades its verdicts) and ask the prospect to delete the role
+
+**Known limits (say so in the sales call):** the retention window of the tier applies to the verdicts, so
+export the report before the retention purge runs; there is no per-record scoring beyond the verdicts;
+very large histories take days at 500 objects per 15 minutes.
 
 ---
 
@@ -1689,20 +1834,26 @@ only until that fallback is retired:
 
 ### Adding Razorpay Later (INR — build first)
 
-1. Razorpay Dashboard → Products → Plans → create 6 plans (Starter/Growth/Pro × Monthly/Annual)
-2. Copy each Plan ID
-3. Add to `.env`:
+No Plans are created in the Razorpay dashboard: billing uses one-time Orders
+priced by the server from `api/tiers.py`.
+
+1. Dashboard → Account & Settings → API keys → generate the live key pair
+2. Settings → Payment capture → set to **automatic** (the server requires a
+   `captured` payment)
+3. Developers → Webhooks → add `https://api.clewsec.com/billing/razorpay/webhook`
+   with events `payment.captured`, `payment.failed` and `refund.processed`,
+   and a signing secret
+4. Add to `.env`:
    ```
    RAZORPAY_KEY_ID=rzp_live_...
    RAZORPAY_KEY_SECRET=...
-   RAZORPAY_PLAN_STARTER_MONTHLY_INR=plan_...
-   # ... (see .env.example for full list)
+   RAZORPAY_WEBHOOK_SECRET=...
    ```
-4. `pm2 restart clew-api`
+5. `pm2 restart clew-api`
 
 ---
 
-### Adding Stripe Later (USD — after company registration)
+### Adding Stripe Later (optional, not planned)
 
 1. Stripe Dashboard → Developers → API keys → copy Secret key (`sk_live_...`)
 2. Products → create one product per tier, two prices each (monthly INR + USD):

@@ -42,7 +42,8 @@ function fmtTime(iso: string) {
 export function NotificationsTab({ role, alertEmail, tier }: { role: string | null; alertEmail: string | null; tier: string | null }) {
   const [data, setData] = useState<AlertSentList | null>(null);
   const [page, setPage] = useState(1);
-  const [loading, setLoading] = useState(true);
+  const [loadedPage, setLoadedPage] = useState<number | null>(null);
+  const loading = loadedPage !== page;
   const [testState, setTestState] = useState<"idle" | "sending" | "sent" | "failed">("idle");
   const [testMessage, setTestMessage] = useState<string | null>(null);
 
@@ -51,11 +52,10 @@ export function NotificationsTab({ role, alertEmail, tier }: { role: string | nu
   const canManageAlerts = role === "owner" || role === "admin";
 
   const load = useCallback(() => {
-    setLoading(true);
     apiFetch(`/alerts?page=${page}&limit=${LIMIT}`)
       .then(r => r.ok ? r.json() : null)
       .then(d => { if (d) setData(d); })
-      .finally(() => setLoading(false));
+      .finally(() => setLoadedPage(page));
   }, [page]);
 
   useEffect(() => { load(); }, [load]);

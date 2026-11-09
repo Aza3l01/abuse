@@ -36,6 +36,29 @@ export function onSessionExpired(callback: () => void): () => void {
   return () => window.removeEventListener(SESSION_EXPIRED_EVENT, callback);
 }
 
+export interface LastApiError {
+  /** Value of the X-Correlation-Id response header, quotable to support. */
+  id: string;
+  status: number;
+  /** Path only, never the query string. */
+  path: string;
+}
+
+let lastApiError: LastApiError | null = null;
+
+/** The most recent failed apiFetch call that carried a correlation id, or null. */
+export function getLastApiError(): LastApiError | null {
+  return lastApiError;
+}
+
+// 401 is skipped: it is the routine expired-token case handled by the silent
+// refresh, not something a customer would report.
+function recordApiError(res: Response, path: string): void {
+  if (res.status < 400 || res.status === 401) return;
+  const id = res.headers.get("x-correlation-id");
+  if (id) lastApiError = { id, status: res.status, path: path.split("?")[0] };
+}
+
 /**
  * Item 14 — central API client for authenticated dashboard calls.
  *
@@ -53,7 +76,10 @@ export async function apiFetch(path: string, init: RequestInit = {}): Promise<Re
   }
 
   const res = await fetch(url, opts);
-  if (res.status !== 401) return res;
+  if (res.status !== 401) {
+    recordApiError(res, path);
+    return res;
+  }
 
   const refreshRes = await fetch(`${API_URL}/auth/refresh`, {
     method: "POST",
@@ -61,7 +87,10 @@ export async function apiFetch(path: string, init: RequestInit = {}): Promise<Re
   });
   if (refreshRes.ok) {
     const retryRes = await fetch(url, opts);
-    if (retryRes.status !== 401) return retryRes;
+    if (retryRes.status !== 401) {
+      recordApiError(retryRes, path);
+      return retryRes;
+    }
   }
   notifySessionExpired();
   return res;

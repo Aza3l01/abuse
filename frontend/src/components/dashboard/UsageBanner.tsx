@@ -10,11 +10,11 @@ interface UsageStatus {
 }
 
 /**
- * Item 30 (section 5) soft limits: amber banner at 80% of the tier's
- * monthly call volume, persistent red banner at 100%+. Scanning is never
- * paused by this, purely informational (an email is also sent once per
- * threshold per billing month, see send_quota_warning_email). Hidden
- * entirely for enterprise (no fixed cap) and for any org under 80%.
+ * Item 30 (section 5): amber banner at 80% of the tier's monthly call
+ * volume, persistent red banner at 100%+ (scanning is paused at the cap, see
+ * process_logs). An email is also sent once per threshold per billing month,
+ * see send_quota_warning_email. Hidden entirely for enterprise (no fixed cap)
+ * and for any org under 80%.
  */
 export function UsageBanner() {
   const [status, setStatus] = useState<UsageStatus | null>(null);
@@ -52,7 +52,7 @@ export function UsageBanner() {
     >
       <span>
         {exceeded
-          ? `You've reached your monthly call volume (${used} / ${cap}). Clew keeps scanning regardless.`
+          ? `You've reached your monthly call volume (${used} / ${cap}). Scanning is paused until your counter resets or you upgrade.`
           : `You're at ${Math.floor(percent * 100)}% of your monthly call volume (${used} / ${cap}).`}
       </span>
       <Link

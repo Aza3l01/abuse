@@ -11,13 +11,12 @@ function ConfirmBody() {
   const token = searchParams.get("token") ?? "";
   const [state, setState] = useState<"checking" | "done" | "error">("checking");
   const [message, setMessage] = useState("");
+  // A missing token is known at render time, so it is derived, not set in an effect.
+  const shownState = token ? state : "error";
+  const shownMessage = token ? message : "This confirmation link is missing its token.";
 
   useEffect(() => {
-    if (!token) {
-      setState("error");
-      setMessage("This confirmation link is missing its token.");
-      return;
-    }
+    if (!token) return;
     fetch(`${API_URL}/newsletter/confirm`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -42,10 +41,10 @@ function ConfirmBody() {
   return (
     <AuthLayout title="Newsletter subscription">
       <p style={{ fontSize: "13px", color: "var(--color-text-muted)", lineHeight: 1.5 }}>
-        {state === "checking" && "Confirming your subscription…"}
-        {state !== "checking" && message}
+        {shownState === "checking" && "Confirming your subscription…"}
+        {shownState !== "checking" && shownMessage}
       </p>
-      {state !== "checking" && (
+      {shownState !== "checking" && (
         <p style={{ fontSize: "13px", marginTop: "20px" }}>
           <Link href="/" style={{ color: "var(--color-text)" }}>Back to clewsec.com</Link>
         </p>

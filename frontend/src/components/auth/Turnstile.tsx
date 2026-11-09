@@ -14,6 +14,7 @@ declare global {
           "expired-callback"?: () => void;
         }
       ) => string;
+      remove: (widgetId: string) => void;
     };
   }
 }
@@ -29,13 +30,17 @@ export function Turnstile({ onToken }: TurnstileProps) {
   const siteKey = process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY ?? "";
 
   useEffect(() => {
-    if (scriptLoaded && containerRef.current && window.turnstile) {
-      window.turnstile.render(containerRef.current, {
-        sitekey: siteKey,
-        callback: onToken,
-        "expired-callback": () => onToken(""),
-      });
-    }
+    if (!scriptLoaded || !containerRef.current || !window.turnstile) return;
+    const widgetId = window.turnstile.render(containerRef.current, {
+      sitekey: siteKey,
+      callback: onToken,
+      "expired-callback": () => onToken(""),
+    });
+    // Remove the widget on unmount so leaving and re-entering the page does
+    // not leave an orphaned widget behind in Turnstile's own state.
+    return () => {
+      window.turnstile?.remove(widgetId);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scriptLoaded]);
 
@@ -44,7 +49,7 @@ export function Turnstile({ onToken }: TurnstileProps) {
       <Script
         src="https://challenges.cloudflare.com/turnstile/v0/api.js"
         strategy="afterInteractive"
-        onLoad={() => setScriptLoaded(true)}
+        onReady={() => setScriptLoaded(true)}
       />
       <div ref={containerRef} />
     </>

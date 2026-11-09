@@ -18,7 +18,7 @@ export function Hero() {
           className="text-lg leading-relaxed mb-10"
           style={{ color: "var(--color-text-muted)" }}
         >
-          Clew deploys six specialised AI agents against your AWS API
+          Six specialized agents deployed against your AWS API
           Gateway and ALB logs, each independently trained on a different
           attack vector and all running in parallel. Bots, credential
           stuffing, endpoint scanning, data exfiltration. No code changes.

@@ -22,6 +22,8 @@ from sqlalchemy.orm import Session
 from api.deps import CurrentOrg, get_current_org, get_db, require_role
 from api.auth_utils import encrypt_secret
 from api.aws import CLEW_AWS_ACCOUNT_ID, AWSAccessError, aws_session_for_org
+from api.detection_config import validate_detection_config
+from api.tiers import AUTO_BLOCK_TIERS, CUSTOM_THRESHOLD_TIERS, MANUAL_BLOCK_TIERS
 from db.models import Organization
 
 router = APIRouter()
@@ -98,6 +100,10 @@ class OrgConfig(BaseModel):
     # pipeline-triggered block, visible only for Growth and above on the
     # Settings page, off by default.
     auto_block_enabled:  bool
+    # Phase 8: dry-run for automatic blocking (log what would have been
+    # blocked, touch nothing) and the Pro tuning config (null = engine defaults).
+    auto_block_dry_run:  bool
+    detection_config:    Optional[dict]
     # Item 61: tenant's expected home country, used by GeoIPAgent
     home_country:        Optional[str]
     # Phase 2: cross-account IAM role. aws_external_id is server-generated,
@@ -159,6 +165,12 @@ class ClientUpdate(BaseModel):
     # blocking_tos_accepted_at already set before it can be switched on),
     # not just by the Settings page's own modal-gated toggle.
     auto_block_enabled: Optional[bool] = None
+    # Phase 8: Growth and above (same tiers as auto-block). Only takes effect
+    # while auto_block_enabled is on.
+    auto_block_dry_run: Optional[bool] = None
+    # Phase 8: Pro and Enterprise. {} resets to engine defaults. Shape and
+    # ranges are validated by api/detection_config.py.
+    detection_config: Optional[dict] = None
     # Item 61: tenant's expected home country, ISO 3166-1 alpha-2
     home_country:      Optional[str] = None
     # Phase 2: cross-account IAM role ARN, pasted back after the customer
@@ -187,6 +199,13 @@ class ClientUpdate(BaseModel):
         if v is not None and v not in ("all", "high_critical_only"):
             raise ValueError("alert_severity_threshold must be 'all' or 'high_critical_only'")
         return v
+
+    @field_validator("detection_config")
+    @classmethod
+    def validate_detection_config_field(cls, v: Optional[dict]) -> Optional[dict]:
+        if v is None:
+            return None
+        return validate_detection_config(v) or {}
 
     @field_validator("home_country")
     @classmethod
@@ -256,6 +275,8 @@ def _to_org_config(org: Organization, role: str) -> OrgConfig:
         cloudflare_zone_id=org.cloudflare_zone_id,
         blocking_tos_accepted_at=org.blocking_tos_accepted_at,
         auto_block_enabled=org.auto_block_enabled,
+        auto_block_dry_run=bool(org.auto_block_dry_run),
+        detection_config=org.detection_config or None,
         home_country=org.home_country,
         aws_role_arn=org.aws_role_arn,
         aws_external_id=org.aws_external_id,
@@ -299,6 +320,7 @@ async def update_me(
     _ALLOWED_FIELDS = {
         "s3_bucket", "s3_prefix", "log_format", "aws_region",
         "alert_email", "alert_severity_threshold",
+        "auto_block_dry_run", "detection_config",
         "waf_ip_set_id", "cloudflare_zone_id", "cloudflare_token",
         "home_country", "aws_role_arn", "auto_block_enabled",
     }
@@ -315,12 +337,21 @@ async def update_me(
             status_code=400,
             detail="Accept the Blocking Subscription Agreement before enabling automatic blocking.",
         )
+    # Phase 8 tier gates. Turning dry-run off is always allowed (so a
+    # downgraded org is never stuck in it), turning it on needs the
+    # automatic-blocking tiers. Detection tuning is Pro and Enterprise only.
+    if update_data.get("auto_block_dry_run") and org.tier not in AUTO_BLOCK_TIERS:
+        raise HTTPException(status_code=403, detail="Dry-run mode is available on Growth and above.")
+    if "detection_config" in update_data and org.tier not in CUSTOM_THRESHOLD_TIERS:
+        raise HTTPException(status_code=403, detail="Custom detection thresholds are available on Pro and above.")
     for field, value in update_data.items():
         if field not in _ALLOWED_FIELDS:
             continue
         # Item 57: encrypt at rest, same primitive as TOTP secrets.
         if field == "cloudflare_token":
             value = encrypt_secret(value)
+        if field == "detection_config":
+            value = value or None  # {} resets to engine defaults
         setattr(org, field, value)
 
     # Changing ingestion config resets progress so we don't skip new logs
@@ -376,10 +407,14 @@ async def update_me(
 # ---------------------------------------------------------------------------
 # POST /clients/me/accept-blocking-tos
 #
-# Item 28/69: one-time acceptance of the Blocking Subscription Agreement,
-# shown in a modal right before a manual-block-eligible tier's payment flow
-# opens. Backend block actions (verdicts.py) 403 until this is set. Owner-only,
-# same as the billing upgrade action that triggers this modal.
+# Item 28/69: one-time acceptance of the Blocking Subscription Agreement.
+# Backend block actions (verdicts.py) 403 until this is set. Owner-only.
+#
+# Phase 4: a purchase records the acceptance itself, at payment capture (the
+# accept_blocking_tos flag on billing/razorpay/create-order). This endpoint
+# remains only for orgs that already have blocking without a checkout, which
+# today means Growth pilots, so it returns 403 unless the org's current tier
+# is one that can manually block. A free org can never record it.
 # ---------------------------------------------------------------------------
 
 @router.post("/clients/me/accept-blocking-tos", response_model=OrgConfig)
@@ -388,6 +423,11 @@ async def accept_blocking_tos(
     db: Session = Depends(get_db),
 ):
     org = current_org.organization
+    if org.tier not in MANUAL_BLOCK_TIERS:
+        raise HTTPException(
+            status_code=403,
+            detail="The Blocking Subscription Agreement can only be accepted on a plan that includes blocking.",
+        )
     if org.blocking_tos_accepted_at is None:
         org.blocking_tos_accepted_at = datetime.now(timezone.utc)
         db.commit()

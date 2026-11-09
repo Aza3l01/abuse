@@ -8,8 +8,9 @@ from dotenv import load_dotenv
 load_dotenv()
 load_dotenv(".env.local", override=True)  # local dev overrides (gitignored)
 
-from api.routes import auth, clients, verdicts, dashboard, ips, billing, org, settings, alerts, newsletter
+from api.routes import auth, clients, verdicts, dashboard, ips, billing, org, settings, alerts, newsletter, internal
 from api.limiter import limiter
+from api.correlation import CorrelationIdMiddleware
 
 _debug = os.environ.get("DEBUG", "").lower() in ("1", "true", "yes")
 
@@ -70,7 +71,12 @@ app.add_middleware(
     allow_credentials=True,   # required for cookies to be sent cross-origin
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Correlation-Id"],
 )
+
+# Added last so it is the outermost layer: every response, CORS preflights
+# included, carries X-Correlation-Id.
+app.add_middleware(CorrelationIdMiddleware)
 
 # ------------------------------------------------------------------
 # Routers
@@ -85,6 +91,8 @@ app.include_router(org.router,                  tags=["org"])
 app.include_router(settings.router,             tags=["settings"])
 app.include_router(alerts.router,               tags=["alerts"])
 app.include_router(newsletter.router,            tags=["newsletter"])
+# Phase 6 staff ops panel. Staff auth only; nginx serves /internal on the internal host alone.
+app.include_router(internal.router,              tags=["internal"])
 
 
 # ------------------------------------------------------------------

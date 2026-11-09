@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { DASHBOARD_URL } from "@/lib/urls";
+import { useDetectedCurrency } from "@/lib/useDetectedCurrency";
 
 type Industry = "saas" | "fintech" | "marketplace" | "other";
 type VolumeKey = "under1m" | "1m_10m" | "10m_50m" | "over50m";
@@ -48,6 +49,12 @@ const TOTAL_DAMPENING = 0.88;         // total is tightened, not a naive sum of 
 
 type Range = { low: number; high: number };
 
+// Approximate display rate for the USD view only. All cost constants above are
+// in INR. This is a rounded figure for a directional estimate, not a live
+// exchange rate, and it is separate from the rate behind the USD plan prices
+// in lib/pricing.ts. The page tells the visitor it is approximate.
+const INR_PER_USD = 84;
+
 function computeAnnualCostRange(
   calls: number,
   industry: Industry
@@ -83,7 +90,7 @@ function computeAnnualCostRange(
 }
 
 function fmt(amount: number, currency: "INR" | "USD"): string {
-  const value = currency === "USD" ? Math.round(amount / 84) : amount;
+  const value = currency === "USD" ? Math.round(amount / INR_PER_USD) : amount;
   const symbol = currency === "USD" ? "$" : "₹";
 
   if (currency === "INR") {
@@ -108,18 +115,7 @@ const SMB_BASELINE = computeAnnualCostRange(10_000_000, "saas");
 export function CostCalculator() {
   const [volume, setVolume] = useState<VolumeKey>("1m_10m");
   const [industry, setIndustry] = useState<Industry>("saas");
-  const [currency, setCurrency] = useState<"INR" | "USD">("INR");
-
-  useEffect(() => {
-    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    const lang = navigator.language || "";
-    const isIndia =
-      tz.includes("Kolkata") ||
-      tz.includes("Calcutta") ||
-      lang === "hi" ||
-      lang.endsWith("-IN");
-    setCurrency(isIndia ? "INR" : "USD");
-  }, []);
+  const [currency, setCurrency] = useDetectedCurrency();
 
   const selectedVolume = VOLUME_OPTIONS.find((v) => v.key === volume)!;
   const result = computeAnnualCostRange(selectedVolume.calls, industry);
@@ -300,6 +296,7 @@ export function CostCalculator() {
                 >
                   <p className="text-xs" style={{ color: "var(--color-text-muted)" }}>
                     Directional estimate using industry bot-traffic and breach-cost benchmarks.{" "}
+                    {currency === "USD" && `USD shown at about ₹${INR_PER_USD} per $1. `}
                     <a
                       href="/docs#cost-prevented-estimate"
                       style={{ color: "var(--color-text-muted)", textDecoration: "underline" }}

@@ -136,8 +136,10 @@ export function VerdictsTab({ role, tier }: { role: string | null; tier: string 
   const [customFrom, setCustomFrom] = useState("");
   const [customTo,   setCustomTo]   = useState("");
   const [data,       setData]       = useState<VerdictList | null>(null);
-  const [loading,    setLoading]    = useState(true);
+  const [loadedKey,  setLoadedKey]  = useState<string | null>(null);
   const [error,      setError]      = useState<string | null>(null);
+  const queryKey = JSON.stringify([page, limit, severities, ip, threatType, datePreset, customFrom, customTo]);
+  const loading = loadedKey !== queryKey;
   const [blocking,   setBlocking]   = useState<string | null>(null);
   const [blockError, setBlockError] = useState<string | null>(null);
   const [copiedIp,   setCopiedIp]   = useState<string | null>(null);
@@ -150,9 +152,6 @@ export function VerdictsTab({ role, tier }: { role: string | null; tier: string 
   }, []);
 
   const load = useCallback(() => {
-    setLoading(true);
-    setError(null);
-
     const qs = new URLSearchParams({ page: String(page), limit: String(limit) });
     severities.forEach(s => qs.append("severity", s));
     if (ip) qs.set("ip", ip);
@@ -171,10 +170,10 @@ export function VerdictsTab({ role, tier }: { role: string | null; tier: string 
         if (!r.ok) throw new Error("API error");
         return r.json();
       })
-      .then(d => { if (d) setData(d); })
+      .then(d => { setError(null); if (d) setData(d); })
       .catch(() => setError("Failed to load alerts."))
-      .finally(() => setLoading(false));
-  }, [page, limit, severities, ip, threatType, datePreset, customFrom, customTo]);
+      .finally(() => setLoadedKey(queryKey));
+  }, [queryKey, page, limit, severities, ip, threatType, datePreset, customFrom, customTo]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -200,7 +199,7 @@ export function VerdictsTab({ role, tier }: { role: string | null; tier: string 
     const action = currentlyBlocked ? "unblock" : "block";
     try {
       const r = await apiFetch(`/verdicts/${verdictId}/${action}`, { method: "POST" });
-      if (r.status === 403) {
+      if (r.status === 400 || r.status === 403) {
         const d = await r.json().catch(() => ({}));
         setBlockError(typeof d?.detail === "string" ? d.detail : "Blocking is not available on your plan.");
         return;

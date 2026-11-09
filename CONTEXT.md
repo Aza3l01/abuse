@@ -97,10 +97,10 @@ link, not Razorpay/Stripe.
 The internal tier code intentionally still says `starter` for the Basic
 plan and reuses `free` for the permanent no-card plan: both predate the
 marketing rename, and keeping them unchanged avoided touching billing
-logic, Razorpay Plan ID env vars, and every tier-gated constant across the
+logic and every tier-gated constant across the
 backend. Don't rename these strings without a real reason, `api/tiers.py`'s
 `MANUAL_BLOCK_TIERS`/`AUTO_BLOCK_TIERS`/`CALL_VOLUME_CAPS`/`RETENTION_DAYS`/
-`LTM_TTL_DAYS` and `billing.py`'s `_TIER_RANK` all key off these exact values.
+`LTM_TTL_DAYS`, `PLAN_PRICES_PAISE` and `PAID_TIER_ORDER` all key off these exact values.
 
 Free (Starter) is what every self-serve signup lands on directly: no trial,
 no countdown, no card ever. The only way onto a paid tier as a trial is a
@@ -116,22 +116,25 @@ whether to block. Growth and Pro add automatic unattended blocking on top of
 that, gated behind a one-time Blocking Subscription Agreement acceptance
 since it's an active security action, not passive monitoring. Pro's
 differentiator over Growth is not blocking (both get it) but deeper control
-over the detection engine itself: tunable confidence and custom thresholds.
-That tuning is agreed and specified but **not built**, see `TODO.md` under
-"Detection engine". Growth and above also get Groq-generated threat
-explanations.
+over the detection engine itself: custom confidence thresholds, per-agent
+minimums and per-endpoint minimums (Phase 8, built, Pro and Enterprise only,
+validated by `api/detection_config.py`). Growth and above also get
+Groq-generated threat explanations.
 
-**What's real as of 2026-10-01, and what still isn't:** call-volume metering
-and tiered retention purge both run. "Threat explanations" is now a real
-Groq-backed LLM call for Growth and above, not the old rule-based template,
-with a fail-soft fallback to the template if Groq is slow, erroring, or
-unconfigured. Two gaps from the original 2026-09-02 audit remain unbuilt and
-are still sold on the pricing page: Pro's "lower detection confidence
-threshold" and "custom thresholds". Nothing in the engine is tier-aware on
-confidence, every agent's constant is global. Those two are the agreed
-differentiator for Pro over Growth (both tiers get automatic blocking, so
-Pro's value has to come from tuning the engine), so they matter commercially,
-but they are not MVP. See `TODO.md` under "Detection engine".
+**What's real as of 2026-11-09 (Phase 8), and what still isn't:** call-volume
+metering and tiered retention purge both run. The detection verdict is always
+decided by the rules (fusion of the six agents). The LLM only writes the 2 to
+4 sentence customer-facing explanation after that decision, for Growth, Pro
+and Enterprise, with a template fallback on error, kill switch
+(`LLM_ENABLED`), or the per-org cap. It never changes a verdict. Pro and
+Enterprise can set custom thresholds (`detection_config`: attack and block
+confidence, per-agent minimums, per-endpoint minimums). Growth and above can
+run automatic blocking in dry run mode (`auto_block_dry_run`), which records
+`would_have_blocked_at` on verdicts without touching the WAF or Cloudflare.
+Pro and Enterprise also get cross-IP clustering (Pass C), which is alert
+only and uses the template explanation. Unverified: Groq pricing for
+`openai/gpt-oss-20b` (the pricing page was blocked), and AbuseIPDB lookups
+stay off until the founder sets `ABUSEIPDB_API_KEY`.
 
 ---
 
@@ -170,12 +173,15 @@ What's live and working:
   Fernet-encrypted Cloudflare tokens
 
 What's built but not switched on yet:
-- **Razorpay** is code complete and verified against a mocked client, but the
-  six Plan objects do not exist and every `RAZORPAY_*` env var is blank,
-  pending the founder's bank and KYC approval. Every code path degrades to a
-  clean 503. The two-step upgrade checkout (a one-time Orders API proration
-  charge, then the subscription mandate) has never run against a live or
-  sandbox account, and is the highest-risk untested path in the product.
+- **Razorpay (Orders, bill then pay)** is code complete and covered by tests
+  against a fake client. A real test-mode Checkout payment has not yet been run
+  (the first set of test keys returned 401; see the dated note in `TODO.md`). There are no Razorpay
+  subscriptions or Plan objects: the server prices every purchase from
+  `PLAN_PRICES_PAISE`, creates an order, and `apply_captured_payment`
+  (`api/billing_payments.py`) applies the captured payment once, whether the
+  browser callback or the webhook arrives first. Live keys, the webhook URL
+  and secret, and auto-capture are still the founder's to set, pending bank
+  and KYC approval. Every code path degrades to a clean 503 with blank keys.
 - **Stripe billing (USD)**: all code written, migration applied, blocked on
   live API keys which are themselves blocked on company registration. Non-INR
   visitors see an India-only panel rather than a checkout that cannot
@@ -250,7 +256,12 @@ transactional mail never touches the root domain's own sending reputation.
 **Phase 6, billing.** Stripe was already fully built before this phase; this
 phase added Razorpay alongside it (not instead of it), plus real promo code
 redemption, a trial-expiry job that reverts an unpaid trial to the free
-tier, and the blocking Terms of Service acceptance gate. A genuinely
+tier, and the blocking Terms of Service acceptance gate. (Historical: this
+phase built Razorpay as subscriptions with immediate upgrades, deferred
+downgrades and a calendar-anchor first payment. Phase 4 of the billing rework
+replaced that with one-time Orders, monthly bills and the rules in
+`api/billing_rules.py`, so none of the subscription behaviour below exists any
+more.) A genuinely
 interesting implementation detail: Razorpay upgrades take effect
 immediately (cancel the old subscription, start the new one now), but
 downgrades are deferred to the end of the current billing cycle so a
@@ -351,8 +362,9 @@ verification phase was added rather than trusting the unit tests.
   geography-driven verdicts as directionally useful, not independently proven.
 - **Distributed low-and-slow attacks.** The engine's per-IP focus pass needs
   20 or more requests from a single IP within one 15-minute poll to catch
-  attacks that a wide detection window would otherwise dilute. Thousands of
-  distinct low-volume IPs (for example, a large botnet doing credential
+  attacks that a wide detection w(Pass C, Pro and Enterprise only) now exists
+  for this case, but it is alert only and has not been validated on real
+  distributed trafficvolume IPs (for example, a large botnet doing credential
   stuffing at one attempt per IP) can currently evade both detection passes.
   Cross-IP behavioral clustering to catch this is a Pro-tier roadmap item,
   not built yet.

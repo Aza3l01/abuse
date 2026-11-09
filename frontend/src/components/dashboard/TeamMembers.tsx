@@ -7,8 +7,15 @@ interface MemberRow {
   id: string;
   client_id: string;
   email: string;
+  full_name: string | null;
   role: string;
+  is_billing_contact: boolean;
   created_at: string;
+}
+
+interface BillingNotifications {
+  mode: "owner" | "selected" | "all";
+  reminders_enabled: boolean;
 }
 
 interface InviteRow {
@@ -54,6 +61,58 @@ export function TeamMembersSection({ myRole, onOwnershipTransferred }: { myRole:
   const [transferError,  setTransferError]  = useState<string | null>(null);
 
   const isOwner = myRole === "owner";
+
+  // Billing emails: who receives them and whether routine reminders are sent.
+  // Owner only, the endpoint is 403 for everyone else.
+  const [notif,       setNotif]       = useState<BillingNotifications | null>(null);
+  const [notifSaving, setNotifSaving] = useState(false);
+  const [notifErr,    setNotifErr]    = useState<string | null>(null);
+
+  function loadNotifications() {
+    if (!isOwner) return;
+    apiFetch(`/billing/notifications`)
+      .then(r => (r.ok ? r.json() : null))
+      .then((n: BillingNotifications | null) => { if (n) setNotif(n); })
+      .catch(() => {/* the settings stay hidden if they cannot load */});
+  }
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { loadNotifications(); }, [isOwner]);
+
+  async function saveNotifications(next: BillingNotifications) {
+    const previous = notif;
+    setNotif(next);
+    setNotifSaving(true);
+    setNotifErr(null);
+    try {
+      const r = await apiFetch(`/billing/notifications`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(next),
+      });
+      if (!r.ok) {
+        setNotif(previous);
+        const d = await r.json().catch(() => ({}));
+        setNotifErr(typeof d?.detail === "string" ? d.detail : "Could not save billing email settings.");
+      }
+    } catch {
+      setNotif(previous);
+      setNotifErr("Network error. Please try again.");
+    } finally {
+      setNotifSaving(false);
+    }
+  }
+
+  async function handleBillingContact(memberId: string, value: boolean) {
+    setNotifErr(null);
+    const r = await apiFetch(`/org/members/${memberId}/billing-contact`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ is_billing_contact: value }),
+    }).catch(() => null);
+    if (!r || !r.ok) setNotifErr("Could not update the billing contact.");
+    loadAll();
+  }
 
   function loadAll() {
     Promise.all([
@@ -158,14 +217,17 @@ export function TeamMembersSection({ myRole, onOwnershipTransferred }: { myRole:
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
         <thead>
           <tr style={{ borderBottom: "1px solid var(--color-border)" }}>
+            <th style={{ padding: "14px 20px", textAlign: "left", fontWeight: 500, color: "var(--color-text-muted)" }}>Name</th>
             <th style={{ padding: "14px 20px", textAlign: "left", fontWeight: 500, color: "var(--color-text-muted)" }}>Email</th>
             <th style={{ padding: "14px 20px", textAlign: "left", fontWeight: 500, color: "var(--color-text-muted)" }}>Role</th>
+            <th style={{ padding: "14px 20px", textAlign: "left", fontWeight: 500, color: "var(--color-text-muted)" }}>Billing contact</th>
             {isOwner && <th style={{ padding: "14px 20px" }} />}
           </tr>
         </thead>
         <tbody>
           {members.map(m => (
             <tr key={m.id} style={{ borderBottom: "1px solid var(--color-border)" }}>
+              <td style={{ padding: "14px 20px" }}>{m.full_name || ""}</td>
               <td style={{ padding: "14px 20px" }}>{m.email}</td>
               <td style={{ padding: "14px 20px", textTransform: "capitalize" }}>
                 {isOwner && m.role !== "owner" ? (
@@ -179,6 +241,20 @@ export function TeamMembersSection({ myRole, onOwnershipTransferred }: { myRole:
                   </select>
                 ) : (
                   m.role
+                )}
+              </td>
+              <td style={{ padding: "14px 20px" }}>
+                {isOwner ? (
+                  <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", cursor: "pointer" }}>
+                    <input
+                      type="checkbox"
+                      checked={m.is_billing_contact}
+                      onChange={e => handleBillingContact(m.id, e.target.checked)}
+                    />
+                    {m.is_billing_contact ? "Yes" : "No"}
+                  </label>
+                ) : (
+                  <span style={{ color: "var(--color-text-muted)" }}>{m.is_billing_contact ? "Yes" : "No"}</span>
                 )}
               </td>
               {isOwner && (
@@ -213,6 +289,43 @@ export function TeamMembersSection({ myRole, onOwnershipTransferred }: { myRole:
           ))}
         </tbody>
       </table>
+
+      {isOwner && notif && (
+        <div style={{ borderTop: "1px solid var(--color-border)", padding: "18px 20px" }}>
+          <p style={{ fontSize: "11px", color: "var(--color-text-muted)", textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: "10px" }}>
+            Billing emails
+          </p>
+          <div style={{ display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap", marginBottom: "10px" }}>
+            <label style={{ fontSize: "12px", color: "var(--color-text-muted)" }} htmlFor="billing-email-mode">Send billing emails to</label>
+            <select
+              id="billing-email-mode"
+              value={notif.mode}
+              disabled={notifSaving}
+              onChange={e => saveNotifications({ ...notif, mode: e.target.value as BillingNotifications["mode"] })}
+              style={{ ...inputStyle, width: "auto", padding: "4px 8px" }}
+            >
+              <option value="owner">Owners only</option>
+              <option value="selected">Members marked as billing contact</option>
+              <option value="all">All members</option>
+            </select>
+          </div>
+          <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", cursor: "pointer", marginBottom: "8px" }}>
+            <input
+              type="checkbox"
+              checked={notif.reminders_enabled}
+              disabled={notifSaving}
+              onChange={e => saveNotifications({ ...notif, reminders_enabled: e.target.checked })}
+            />
+            Send routine billing reminders (upcoming bill, payment due)
+          </label>
+          <p style={{ fontSize: "11px", color: "var(--color-text-muted)", margin: 0, lineHeight: 1.5 }}>
+            Payment receipts are always sent. The warning before a plan is cancelled and the cancellation notice always reach the owners.
+          </p>
+          {notifErr && (
+            <p style={{ fontSize: "12px", color: "var(--color-critical)", marginTop: "8px" }}>{notifErr}</p>
+          )}
+        </div>
+      )}
 
       {invites && invites.length > 0 && (
         <div style={{ borderTop: "1px solid var(--color-border)", padding: "18px 20px" }}>

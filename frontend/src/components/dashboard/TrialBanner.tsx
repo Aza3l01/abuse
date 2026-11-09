@@ -16,15 +16,19 @@ interface BillingStatus {
  * on the free Starter tier, no trial at all), so this banner is naturally
  * hidden for every org that never had one. Persistent (non-dismissible),
  * owner-only, since GET /billing/status is owner-only (item 8: admin/viewer
- * have no billing visibility at all). Hidden once a payment method is on
- * file.
+ * have no billing visibility at all). Hidden once a plan is paid for.
  */
 export function TrialBanner() {
   const [status, setStatus] = useState<BillingStatus | null>(null);
 
   useEffect(() => {
-    apiFetch(`/billing/status`)
-      .then((res) => (res.ok ? res.json() : null))
+    apiFetch(`/auth/orgs`)
+      .then((res) => (res.ok ? res.json() : []))
+      .then((rows: { role: string; active: boolean }[]) => {
+        const active = rows.find((o) => o.active) ?? rows[0];
+        if (active?.role !== "owner") return null;
+        return apiFetch(`/billing/status`).then((res) => (res.ok ? res.json() : null));
+      })
       .then(setStatus)
       .catch(() => {});
   }, []);
@@ -52,14 +56,14 @@ export function TrialBanner() {
     >
       <span>
         {expired
-          ? "Your Growth trial has ended. You've been moved to the free Starter plan, add a payment method to get Growth back."
-          : `Growth trial: ${daysRemaining} day${daysRemaining === 1 ? "" : "s"} remaining.`}
+          ? "Your Growth trial has ended. You've been moved to the free Starter plan. Choose a plan to get Growth back."
+          : `Growth trial: ${daysRemaining} day${daysRemaining === 1 ? "" : "s"} remaining. Paying for a plan ends the trial.`}
       </span>
       <Link
         href="/settings#billing"
         style={{ color: "var(--color-text)", textDecoration: "underline", flexShrink: 0 }}
       >
-        Add payment method →
+        Choose a plan →
       </Link>
     </div>
   );

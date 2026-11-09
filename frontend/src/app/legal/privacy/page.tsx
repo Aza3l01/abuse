@@ -9,7 +9,7 @@ export const metadata: Metadata = {
 
 export default function PrivacyPage() {
   return (
-    <LegalLayout title="Privacy Policy" lastUpdated="October 1, 2026">
+    <LegalLayout title="Privacy Policy" lastUpdated="November 9, 2026">
       <p style={legalPStyle}>
         This Privacy Policy describes how Clew (&quot;we&quot;, &quot;us&quot;) collects,
         uses, and protects personal data in connection with the Clew service,
@@ -20,7 +20,11 @@ export default function PrivacyPage() {
       <h2 style={legalH2Style}>1. What we collect</h2>
       <p style={legalPStyle}>
         Account data: name, work email, company name, and password hash.
-        Configuration data: the S3 bucket/prefix you connect, AWS region, and
+        Billing data: legal name, billing address and GST number if you
+        provide them, and a record of each bill and payment (amount, date,
+        status). Card, UPI and bank details are entered with Razorpay and are
+        not stored by Clew. Configuration data: the S3 bucket/prefix you
+        connect, AWS region, and
         blocking integration settings. Usage data: the API access logs you
         connect for analysis, which may include IP addresses, request
         methods, endpoints, and user-agents originating from your own
@@ -36,15 +40,20 @@ export default function PrivacyPage() {
 
       <h2 style={legalH2Style}>3. Subprocessors</h2>
       <p style={legalPStyle}>
-        We use the following subprocessors to operate the service: Resend
-        (transactional email) and MaxMind (IP geolocation lookups for GeoIP-based
-        detection). For Growth-tier accounts and above, Groq processes the IP
+        We use the following subprocessors to operate the service: Razorpay
+        (payment processing; you enter your payment details directly in
+        Razorpay Checkout, and Clew sends Razorpay only the amount and an
+        internal order reference), Resend (transactional email) and MaxMind
+        (IP geolocation lookups for GeoIP-based detection). For Growth-tier
+        accounts and above, Groq processes the IP
         address under investigation, aggregated traffic metrics (request rate,
         failure counts, timing patterns), and short indicator strings describing
-        the suspicious behaviour, in order to generate the plain-language threat
-        explanation shown on a verdict&apos;s detail page. Raw request bodies and
-        other customer log content are not sent to Groq. A full Data Processing
-        Agreement describing these in detail is available on request. See{" "}
+        the suspicious behaviour (these can include the country, network name
+        and endpoint paths involved), in order to generate the plain-language
+        threat explanation shown on a verdict&apos;s detail page. Raw request
+        bodies and
+        other customer log content are not sent to Groq. Our Data Processing
+        Agreement describing these in detail is on{" "}
         <Link href="/legal/dpa" style={{ color: "var(--color-text)" }}>our DPA page</Link>.
       </p>
 
@@ -55,8 +64,20 @@ export default function PrivacyPage() {
         Starter, 30 days on Basic, 3 months on Growth, 1 year on Pro, and an
         unlimited window on Enterprise. Data older than your plan&apos;s
         window is permanently deleted on a daily basis, not merely hidden.
-        If you request account deletion, all associated data is permanently
-        deleted within 30 days regardless of plan.
+        If your plan is lowered because a bill was not paid, your previous
+        plan&apos;s window keeps applying for 30 days before the shorter window
+        takes effect. If you request account deletion, all associated data
+        is permanently deleted within 30 days regardless of plan, except
+        payment and billing records (amounts, dates, the organisation name
+        and any billing details you saved). Those records are kept for 8
+        years from the end of the financial year they relate to, because
+        company and tax law in India require us to keep our books of
+        account, and are then deleted.
+      </p>
+      <p style={legalPStyle}>
+        Backups are retained for up to 30 days and then permanently deleted.
+        Data you delete or that expires from your plan&apos;s retention window can
+        therefore remain in a backup for up to 30 more days before it is gone.
       </p>
 
       <h2 style={legalH2Style}>5. Your rights</h2>
@@ -66,6 +87,12 @@ export default function PrivacyPage() {
         <a href="mailto:support@clewsec.com" style={{ color: "var(--color-text)" }}>support@clewsec.com</a>.
         This includes rights available under India&apos;s Digital Personal
         Data Protection Act, 2023 and other applicable data protection laws.
+        Where Clew acts for you as a processor of your log data, you are
+        responsible for the lawful basis for sending that data to us.
+        Billing emails (bills, reminders, plan changes) go to the account
+        owner by default. The owner can instead send them to selected team
+        members marked as billing contacts, or to all members. The plan
+        cancellation warning and notice always also go to the owner.
       </p>
 
       <h2 style={legalH2Style}>6. Security</h2>
@@ -85,6 +112,10 @@ export default function PrivacyPage() {
       <p style={legalPStyle}>
         Questions about this Privacy Policy can be sent to{" "}
         <a href="mailto:support@clewsec.com" style={{ color: "var(--color-text)" }}>support@clewsec.com</a>.
+        Complaints about how your personal data is handled, and requests to
+        exercise your rights, go to the same address with the subject line
+        &quot;Privacy grievance&quot;. We acknowledge them within 7 days and
+        aim to resolve them within 30 days.
       </p>
 
       <h2 style={legalH2Style}>9. Data controller</h2>

@@ -21,7 +21,7 @@ function AcceptInviteInner() {
   const token = params.get("token") ?? "";
 
   const [info,        setInfo]        = useState<InviteInfo | null>(null);
-  const [loading,      setLoading]      = useState(true);
+  const [loading,      setLoading]      = useState(token !== "");
   const [fullName,     setFullName]     = useState("");
   const [password,     setPassword]     = useState("");
   const [submitting,   setSubmitting]   = useState(false);
@@ -31,7 +31,7 @@ function AcceptInviteInner() {
   const [signedInEmail, setSignedInEmail] = useState<string | null | undefined>(undefined);
 
   useEffect(() => {
-    if (!token) { setLoading(false); return; }
+    if (!token) return;
     fetch(`${API_URL}/org/invite/${encodeURIComponent(token)}`)
       .then(r => r.json())
       .then((d: InviteInfo) => setInfo(d))

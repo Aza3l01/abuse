@@ -167,25 +167,41 @@ class MetaAgentOrchestrator:
     _SINGLE_AGENT_THRESHOLD    = 0.80   # when only 1/3 agents fires
     _MIN_CONTRIBUTING_AGENTS   = 1      # at least 1 agent with conf >= 0.55
 
-    def __init__(self, memory: SharedMemory, max_workers: int = 3, llm_client=None):
+    def __init__(
+        self,
+        memory: SharedMemory,
+        max_workers: int = 3,
+        llm_client=None,
+        attack_threshold: Optional[float] = None,
+        agent_min_confidence: Optional[Dict[str, float]] = None,
+        explanation_cache=None,
+        intel_client=None,
+    ):
         self.memory = memory
         self.max_workers = max_workers
         self._llm = llm_client  # Optional[LLMClient]
+        self._explanation_cache = explanation_cache  # Optional[ExplanationCache]
+        # Phase 8 customer tuning, passed in by the caller (the engine never
+        # imports api.tiers). The single-agent bar keeps its +0.20 gap.
+        if attack_threshold is not None:
+            self._ATTACK_THRESHOLD = attack_threshold
+            self._SINGLE_AGENT_THRESHOLD = min(0.95, attack_threshold + 0.20)
+        self._agent_min_confidence: Dict[str, float] = dict(agent_min_confidence or {})
 
         # KnowledgeAgent must be created before ToolRegistry so the tools
         # can reference it.  It runs a warm-up thread in the background.
-        self._knowledge = KnowledgeAgent(memory)
+        self._knowledge = KnowledgeAgent(memory, intel_client=intel_client)
         self._knowledge.warm_up()
 
         self.tools = ToolRegistry(memory, knowledge_agent=self._knowledge)
 
         self._agents: List[BaseAgent] = [
-            VolumeAgent(memory, self.tools, llm_client=llm_client),
-            TemporalAgent(memory, self.tools, llm_client=llm_client),
-            AuthAgent(memory, self.tools, llm_client=llm_client),
-            PayloadAgent(memory, self.tools, llm_client=llm_client),
-            SequenceAgent(memory, self.tools, llm_client=llm_client),
-            GeoIPAgent(memory, self.tools, llm_client=llm_client),
+            VolumeAgent(memory, self.tools),
+            TemporalAgent(memory, self.tools),
+            AuthAgent(memory, self.tools),
+            PayloadAgent(memory, self.tools),
+            SequenceAgent(memory, self.tools),
+            GeoIPAgent(memory, self.tools),
         ]
 
     # ── Public entry point ─────────────────────────────────────────────────
@@ -237,16 +253,24 @@ class MetaAgentOrchestrator:
         # ── Step 2: Parallel agent dispatch ─────────────────────────────
         findings = self._dispatch(records, plan, mode=mode)
 
+        # Customer per-agent minimums apply to fusion and the explanation only.
+        # Agent outcomes below use the raw findings so learned calibration
+        # does not depend on one customer's tuning.
+        tuned_findings = self._apply_agent_minimums(findings)
+
         # ── Step 3: Read consolidated evidence board ─────────────────────
         all_evidence = self.tools.call("read_evidence_board")
         logger.info("[MetaAgent] Evidence board has %d entries", len(all_evidence))
 
         # ── Step 4: Conflict resolution & compound detection ─────────────
-        verdict = self._fuse(findings, all_evidence, plan)
+        verdict = self._fuse(tuned_findings, all_evidence, plan)
 
-        # ── Step 4: Optional LLM meta-fusion ─────────────────────────────
-        if self._llm is not None:
-            verdict = self._llm_fuse(verdict, findings, all_evidence)
+        # ── Step 4: Optional LLM explanation ─────────────────────────────
+        # Phase 2 guardrail: the LLM only writes the explanation text, and
+        # only for a detection. Clean batches never call it, and it can never
+        # change is_attack / threat_type / confidence_score.
+        if self._llm is not None and verdict.is_attack:
+            verdict = self._llm_fuse(verdict, tuned_findings, all_evidence)
 
         # ── Step 5: Record agent outcomes for self-determined weights ─────
         for f in findings:
@@ -486,6 +510,28 @@ class MetaAgentOrchestrator:
             if result is not None:
                 findings.append(result)
         return findings
+
+    # ── Customer per-agent minimums (Phase 8) ──────────────────────────────
+
+    def _apply_agent_minimums(self, findings: List[AgentFinding]) -> List[AgentFinding]:
+        """Treat a finding below the customer's minimum for that agent as no detection."""
+        if not self._agent_min_confidence:
+            return findings
+        tuned: List[AgentFinding] = []
+        for f in findings:
+            minimum = self._agent_min_confidence.get(f.agent_name)
+            if f.threat_detected and minimum is not None and f.confidence_score < minimum:
+                f = dataclasses.replace(
+                    f,
+                    threat_detected=False,
+                    confidence=ConfidenceLevel.LOW,
+                    indicators=f.indicators + [
+                        f"suppressed: confidence {f.confidence_score:.2f} is below this organisation's "
+                        f"minimum of {minimum:.2f} for {f.agent_name}"
+                    ],
+                )
+            tuned.append(f)
+        return tuned
 
     # ── Fusion logic ────────────────────────────────────────────────────────
 
@@ -760,7 +806,7 @@ class MetaAgentOrchestrator:
 
         return "\n".join(lines)
 
-    # ── LLM meta-fusion ────────────────────────────────────────────────────
+    # ── LLM explanation ────────────────────────────────────────────────────
 
     def _llm_fuse(
         self,
@@ -769,11 +815,26 @@ class MetaAgentOrchestrator:
         evidence: List[Dict],
     ) -> FusionVerdict:
         """
-        Ask the LLM to review all agent findings and produce a final authoritative
-        verdict. Falls back to rule_verdict on any error.
+        Ask the LLM to write the customer-facing explanation for a verdict the
+        rule engine has already made. Explanation-only (Phase 2 guardrail): the
+        returned verdict is the rule verdict with at most its `explanation`
+        replaced. is_attack, threat_type, confidence_score, compound_signals and
+        everything else are never taken from the LLM. Falls back to rule_verdict
+        on any error, including an exhausted call budget.
         """
         from engine.llm.prompts import META_SYSTEM_PROMPT, build_meta_user_prompt
         from engine.llm.client import LLMError
+
+        cache_key = None
+        if self._explanation_cache is not None:
+            cache_key = self._explanation_cache.key(
+                rule_verdict.threat_type.value,
+                rule_verdict.contributing_agents,
+                rule_verdict.confidence_score,
+            )
+            cached = self._explanation_cache.get(cache_key)
+            if cached:
+                return dataclasses.replace(rule_verdict, explanation=cached)
 
         agent_findings_data = [
             {
@@ -792,50 +853,21 @@ class MetaAgentOrchestrator:
             rule_is_attack=rule_verdict.is_attack,
             rule_confidence=rule_verdict.confidence_score,
             rule_compound=rule_verdict.compound_signals,
+            rule_threat_type=rule_verdict.threat_type.value,
         )
 
         try:
             result = self._llm.reason(META_SYSTEM_PROMPT, user)
         except LLMError as exc:
-            logger.warning("[MetaAgent] org=%s LLM fusion failed: %s, using rule-based verdict", self.memory.tenant_key, exc)
+            logger.warning("[MetaAgent] org=%s LLM explanation skipped: %s, using rule-based explanation", self.memory.tenant_key, exc)
             return rule_verdict
 
-        is_attack   = bool(result.get("is_attack", rule_verdict.is_attack))
-        raw_threat  = str(result.get("threat_type", rule_verdict.threat_type.value))
-        confidence  = float(result.get("confidence", rule_verdict.confidence_score))
-        compound    = result.get("compound_signal")
-        reasoning   = str(result.get("reasoning", ""))
+        text = result.get("explanation") if isinstance(result, dict) else None
+        if not isinstance(text, str) or not text.strip():
+            return rule_verdict
 
-        try:
-            threat_type = ThreatType(raw_threat)
-        except ValueError:
-            threat_type = rule_verdict.threat_type
-            logger.warning("[MetaAgent] LLM returned unknown threat_type '%s'", raw_threat)
-
-        confidence = max(0.0, min(1.0, confidence))
-
-        new_compound = list(rule_verdict.compound_signals)
-        if compound and compound not in new_compound:
-            new_compound.append(f"[LLM] {compound}")
-
-        # Phase 3/item 33: the whole point is a real explanation instead of
-        # the rule-based template, so the LLM's own reasoning replaces
-        # rule_verdict.explanation rather than being appended after it. Hard
-        # length cap so a runaway generation can't bloat the verdicts row.
-        llm_explanation = reasoning.strip()[:_MAX_LLM_EXPLANATION_CHARS] if reasoning.strip() else rule_verdict.explanation
-
-        logger.debug(
-            "[MetaAgent] LLM fusion: is_attack=%s threat=%s conf=%.2f (rule: %s %.2f)",
-            is_attack, threat_type, confidence,
-            rule_verdict.is_attack, rule_verdict.confidence_score,
-        )
-
-        return FusionVerdict(
-            is_attack=is_attack,
-            threat_type=threat_type if is_attack else ThreatType.NONE,
-            confidence_score=round(confidence, 3),
-            contributing_agents=rule_verdict.contributing_agents,
-            compound_signals=new_compound,
-            explanation=llm_explanation,
-            agent_findings=rule_verdict.agent_findings,
-        )
+        # Hard length cap so a runaway generation can't bloat the verdicts row.
+        text = text.strip()[:_MAX_LLM_EXPLANATION_CHARS]
+        if self._explanation_cache is not None and cache_key is not None:
+            self._explanation_cache.set(cache_key, text)
+        return dataclasses.replace(rule_verdict, explanation=text)

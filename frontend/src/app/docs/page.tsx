@@ -70,7 +70,7 @@ const linkStyle: React.CSSProperties = { color: "var(--color-text)" };
 
 export default function DocsPage() {
   return (
-    <LegalLayout title="Documentation" lastUpdated="October 1, 2026">
+    <LegalLayout title="Documentation" lastUpdated="November 9, 2026">
       <p style={legalPStyle}>
         Most people never need this page. The dashboard has a guided
         onboarding flow that walks you through setup in a few clicks. These
@@ -398,18 +398,59 @@ export default function DocsPage() {
         </table>
       </div>
       <p style={legalPStyle}>
-        Going over your cap sends a warning email at 80% and again at 100%,
-        Clew never stops scanning for being over a soft limit. Upgrading
-        gives you access immediately; moving between two paid plans on or
-        before the 15th charges only the price difference right away, after
-        the 15th nothing is charged until your new plan&apos;s first invoice
-        on the 1st. Downgrading keeps your current plan until the end of
-        the billing cycle you&apos;ve already paid for.
+        Going over your cap: Clew sends a warning email at 80% and again at
+        100%. At 100% scanning pauses, and traffic during the pause is not
+        scanned. Scanning resumes on live traffic when your monthly counter
+        resets or you upgrade to a plan with more volume. There is no overage
+        charge, and a volume top-up for the same plan is not offered.
       </p>
       <p style={legalPStyle}>
-        A full refund is available within 72 hours of your very first
-        payment, self-serve, one time. Today, self-serve payment is INR
-        only through Razorpay, other currencies are invoiced manually.
+        <strong>How billing works.</strong> Clew bills first and you pay
+        after, with no autopay: nothing is ever charged to your card, UPI or
+        bank account unless you start the payment. Your first payment is made
+        when you pick a paid plan. After that, a bill is issued on the 1st of
+        each billing period and is due on the 20th, with a reminder email
+        on the 17th unless you turned routine billing emails off. Prices for
+        INR billing exclude GST; GST tax invoices will be available later.
+        Payment and billing records are kept for 8 years, as the law
+        requires, even after you delete your account.
+      </p>
+      <p style={legalPStyle}>
+        <strong>If a bill is not paid.</strong> Your plan stays active until
+        the 1st of the following month, then the account moves to the free
+        Starter plan. The unpaid bill stays open, your history keeps your
+        previous plan&apos;s retention window for 30 more days, and IPs you
+        already blocked stay blocked and can still be unblocked.
+      </p>
+      <p style={legalPStyle}>
+        <strong>Restoring your plan.</strong> Open{" "}
+        <Link href={`${DASHBOARD_URL}/settings#billing`} style={linkStyle}>
+          Settings → Plan &amp; Billing
+        </Link>
+        , choose your plan, and pay all open bills plus the first period of
+        the plan in a single checkout. Any new paid purchase needs every open
+        bill settled first.
+      </p>
+      <p style={legalPStyle}>
+        <strong>Changing plan.</strong> Upgrading takes effect immediately
+        and is paid at once, after every open bill is paid: a higher tier
+        costs the price difference and your next bill date does not change.
+        Moving to an annual plan (from monthly, or from a lower annual plan)
+        costs the full annual price and starts a new year now, and the time
+        left on your old plan is forfeited with nothing credited. Downgrading
+        takes effect from your next bill.
+        Cancelling ends your plan at the end of the period you already paid
+        for. Plan changes are not prorated.
+      </p>
+      <p style={legalPStyle}>
+        <strong>Refunds.</strong> A full refund is available within 72 hours
+        of your very first payment, self-serve from Settings, one time.
+        Annual plans are non-refundable after that window. See the{" "}
+        <Link href="/legal/refund-policy" style={linkStyle}>Refund Policy</Link>.
+        Self-serve payment is through Razorpay: customers billed in India pay
+        in INR, everyone else pays in USD. Only the account owner can see and
+        pay bills, and billing emails can also be sent to selected team
+        members marked as billing contacts.
       </p>
 
       <h2 style={legalH2Style} id="security-and-data-handling">
@@ -499,9 +540,17 @@ export default function DocsPage() {
 
       <h3 style={h3Style}>What happens if I downgrade?</h3>
       <p style={legalPStyle}>
-        Your current plan stays active until the end of the billing cycle
-        you&apos;ve already paid for. You can always unblock an IP you
+        The downgrade takes effect from your next bill, so your current plan
+        stays active until then. You can always unblock an IP you
         previously blocked, at any tier.
+      </p>
+
+      <h3 style={h3Style}>What happens if I do not pay a bill?</h3>
+      <p style={legalPStyle}>
+        Your plan stays active until the 1st of the following month, then the
+        account moves to the free Starter plan. The bill stays open, and you
+        can restore your plan any time by paying the open bills plus a new
+        period.
       </p>
 
       <h3 style={h3Style}>What if I remove Clew&apos;s access on my side?</h3>

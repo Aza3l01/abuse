@@ -1,28 +1,16 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { PRICING_TIERS as TIERS, FEATURE_ROWS } from "@/lib/pricing";
 import { DASHBOARD_URL } from "@/lib/urls";
+import { useDetectedCurrency } from "@/lib/useDetectedCurrency";
 
 type Currency = "INR" | "USD";
 type BillingPeriod = "monthly" | "annual";
 
-const AUDIT_PRICE = { INR: "₹49,999", USD: "$599" };
-
 export function Pricing({ standalone = false }: { standalone?: boolean } = {}) {
-  const [currency, setCurrency] = useState<Currency>("INR");
+  const [currency, setCurrency] = useDetectedCurrency();
   const [billingPeriod, setBillingPeriod] = useState<BillingPeriod>("monthly");
-
-  useEffect(() => {
-    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    const lang = navigator.language || "";
-    const isIndia =
-      tz.includes("Kolkata") ||
-      tz.includes("Calcutta") ||
-      lang === "hi" ||
-      lang.endsWith("-IN");
-    setCurrency(isIndia ? "INR" : "USD");
-  }, []);
 
   return (
     <section
@@ -264,55 +252,11 @@ export function Pricing({ standalone = false }: { standalone?: boolean } = {}) {
           ))}
         </div>
 
-        {/* Clew Audit callout */}
-        <div
-          className="-mt-px flex flex-col md:flex-row md:items-center justify-between gap-6"
-          style={{
-            border: "1px solid var(--color-border)",
-            background: "var(--color-surface)",
-            padding: "24px 32px",
-          }}
-        >
-          <div>
-            <p
-              className="font-brand font-bold text-lg mb-1"
-              style={{ color: "var(--color-text)" }}
-            >
-              Clew Audit{" "}
-              <span
-                className="font-mono text-xs font-normal ml-2"
-                style={{ color: "var(--color-text-muted)" }}
-              >
-                one-time
-              </span>
-            </p>
-            <p
-              className="text-sm"
-              style={{ color: "var(--color-text-muted)", maxWidth: "800px" }}
-            >
-              {`Full retrospective scan of your available log history.`}
-            </p>
-          </div>
-          <div className="flex items-center gap-6 shrink-0">
-            <p
-              className="font-brand font-bold text-2xl"
-              style={{ color: "var(--color-text)" }}
-            >
-              {AUDIT_PRICE[currency]}
-            </p>
-            <a
-              href="mailto:support@clewsec.com"
-              className="text-sm font-medium transition-opacity hover:opacity-80 whitespace-nowrap"
-              style={{
-                padding: "10px 20px",
-                border: "1px solid var(--color-border)",
-                color: "var(--color-text)",
-              }}
-            >
-              Request audit
-            </a>
-          </div>
-        </div>
+        {currency === "INR" && (
+          <p className="text-xs" style={{ color: "var(--color-text-muted)", margin: "12px 0 0" }}>
+            Prices exclude GST.
+          </p>
+        )}
       </div>
     </section>
   );

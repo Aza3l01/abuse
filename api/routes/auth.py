@@ -25,6 +25,7 @@ DELETE /auth/sessions
 """
 import os
 import hashlib
+import uuid
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from typing import Optional
@@ -1060,14 +1061,14 @@ async def list_sessions(
 
 @router.delete("/sessions/{session_id}")
 async def revoke_session(
-    session_id: str,
+    session_id: uuid.UUID,
     client: Client = Depends(get_current_client),
     db: Session = Depends(get_db),
 ):
     row = (
         db.query(RefreshToken)
         .filter(
-            RefreshToken.id        == session_id,
+            RefreshToken.id        == str(session_id),
             RefreshToken.client_id == client.id,
         )
         .first()

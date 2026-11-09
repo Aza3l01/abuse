@@ -360,6 +360,10 @@ export function OnboardingModal() {
               onAction={() => goTo("#s3")}
             />
             {isFree ? (
+              <div style={{ marginTop: "20px", paddingTop: "12px", borderTop: "1px solid var(--color-text)" }}>
+              <p style={{ fontSize: "10px", textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--color-text-muted)", margin: "0 0 2px" }}>
+                Paid plans only, not part of your setup progress
+              </p>
               <div style={{ display: "flex", alignItems: "flex-start", gap: "10px", padding: "12px 0", borderBottom: "1px solid var(--color-border)" }}>
                 <div style={{ width: "14px", flexShrink: 0 }} />
                 <div style={{ flex: 1 }}>
@@ -374,6 +378,7 @@ export function OnboardingModal() {
                 >
                   Upgrade
                 </button>
+              </div>
               </div>
             ) : (
               <StepRow

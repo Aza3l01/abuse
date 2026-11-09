@@ -52,11 +52,15 @@ BLOCK_CONFIDENCE_THRESHOLD = 0.75
     max_retries=2,
     default_retry_delay=30,
 )
-def push_block(self, verdict_id: str, org_id: str) -> dict:
+def push_block(self, verdict_id: str, org_id: str, confidence_threshold: float | None = None) -> dict:
     """
     Attempt to push a block rule for the IP in verdict_id.
     Updates verdict.blocked = True if at least one integration succeeds.
+
+    confidence_threshold: Phase 8. The automatic path passes the org's own
+    block confidence; manual blocks omit it and keep BLOCK_CONFIDENCE_THRESHOLD.
     """
+    threshold = BLOCK_CONFIDENCE_THRESHOLD if confidence_threshold is None else confidence_threshold
     db = SessionLocal()
     try:
         verdict: Verdict | None = (
@@ -96,10 +100,10 @@ def push_block(self, verdict_id: str, org_id: str) -> dict:
             return {"status": "skipped", "reason": "tos_not_accepted"}
 
         # --- Confidence gate ---
-        if verdict.confidence < BLOCK_CONFIDENCE_THRESHOLD:
+        if verdict.confidence < threshold:
             logger.debug(
                 "push_block: verdict %s confidence %.2f below threshold %.2f",
-                verdict_id, verdict.confidence, BLOCK_CONFIDENCE_THRESHOLD,
+                verdict_id, verdict.confidence, threshold,
             )
             return {"status": "skipped", "reason": "confidence_too_low"}
 
@@ -150,6 +154,16 @@ def push_block(self, verdict_id: str, org_id: str) -> dict:
                 ip_memory.cloudflare_block_error = None if ok else error
 
         if not blocked_by:
+            # Nothing was attempted (no WAF IP set, no complete Cloudflare
+            # pair): leave a user-facing reason where the dashboard already
+            # reads block errors, instead of a silent no-op.
+            integration_configured = bool(org.waf_ip_set_id) or bool(
+                org.cloudflare_zone_id and org.cloudflare_token
+            )
+            if not integration_configured and ip_memory is not None:
+                ip_memory.waf_block_error = (
+                    "No blocking integration is set up. Connect AWS WAF or Cloudflare in Settings."
+                )
             db.commit()  # persist per-integration error fields even on total failure
             logger.warning(
                 "push_block: no integrations configured or all failed for org %s", org_id
@@ -240,8 +254,10 @@ def push_unblock(self, verdict_id: str, org_id: str) -> dict:
 
         # Item 56: mirror push_block's "no integration succeeded" guard. Only
         # treat this as a failure when at least one integration was actually
-        # configured and attempted, an org with no integration configured at
-        # all has nothing to unblock, that is a clean clear, not a failure.
+        # configured and attempted. An org with no integration configured has
+        # nothing to remove remotely: the verdict is cleared locally and the
+        # result says "no_integration" so it is never mistaken for a push that
+        # really removed a rule ("unblocked", with the integrations in "via").
         integration_configured = bool(org.waf_ip_set_id) or bool(
             org.cloudflare_zone_id and org.cloudflare_token
         )
@@ -255,9 +271,16 @@ def push_unblock(self, verdict_id: str, org_id: str) -> dict:
         db.query(Verdict).filter(Verdict.id == verdict_id).update({"blocked": False})
         db.commit()
 
+        if not integration_configured:
+            logger.warning(
+                "push_unblock: org %s has no integration configured, verdict %s cleared locally only",
+                org_id, verdict_id,
+            )
+            return {"status": "no_integration", "ip": ip, "via": [], "reason": "no_integration_configured"}
+
         logger.info(
             "push_unblock: unblocked %s for verdict=%s via %s",
-            ip, verdict_id, ",".join(unblocked_by) or "none",
+            ip, verdict_id, ",".join(unblocked_by),
         )
         return {"status": "unblocked", "ip": ip, "via": unblocked_by}
 

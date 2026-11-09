@@ -8,12 +8,11 @@ import { SITE_URL }            from "@/lib/urls";
 import { TeamMembersSection }  from "@/components/dashboard/TeamMembers";
 import { ReferralSection }     from "@/components/dashboard/ReferralSection";
 import { GuidedOnboardingButton } from "@/components/dashboard/GuidedOnboardingButton";
-import { loadRazorpayCheckout } from "@/lib/razorpay";
-import { PRICING_TIERS, FEATURE_ROWS, tierDisplayName } from "@/lib/pricing";
+import { BillingSection }      from "@/components/dashboard/BillingSection";
 import { AWS_REGIONS } from "@/lib/awsRegions";
-import { NewsletterForm } from "@/components/layout/NewsletterForm";
 import { LoadingCursor } from "@/components/dashboard/LoadingCursor";
-
+import { WouldHaveBlockedTable } from "@/components/dashboard/WouldHaveBlockedTable";
+import { DetectionTuningSection, type DetectionConfig } from "@/components/dashboard/DetectionTuningSection";
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -41,24 +40,12 @@ interface ClientConfig {
   cloudflare_zone_id: string | null;
   blocking_tos_accepted_at: string | null;
   auto_block_enabled: boolean;
+  auto_block_dry_run: boolean;
+  detection_config: DetectionConfig | null;
   home_country: string | null;
   aws_role_arn: string | null;
   aws_external_id: string | null;
   clew_aws_account_id: string;
-}
-
-interface BillingStatus {
-  tier: string;
-  billing_provider: string | null;
-  payment_method_display: string | null;
-  next_billing_date: string | null;
-  razorpay_subscription_id: string | null;
-}
-
-interface RefundEligibility {
-  eligible: boolean;
-  reason: "pre_charge" | "remorse_window" | "not_eligible";
-  window_expires_at: string | null;
 }
 
 interface SessionRow {
@@ -128,11 +115,17 @@ function FieldRow({ label, children }: { label: string; children: React.ReactNod
 // the manual block/unblock button and therefore need the Blocking
 // Subscription Agreement accepted before checkout.
 const MANUAL_BLOCK_TIERS = ["starter", "growth", "pro", "enterprise"];
+
+// The Referrals section is hidden for now. Set to true to show it again.
+const SHOW_REFERRALS = false;
 // Mirrors api/tiers.py's AUTO_BLOCK_TIERS: Basic (starter) can push a manual
 // block, but only Growth and above get the unattended pipeline-triggered
 // block, so the WAF/Cloudflare section copy needs to say which one a given
 // tier actually gets instead of describing automatic blocking to everyone.
 const AUTO_BLOCK_TIERS = ["growth", "pro", "enterprise"];
+// Mirrors api/tiers.py's CUSTOM_THRESHOLD_TIERS (Phase 8): custom detection
+// thresholds are a Pro and Enterprise feature.
+const CUSTOM_THRESHOLD_TIERS = ["pro", "enterprise"];
 
 const inputStyle: React.CSSProperties = {
   width: "100%",
@@ -362,28 +355,20 @@ export default function SettingsPage() {
   const [pwChanging,      setPwChanging]       = useState(false);
   const [pwMessage,       setPwMessage]        = useState<{ ok: boolean; text: string } | null>(null);
 
-  // Billing
-  const [upgrading,    setUpgrading]    = useState<string | null>(null);
-  const [billingError, setBillingError] = useState<string | null>(null);
-  const [showUpgraded, setShowUpgraded] = useState(false);
-  const [currency,     setCurrency]     = useState<"INR" | "USD">("INR");
-  const [period,       setPeriod]       = useState<"monthly" | "annual">("monthly");
-  const [gstin,        setGstin]        = useState("");
-  const [billingStatus, setBillingStatus] = useState<BillingStatus | null>(null);
-  // Item 28: Growth blocking TOS modal. Holds whichever action triggered it,
-  // a checkout tier click or (TODO.md priority item 2) the automatic-
-  // blocking toggle, so accepting can resume whichever one was pending.
+  // Blocking Subscription Agreement. Payments accept it inside the purchase
+  // dialog (components/dashboard/PurchaseDialog.tsx). Here it is accepted for
+  // the automatic-blocking toggle, and for pilot orgs that never paid.
   const [blockingTosPendingAction, setBlockingTosPendingAction] = useState<
-    { kind: "checkout"; tier: string } | { kind: "auto_block" } | null
+    { kind: "auto_block" } | null
   >(null);
   const [blockingTosBusy, setBlockingTosBusy] = useState(false);
+  const [blockingTosError, setBlockingTosError] = useState<string | null>(null);
+  // Phase 8: dry run for automatic blocking
+  const [savingDryRun, setSavingDryRun] = useState(false);
+  const [dryRunError,  setDryRunError]  = useState<string | null>(null);
   // TODO.md priority item 2: auto-block on/off toggle (Growth+ only)
   const [savingAutoBlock, setSavingAutoBlock] = useState(false);
   const [autoBlockError,  setAutoBlockError]  = useState<string | null>(null);
-  // Item 29b: cancel/refund modal
-  const [cancelModalOpen, setCancelModalOpen] = useState(false);
-  const [refundEligibility, setRefundEligibility] = useState<RefundEligibility | null>(null);
-  const [cancelling, setCancelling] = useState(false);
 
 
   // MFA
@@ -400,7 +385,7 @@ export default function SettingsPage() {
 
   // Sessions
   const [sessions,        setSessions]        = useState<SessionRow[]>([]);
-  const [sessionsLoading, setSessionsLoading] = useState(false);
+  const [sessionsLoading, setSessionsLoading] = useState(true);
   const [revoking,        setRevoking]        = useState<string | null>(null);
   const [revokingAll,     setRevokingAll]     = useState(false);
 
@@ -438,14 +423,21 @@ export default function SettingsPage() {
   }
 
   useEffect(() => {
-    loadConfig()
-      .catch(() => setError("Failed to load settings."))
-      .finally(() => setLoading(false));
-
-    apiFetch(`/billing/status`)
-      .then(r => r.ok ? r.json() : null)
-      .then((b: BillingStatus | null) => { if (b) setBillingStatus(b); })
-      .catch(() => {/* admin/viewer: billing is owner-only, 403 is expected */});
+    // A viewer is refused by /clients/me, so check the role first and skip the 403.
+    apiFetch(`/auth/orgs`)
+      .then(r => r.ok ? r.json() : [])
+      .catch(() => [])
+      .then((rows: { role: string; active: boolean }[]) => {
+        const active = rows.find(o => o.active) ?? rows[0];
+        if (active?.role === "viewer") {
+          setAccessDenied(true);
+          setLoading(false);
+          return;
+        }
+        return loadConfig()
+          .catch(() => setError("Failed to load settings."))
+          .finally(() => setLoading(false));
+      });
 
     // mfa_enabled moved to /auth/me (Phase 2 — /clients/me is org config now)
     apiFetch(`/auth/me`)
@@ -456,25 +448,11 @@ export default function SettingsPage() {
       .catch(() => {/* handled by the /clients/me fetch above */});
 
     // Load sessions in parallel
-    setSessionsLoading(true);
     apiFetch(`/auth/sessions`)
       .then(r => r.ok ? r.json() : [])
       .then((rows: SessionRow[]) => setSessions(rows))
       .catch(() => {/* ignore — sessions are non-critical */})
       .finally(() => setSessionsLoading(false));
-  }, []);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const params = new URLSearchParams(window.location.search);
-    if (params.get("upgraded") === "1") {
-      setShowUpgraded(true);
-      window.history.replaceState({}, "", window.location.pathname);
-    }
-    const tz   = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    const lang = navigator.language || "";
-    const isIndia = tz.includes("Kolkata") || tz.includes("Calcutta") || lang === "hi" || lang.endsWith("-IN");
-    setCurrency(isIndia ? "INR" : "USD");
   }, []);
 
   // The page renders a "Loading…" placeholder until `config` (and the rest
@@ -493,66 +471,24 @@ export default function SettingsPage() {
     return () => cancelAnimationFrame(id);
   }, [loading]);
 
-  async function handleManage() {
-    setUpgrading("portal");
-    setBillingError(null);
-    try {
-      const r = await apiFetch(`/billing/portal`, {
-        method: "POST",
-      });
-      if (!r.ok) {
-        const d = await r.json().catch(() => ({}));
-        setBillingError(d?.detail ?? "Could not open billing portal.");
-        return;
-      }
-      const { url } = await r.json();
-      window.location.href = url;
-    } catch {
-      setBillingError("Network error. Please try again.");
-    } finally {
-      setUpgrading(null);
-    }
-  }
-
-  // Item 29 currency routing: India → Razorpay checkout below. Everywhere
-  // else, Stripe production keys aren't live yet (item 29 MVP scope), so
-  // non-India customers are invoiced manually until Stripe ships.
-  function handlePlanClick(tier: string) {
-    setBillingError(null);
-    if (currency !== "INR") {
-      setBillingError("USD billing isn't self-serve yet, we'll set up your invoice manually. Contact support@clewsec.com.");
-      return;
-    }
-    // Item 28/69: any tier that gets manual blocking (see MANUAL_BLOCK_TIERS
-    // in api/tiers.py) requires the Blocking Subscription Agreement accepted
-    // before the payment flow opens, and only once ever.
-    if (MANUAL_BLOCK_TIERS.includes(tier) && !config?.blocking_tos_accepted_at) {
-      setBlockingTosPendingAction({ kind: "checkout", tier });
-      return;
-    }
-    startRazorpayCheckout(tier);
-  }
-
-  async function acceptBlockingTosAndContinue() {
-    const action = blockingTosPendingAction;
-    if (!action) return;
+  // Records the Blocking Subscription Agreement. `resumeAutoBlock` turns
+  // automatic blocking on straight after, for the toggle's own modal.
+  async function acceptBlockingTos(resumeAutoBlock: boolean) {
     setBlockingTosBusy(true);
+    setBlockingTosError(null);
     try {
       const r = await apiFetch(`/clients/me/accept-blocking-tos`, { method: "POST" });
       if (r.ok) {
         const updated: ClientConfig = await r.json();
         setConfig(updated);
         setBlockingTosPendingAction(null);
-        if (action.kind === "checkout") {
-          startRazorpayCheckout(action.tier);
-        } else {
-          saveAutoBlockEnabled(true);
-        }
+        if (resumeAutoBlock) saveAutoBlockEnabled(true);
       } else {
-        setBillingError("Could not record acceptance. Please try again.");
+        const d = await r.json().catch(() => ({}));
+        setBlockingTosError(typeof d?.detail === "string" ? d.detail : "Could not record acceptance. Please try again.");
       }
     } catch {
-      setBillingError("Network error. Please try again.");
+      setBlockingTosError("Network error. Please try again.");
     } finally {
       setBlockingTosBusy(false);
     }
@@ -593,154 +529,27 @@ export default function SettingsPage() {
     saveAutoBlockEnabled(next);
   }
 
-  async function startRazorpayCheckout(tier: string) {
-    setUpgrading(tier);
-    setBillingError(null);
+  // Phase 8: dry run records what automatic blocking would have blocked
+  // without pushing anything to the customer's edge.
+  async function saveDryRun(next: boolean) {
+    setSavingDryRun(true);
+    setDryRunError(null);
     try {
-      await loadRazorpayCheckout();
-      const r = await apiFetch(`/billing/razorpay/create-subscription`, {
-        method: "POST",
+      const r = await apiFetch(`/clients/me`, {
+        method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tier, period, gstin: gstin || null }),
+        body: JSON.stringify({ auto_block_dry_run: next }),
       });
       if (!r.ok) {
         const d = await r.json().catch(() => ({}));
-        setBillingError(d?.detail ?? "Could not start Razorpay checkout. Please try again.");
-        setUpgrading(null);
+        setDryRunError(typeof d?.detail === "string" ? d.detail : "Could not update dry run.");
         return;
       }
-      const { subscription_id, key_id, upgrade_order_id, upgrade_order_amount } = await r.json();
-
-      // Item 53 (section 4): an upgrade from an existing paid tier on/before
-      // the 15th charges only the price difference right now, via a
-      // separate one-time Razorpay order, before the subscription checkout
-      // below. Downgrades, first-ever subscriptions, and upgrades placed
-      // after the 15th never get an order here, go straight to the
-      // subscription checkout as before.
-      if (upgrade_order_id) {
-        openUpgradeOrderCheckout(tier, key_id, upgrade_order_id, upgrade_order_amount, () =>
-          openSubscriptionCheckout(tier, key_id, subscription_id)
-        );
-      } else {
-        openSubscriptionCheckout(tier, key_id, subscription_id);
-      }
+      setConfig(await r.json());
     } catch {
-      setBillingError("Network error. Please try again.");
-      setUpgrading(null);
-    }
-  }
-
-  function openUpgradeOrderCheckout(
-    tier: string,
-    key_id: string,
-    order_id: string,
-    order_amount: number,
-    onVerified: () => void
-  ) {
-    const rzp = new window.Razorpay({
-      key: key_id,
-      order_id,
-      amount: order_amount,
-      currency: "INR",
-      name: "Clew",
-      description: `Upgrade to ${tier.charAt(0).toUpperCase()}${tier.slice(1)}, price difference`,
-      theme: { color: "#0D0D0D" },
-      config: { display: { sequence: ["block.upi", "block.card", "block.netbanking", "block.wallet"] } },
-      handler: async (response: {
-        razorpay_payment_id: string;
-        razorpay_order_id: string;
-        razorpay_signature: string;
-      }) => {
-        try {
-          const vr = await apiFetch(`/billing/razorpay/verify-upgrade-order`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(response),
-          });
-          if (vr.ok) {
-            onVerified();
-          } else {
-            const d = await vr.json().catch(() => ({}));
-            setBillingError(d?.detail ?? "Payment verification failed. Contact support if you were charged.");
-            setUpgrading(null);
-          }
-        } catch {
-          setBillingError("Network error verifying payment. Contact support if you were charged.");
-          setUpgrading(null);
-        }
-      },
-      modal: { ondismiss: () => setUpgrading(null) },
-    });
-    rzp.open();
-  }
-
-  function openSubscriptionCheckout(tier: string, key_id: string, subscription_id: string) {
-    const rzp = new window.Razorpay({
-      key: key_id,
-      subscription_id,
-      name: "Clew",
-      description: `${tier.charAt(0).toUpperCase()}${tier.slice(1)} plan`,
-      theme: { color: "#0D0D0D" },
-      config: { display: { sequence: ["block.upi", "block.card", "block.netbanking", "block.wallet"] } },
-      handler: async (response: {
-        razorpay_payment_id: string;
-        razorpay_subscription_id: string;
-        razorpay_signature: string;
-      }) => {
-        try {
-          const vr = await apiFetch(`/billing/razorpay/verify-payment`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ tier, ...response }),
-          });
-          if (vr.ok) {
-            const status: BillingStatus = await vr.json();
-            setBillingStatus(status);
-            setConfig(c => c ? { ...c, tier: status.tier } : c);
-            setShowUpgraded(true);
-          } else {
-            const d = await vr.json().catch(() => ({}));
-            setBillingError(d?.detail ?? "Payment verification failed. Contact support if you were charged.");
-          }
-        } finally {
-          setUpgrading(null);
-        }
-      },
-      modal: { ondismiss: () => setUpgrading(null) },
-    });
-    rzp.open();
-  }
-
-  async function openCancelModal() {
-    setCancelModalOpen(true);
-    setRefundEligibility(null);
-    try {
-      const r = await apiFetch(`/billing/refund-eligibility`, { method: "POST" });
-      if (r.ok) setRefundEligibility(await r.json());
-    } catch {
-      /* modal shows a generic message if this fails */
-    }
-  }
-
-  async function handleCancelConfirm() {
-    setCancelling(true);
-    try {
-      const r = await apiFetch(`/billing/cancel`, { method: "POST" });
-      if (r.ok) {
-        setCancelModalOpen(false);
-        const status: BillingStatus | null = await apiFetch(`/billing/status`).then(res => res.ok ? res.json() : null).catch(() => null);
-        if (status) {
-          setBillingStatus(status);
-          setConfig(c => c ? { ...c, tier: status.tier } : c);
-        }
-      } else {
-        const d = await r.json().catch(() => ({}));
-        setBillingError(d?.detail ?? "Could not cancel subscription.");
-      }
-    } catch {
-      setBillingError("Network error. Please try again.");
+      setDryRunError("Network error. Please try again.");
     } finally {
-      setCancelling(false);
+      setSavingDryRun(false);
     }
   }
 
@@ -1052,298 +861,20 @@ export default function SettingsPage() {
       <section id="billing" style={{ marginBottom: "40px" }}>
         <SectionTitle
           title="Plan & Billing"
-          sub="Manage your subscription and payment method."
+          sub="Your plan, open bills, receipts and billing details."
         />
 
-        {showUpgraded && (
-          <div style={{
-            padding: "10px 14px",
-            border: "1px solid var(--color-low)",
-            marginBottom: "16px",
-            fontSize: "12px",
-            color: "var(--color-low)",
-          }}>
-            Plan upgraded successfully. Your new plan is now active.
-          </div>
-        )}
-
-        {billingError && (
-          <div style={{
-            padding: "10px 14px",
-            border: "1px solid var(--color-critical)",
-            marginBottom: "16px",
-            fontSize: "12px",
-            color: "var(--color-critical)",
-          }}>
-            {billingError}
-          </div>
-        )}
-
-        <div style={{
-          border: "1px solid var(--color-border)",
-          padding: "20px",
-          background: "var(--color-bg)",
-        }}>
-          <div style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            marginBottom: "14px",
-          }}>
-            <div>
-              <p style={{ fontSize: "11px", color: "var(--color-text-muted)", textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: "4px" }}>
-                Current plan
-              </p>
-              <p style={{ fontSize: "18px", fontFamily: "var(--font-brand)", fontWeight: 700 }}>
-                {tierDisplayName(config?.tier)}
-              </p>
-              {billingStatus?.payment_method_display && (
-                <p style={{ fontSize: "12px", color: "var(--color-text-muted)", marginTop: "4px" }}>
-                  {billingStatus.payment_method_display}
-                  {billingStatus.next_billing_date && ` · next billing ${new Date(billingStatus.next_billing_date).toLocaleDateString()}`}
-                </p>
-              )}
-            </div>
-            {billingStatus?.billing_provider === "stripe" && (
-              <button
-                onClick={handleManage}
-                disabled={!!upgrading}
-                style={{
-                  padding: "7px 16px",
-                  fontSize: "12px",
-                  border: "1px solid var(--color-border)",
-                  background: "transparent",
-                  color: "var(--color-text)",
-                  cursor: upgrading ? "default" : "pointer",
-                  opacity: upgrading ? 0.6 : 1,
-                }}
-              >
-                {upgrading === "portal" ? "Redirecting…" : "Manage billing"}
-              </button>
-            )}
-            {billingStatus?.billing_provider === "razorpay" && (
-              <button
-                onClick={openCancelModal}
-                style={{
-                  padding: "7px 16px",
-                  fontSize: "12px",
-                  border: "1px solid var(--color-border)",
-                  background: "transparent",
-                  color: "var(--color-critical)",
-                  cursor: "pointer",
-                }}
-              >
-                Cancel subscription
-              </button>
-            )}
-          </div>
-
-          {billingStatus?.billing_provider !== "stripe" && (
-            <>
-              <p style={{ fontSize: "12px", color: "var(--color-text-muted)", marginBottom: "16px" }}>
-                {billingStatus?.billing_provider === "razorpay"
-                  ? "Upgrades start immediately; downgrades take effect at the end of the current billing cycle."
-                  : config?.tier === "free"
-                  ? "You're on the free Starter plan. Upgrade to unlock longer threat history retention, email alerts, and automatic blocking."
-                  : `You're on the ${tierDisplayName(config?.tier)} plan.`}
-              </p>
-
-              {currency === "INR" && (
-                <div style={{ marginBottom: "20px" }}>
-                  <p style={{ fontSize: "11px", color: "var(--color-text-muted)", textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: "8px" }}>
-                    Billing period (choose before selecting a plan)
-                  </p>
-                  <div style={{ display: "flex", alignItems: "center", gap: "16px", flexWrap: "wrap" }}>
-                    <div style={{ display: "flex", border: "1px solid var(--color-border)" }}>
-                      {(["monthly", "annual"] as const).map(p => (
-                        <button
-                          key={p}
-                          onClick={() => setPeriod(p)}
-                          style={{
-                            padding: "6px 12px",
-                            fontSize: "11px",
-                            border: "none",
-                            background: period === p ? "var(--color-text)" : "transparent",
-                            color: period === p ? "var(--color-bg)" : "var(--color-text)",
-                            cursor: "pointer",
-                            textTransform: "capitalize",
-                          }}
-                        >
-                          {p}{p === "annual" ? " (50% off)" : ""}
-                        </button>
-                      ))}
-                    </div>
-                    <div>
-                      <input
-                        type="text"
-                        placeholder="GSTIN (optional)"
-                        value={gstin}
-                        onChange={e => setGstin(e.target.value)}
-                        style={{ ...inputStyle, width: "180px", padding: "6px 10px", fontSize: "11px" }}
-                      />
-                      <p style={{ fontSize: "10px", color: "var(--color-text-muted)", marginTop: "4px", maxWidth: "220px" }}>
-                        Add your GSTIN to claim input tax credit on your invoices.
-                      </p>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {currency === "INR" ? (
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-0">
-                  {PRICING_TIERS
-                    .map((p, tierIdx) => ({ p, tierIdx }))
-                    // Item 53 (section 4): "free" is the permanent Starter
-                    // plan every org defaults to, never a purchasable card.
-                    .filter(({ p }) => p.tier !== "free")
-                    .filter(({ p }) => p.tier !== config?.tier || billingStatus?.billing_provider !== "razorpay")
-                    .map(({ p, tierIdx }, renderIdx) => (
-                    <div
-                      key={p.tier}
-                      style={{
-                        padding: "24px 20px",
-                        borderTop: "1px solid var(--color-border)",
-                        borderBottom: "1px solid var(--color-border)",
-                        borderRight: "1px solid var(--color-border)",
-                        borderLeft: renderIdx === 0 ? "1px solid var(--color-border)" : "none",
-                        background: p.highlight ? "var(--color-surface)" : "var(--color-bg)",
-                        display: "flex",
-                        flexDirection: "column",
-                      }}
-                    >
-                      {p.highlight ? (
-                        <p style={{ fontFamily: "var(--font-mono)", fontSize: "11px", textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--color-text-muted)", marginBottom: "12px" }}>
-                          Most popular
-                        </p>
-                      ) : (
-                        <div style={{ height: "17px" }} />
-                      )}
-                      <p style={{ fontFamily: "var(--font-brand)", fontWeight: 700, fontSize: "18px", marginBottom: "6px" }}>
-                        {p.name}
-                      </p>
-                      <p style={{ fontFamily: "var(--font-brand)", fontWeight: 700, fontSize: "22px", marginBottom: "4px" }}>
-                        {p.contactOnly
-                          ? "Custom pricing"
-                          : (period === "monthly" ? p.monthlyINR : p.annualINR)}
-                      </p>
-                      {p.contactOnly && (
-                        <p style={{ fontSize: "11px", color: "var(--color-text-muted)", marginBottom: "8px" }}>
-                          Multi-region, dedicated infrastructure, and SLA terms are configured per contract, not self-serve.
-                        </p>
-                      )}
-                      <p style={{ fontSize: "12px", color: "var(--color-text-muted)", marginBottom: "20px" }}>
-                        {p.volume}
-                      </p>
-                      <ul style={{ margin: 0, padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: "8px", flex: 1, marginBottom: "20px" }}>
-                        {FEATURE_ROWS.map((row) => {
-                          const value = row.values[tierIdx];
-                          const included = value !== false;
-                          return (
-                            <li
-                              key={row.label}
-                              style={{
-                                fontSize: "12px",
-                                color: included ? "var(--color-text-muted)" : "var(--color-border)",
-                                display: "flex",
-                                alignItems: "flex-start",
-                                gap: "8px",
-                              }}
-                            >
-                              <span style={{ color: included ? "var(--color-text)" : "var(--color-border)", flexShrink: 0 }}>
-                                {included ? "+" : "×"}
-                              </span>
-                              {typeof value === "string" ? value : row.label}
-                            </li>
-                          );
-                        })}
-                      </ul>
-                      {p.contactOnly ? (
-                        <a
-                          href="mailto:support@clewsec.com"
-                          style={{
-                            padding: "10px 0",
-                            fontSize: "13px",
-                            fontWeight: 500,
-                            textAlign: "center",
-                            border: "1px solid var(--color-border)",
-                            background: "transparent",
-                            color: "var(--color-text)",
-                            textDecoration: "none",
-                            display: "block",
-                          }}
-                        >
-                          Contact us
-                        </a>
-                      ) : (
-                      <button
-                        onClick={() => handlePlanClick(p.tier)}
-                        disabled={!!upgrading}
-                        style={{
-                          padding: "10px 0",
-                          fontSize: "13px",
-                          fontWeight: 500,
-                          width: "100%",
-                          border: p.highlight ? "none" : "1px solid var(--color-border)",
-                          background: p.highlight ? "var(--color-text)" : "transparent",
-                          color: p.highlight ? "var(--color-bg)" : "var(--color-text)",
-                          cursor: upgrading ? "default" : "pointer",
-                          opacity: upgrading ? 0.6 : 1,
-                        }}
-                      >
-                        {upgrading === p.tier ? "Working…" : "Select"}
-                      </button>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                // Item 6c: non-INR visitors can't complete a purchase (USD
-                // self-serve checkout doesn't exist), so show a clean panel
-                // instead of plan cards that lead nowhere.
-                <div style={{ border: "1px solid var(--color-border)", padding: "28px 24px", textAlign: "center" }}>
-                  <p style={{ fontSize: "13px", color: "var(--color-text-muted)", marginBottom: "20px", lineHeight: 1.5 }}>
-                    Clew is currently available to customers in India. We are
-                    working on international billing.
-                  </p>
-                  <div style={{ maxWidth: "380px", margin: "0 auto 20px" }}>
-                    <NewsletterForm />
-                  </div>
-                  <p style={{ fontSize: "12px", color: "var(--color-text-muted)" }}>
-                    <a
-                      href="https://www.linkedin.com/company/117823996"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      style={{ color: "var(--color-text)" }}
-                    >
-                      Follow us on LinkedIn
-                    </a>
-                    {" "}·{" "}
-                    <a href="mailto:support@clewsec.com" style={{ color: "var(--color-text)" }}>
-                      Email support@clewsec.com
-                    </a>
-                    {" "}to talk now, manual invoicing is available.
-                  </p>
-                </div>
-              )}
-
-              <p style={{ fontSize: "11px", color: "var(--color-text-muted)", marginTop: "16px" }}>
-                {currency === "INR" ? "Payments by Razorpay. UPI, cards, netbanking, and wallets accepted." : "Manual invoicing is available for customers outside India."}{" "}
-                Viewing prices in {currency}.{" "}
-                <button
-                  onClick={() => { setCurrency(c => c === "INR" ? "USD" : "INR"); setBillingError(null); }}
-                  style={{ background: "none", border: "none", color: "var(--color-text-muted)", cursor: "pointer", textDecoration: "underline", fontSize: "11px", padding: 0 }}
-                >
-                  Switch to {currency === "INR" ? "USD" : "INR"}
-                </button>
-              </p>
-            </>
-          )}
-        </div>
+        <BillingSection
+          blockingTosAccepted={!!config?.blocking_tos_accepted_at}
+          onPlanChanged={() => { loadConfig().catch(() => {}); }}
+        />
       </section>
 
       {/* ------------------------------------------------------------------ */}
-      {/* Referrals (TODO.md priority item 5)                                 */}
+      {/* Referrals: hidden for now. ReferralSection and its API stay in the  */}
+      {/* codebase, flip SHOW_REFERRALS to bring the section back.            */}
       {/* ------------------------------------------------------------------ */}
+      {SHOW_REFERRALS && (
       <section id="referrals" style={{ marginBottom: "40px" }}>
         <SectionTitle
           title="Referrals"
@@ -1351,10 +882,11 @@ export default function SettingsPage() {
         />
         <ReferralSection myRole={config?.role ?? null} />
       </section>
+      )}
 
-      {/* Item 28/69: Blocking Subscription Agreement modal. Also used by
-          TODO.md priority item 2's auto-block toggle, which needs the same
-          acceptance before it can be switched on. */}
+      {/* Blocking Subscription Agreement modal for the automatic-blocking
+          toggle, which needs the agreement accepted before it can be switched
+          on. Payments accept it inside the purchase dialog instead. */}
       {blockingTosPendingAction && (
         <div style={{
           position: "fixed", inset: 0, background: "rgba(13,13,13,0.6)",
@@ -1362,14 +894,10 @@ export default function SettingsPage() {
         }}>
           <div style={{ background: "var(--color-bg)", border: "1px solid var(--color-border)", padding: "24px", maxWidth: "460px", width: "90%", animation: "modal-panel-in 150ms ease-out" }}>
             <p style={{ fontSize: "14px", fontWeight: 600, marginBottom: "12px" }}>
-              {blockingTosPendingAction.kind === "checkout"
-                ? "This plan includes active IP blocking"
-                : "Automatic blocking is an active security action"}
+              Automatic blocking is an active security action
             </p>
             <p style={{ fontSize: "12px", color: "var(--color-text-muted)", marginBottom: "10px", lineHeight: 1.5 }}>
-              {blockingTosPendingAction.kind === "checkout"
-                ? "Clew will add malicious IPs to your AWS WAF and Cloudflare account when you block them, whether manually or automatically depending on your plan. This is an active security action, not just monitoring."
-                : "Once turned on, Clew will add malicious IPs to your AWS WAF and Cloudflare account automatically, with no click required, whenever a high-confidence threat is detected. This is an active security action, not just monitoring."}
+              Once turned on, Clew will add malicious IPs to your AWS WAF and Cloudflare account automatically, with no click required, whenever a high-confidence threat is detected. This is an active security action, not just monitoring.
             </p>
             <p style={{ fontSize: "12px", color: "var(--color-text-muted)", marginBottom: "20px", lineHeight: 1.5 }}>
               By continuing, you accept the{" "}
@@ -1377,15 +905,18 @@ export default function SettingsPage() {
                 Blocking Subscription Agreement ↗
               </a>.
             </p>
+            {blockingTosError && (
+              <p style={{ fontSize: "12px", color: "var(--color-critical)", marginBottom: "12px" }}>{blockingTosError}</p>
+            )}
             <div style={{ display: "flex", gap: "8px", justifyContent: "flex-end" }}>
               <button
-                onClick={() => setBlockingTosPendingAction(null)}
+                onClick={() => { setBlockingTosPendingAction(null); setBlockingTosError(null); }}
                 style={{ padding: "7px 16px", fontSize: "12px", border: "1px solid var(--color-border)", background: "transparent", color: "var(--color-text)", cursor: "pointer" }}
               >
                 Cancel
               </button>
               <button
-                onClick={acceptBlockingTosAndContinue}
+                onClick={() => acceptBlockingTos(true)}
                 disabled={blockingTosBusy}
                 style={{
                   padding: "7px 16px", fontSize: "12px", border: "1px solid var(--color-text)",
@@ -1393,57 +924,7 @@ export default function SettingsPage() {
                   cursor: blockingTosBusy ? "default" : "pointer", opacity: blockingTosBusy ? 0.6 : 1,
                 }}
               >
-                {blockingTosBusy
-                  ? "Working…"
-                  : blockingTosPendingAction.kind === "checkout"
-                    ? "I understand, continue to payment"
-                    : "I understand, turn on automatic blocking"}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-
-      {/* Item 29b: cancel/refund modal */}
-      {cancelModalOpen && (
-        <div style={{
-          position: "fixed", inset: 0, background: "rgba(13,13,13,0.6)",
-          display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100,
-        }}>
-          <div style={{ background: "var(--color-bg)", border: "1px solid var(--color-border)", padding: "24px", maxWidth: "460px", width: "90%", animation: "modal-panel-in 150ms ease-out" }}>
-            <p style={{ fontSize: "14px", fontWeight: 600, marginBottom: "12px" }}>
-              Cancel your subscription?
-            </p>
-            {refundEligibility === null ? (
-              <p style={{ fontSize: "12px", color: "var(--color-text-muted)", marginBottom: "20px" }}>Checking refund eligibility…</p>
-            ) : (
-              <p style={{ fontSize: "12px", color: "var(--color-text-muted)", marginBottom: "20px", lineHeight: 1.5 }}>
-                {refundEligibility.reason === "pre_charge" &&
-                  "You haven't been charged yet, cancelling now means no charge will ever occur."}
-                {refundEligibility.reason === "remorse_window" &&
-                  `You're within 72 hours of your first payment, cancelling now issues a full refund (window closes ${refundEligibility.window_expires_at ? new Date(refundEligibility.window_expires_at).toLocaleString() : "soon"}).`}
-                {refundEligibility.reason === "not_eligible" &&
-                  "No refund applies at this point. Your plan stays active until the end of the current billing cycle, then cancels."}
-              </p>
-            )}
-            <div style={{ display: "flex", gap: "8px", justifyContent: "flex-end" }}>
-              <button
-                onClick={() => setCancelModalOpen(false)}
-                style={{ padding: "7px 16px", fontSize: "12px", border: "1px solid var(--color-border)", background: "transparent", color: "var(--color-text)", cursor: "pointer" }}
-              >
-                Keep subscription
-              </button>
-              <button
-                onClick={handleCancelConfirm}
-                disabled={cancelling || refundEligibility === null}
-                style={{
-                  padding: "7px 16px", fontSize: "12px", border: "1px solid var(--color-critical)",
-                  background: "var(--color-critical)", color: "var(--color-bg)",
-                  cursor: cancelling ? "default" : "pointer", opacity: cancelling ? 0.6 : 1,
-                }}
-              >
-                {cancelling ? "Working…" : "Confirm cancellation"}
+                {blockingTosBusy ? "Working…" : "I understand, turn on automatic blocking"}
               </button>
             </div>
           </div>
@@ -1645,6 +1126,41 @@ export default function SettingsPage() {
       </section>
 
       {/* ------------------------------------------------------------------ */}
+      {/* Blocking Subscription Agreement for orgs that never paid (a pilot). */}
+      {/* Paying accepts it in the purchase dialog.                           */}
+      {/* ------------------------------------------------------------------ */}
+      {config && MANUAL_BLOCK_TIERS.includes(config.tier) && !config.blocking_tos_accepted_at && (
+      <section id="blocking-agreement" style={{ marginBottom: "40px" }}>
+        <SectionTitle
+          title="Blocking Subscription Agreement"
+          sub="Blocking adds malicious IPs to your AWS WAF and Cloudflare account. It is an active security action, so the agreement must be accepted before any block is pushed."
+        />
+        <p style={{ fontSize: "12px", color: "var(--color-text-muted)", marginBottom: "12px", lineHeight: 1.5 }}>
+          <a href={`${SITE_URL}/legal/subscription-agreement`} target="_blank" style={{ color: "var(--color-text)" }}>
+            Read the Blocking Subscription Agreement ↗
+          </a>
+        </p>
+        <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+          <button
+            type="button"
+            onClick={() => acceptBlockingTos(false)}
+            disabled={blockingTosBusy}
+            style={{
+              padding: "8px 20px", fontSize: "13px", border: "1px solid var(--color-text)",
+              background: "var(--color-text)", color: "var(--color-bg)",
+              cursor: blockingTosBusy ? "default" : "pointer", opacity: blockingTosBusy ? 0.6 : 1,
+            }}
+          >
+            {blockingTosBusy ? "Working…" : "I accept the agreement"}
+          </button>
+          {blockingTosError && !blockingTosPendingAction && (
+            <span style={{ fontSize: "12px", color: "var(--color-critical)" }}>{blockingTosError}</span>
+          )}
+        </div>
+      </section>
+      )}
+
+      {/* ------------------------------------------------------------------ */}
       {/* TODO.md priority item 2: automatic blocking on/off toggle          */}
       {/* (Growth and above only, Basic's manual blocking is unaffected)     */}
       {/* ------------------------------------------------------------------ */}
@@ -1681,6 +1197,90 @@ export default function SettingsPage() {
             <span style={{ fontSize: "12px", color: "var(--color-critical)" }}>{autoBlockError}</span>
           )}
         </div>
+
+        <div style={{ marginTop: "24px" }}>
+          <h3 style={{ fontSize: "12px", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: "4px" }}>
+            Dry run
+          </h3>
+          <p style={{ fontSize: "12px", color: "var(--color-text-muted)", marginBottom: "12px", lineHeight: 1.5, maxWidth: "640px" }}>
+            Record what automatic blocking would have blocked without sending anything to your WAF or Cloudflare.
+            It only applies while Automatic Blocking is on. Turn it off to start blocking for real.
+          </p>
+          <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+            <button
+              type="button"
+              onClick={() => saveDryRun(!config.auto_block_dry_run)}
+              disabled={savingDryRun}
+              style={{
+                padding: "8px 20px",
+                fontSize: "13px",
+                border: "1px solid var(--color-text)",
+                background: config.auto_block_dry_run ? "var(--color-text)" : "transparent",
+                color: config.auto_block_dry_run ? "var(--color-bg)" : "var(--color-text)",
+                cursor: savingDryRun ? "default" : "pointer",
+                opacity: savingDryRun ? 0.6 : 1,
+                transition: "background 150ms, color 150ms",
+              }}
+            >
+              {savingDryRun ? "Saving…" : config.auto_block_dry_run ? "On" : "Off"}
+            </button>
+            {config.auto_block_dry_run && !config.auto_block_enabled && (
+              <span style={{ fontSize: "12px", color: "var(--color-text-muted)" }}>
+                Automatic Blocking is off, so nothing is being recorded.
+              </span>
+            )}
+            {dryRunError && (
+              <span style={{ fontSize: "12px", color: "var(--color-critical)" }}>{dryRunError}</span>
+            )}
+          </div>
+          {(config.auto_block_dry_run || config.auto_block_enabled) && (
+            <WouldHaveBlockedTable refreshKey={config.auto_block_dry_run} />
+          )}
+        </div>
+      </section>
+      )}
+
+      {/* Basic (internal tier "starter") can block manually but does not get
+          the unattended pipeline-triggered block, so show what it is missing
+          and where to get it instead of hiding the section. */}
+      {config && config.tier === "starter" && (
+      <section id="auto-block" style={{ marginBottom: "40px" }}>
+        <SectionTitle
+          title="Automatic Blocking"
+          sub="Automatic, unattended blocking is available on Growth and above. On Basic you block manually with one click from a verdict."
+        />
+        <div style={{ border: "1px solid var(--color-border)", background: "var(--color-surface)", padding: "16px 20px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "16px", flexWrap: "wrap" }}>
+          <p style={{ fontSize: "12px", color: "var(--color-text-muted)", margin: 0, lineHeight: 1.5, maxWidth: "560px" }}>
+            With Growth, Clew pushes a block rule to your WAF or Cloudflare the moment a high-confidence threat is detected, with no click required.
+          </p>
+          <a
+            href="#billing"
+            style={{
+              padding: "8px 20px",
+              fontSize: "13px",
+              border: "1px solid var(--color-text)",
+              background: "var(--color-text)",
+              color: "var(--color-bg)",
+              textDecoration: "none",
+              whiteSpace: "nowrap",
+            }}
+          >
+            Upgrade to Growth
+          </a>
+        </div>
+      </section>
+      )}
+
+      {/* ------------------------------------------------------------------ */}
+      {/* Phase 8: custom detection thresholds (Pro and Enterprise only)      */}
+      {/* ------------------------------------------------------------------ */}
+      {config && CUSTOM_THRESHOLD_TIERS.includes(config.tier) && (
+      <section id="detection-tuning" style={{ marginBottom: "40px" }}>
+        <SectionTitle
+          title="Detection Tuning"
+          sub="Set your own confidence thresholds, per-agent minimums and per-endpoint minimums. Blank fields use the defaults. Changes apply from the next scan."
+        />
+        <DetectionTuningSection config={config.detection_config} onSaved={updated => setConfig(updated as ClientConfig)} />
       </section>
       )}
 

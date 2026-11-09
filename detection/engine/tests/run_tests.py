@@ -443,6 +443,177 @@ def t_meta_contributing_agents():
     assert len(v.contributing_agents) >= 1
 test("contributing_agents populated on attack", t_meta_contributing_agents)
 
+# ── LLM guardrails (Phase 2) ──────────────────────────────────────────────────
+print("\n[LLM guardrails]")
+
+import os
+from engine.llm.client import BudgetedLLM, LLMError
+from engine.llm import client as llm_client_module
+from engine.pipeline import run as run_module
+
+
+class FakeLLM:
+    """Stands in for LLMClient. Counts reason() calls, returns `reply` (or raises it)."""
+    def __init__(self, reply=None):
+        self.calls = 0
+        self.reply = {"explanation": "FAKE EXPLANATION"} if reply is None else reply
+
+    def reason(self, system_prompt, user_prompt, extra_temperature=None):
+        self.calls += 1
+        if isinstance(self.reply, Exception):
+            raise self.reply
+        return self.reply
+
+
+def _brute_records():
+    return [rec(ip="9.9.9.9", status=401, attack=True, cat="Brute Force") for _ in range(20)]
+
+def _clean_records():
+    return [rec() for _ in range(10)]
+
+def _decision(v):
+    """Everything about a verdict except its explanation text."""
+    return (
+        v.is_attack, v.threat_type, v.confidence_score,
+        tuple(v.contributing_agents), tuple(v.compound_signals),
+        tuple((f.agent_name, f.threat_detected, f.threat_type, f.confidence_score) for f in v.agent_findings),
+    )
+
+def _brute_dicts():
+    return [
+        {"timestamp": datetime(2017, 7, 6, 10, 0, 0), "ip": "9.9.9.9", "method": "GET",
+         "endpoint": "/port_80", "status": 401, "response_size": 500, "latency": 10.0,
+         "user_agent": "Mozilla/5.0"}
+        for _ in range(20)
+    ]
+
+def _clean_dicts():
+    return [
+        {"timestamp": datetime(2017, 7, 6, 10, 0, 0) + timedelta(seconds=i * 7), "ip": "1.2.3.4",
+         "method": "GET", "endpoint": "/port_80", "status": 200, "response_size": 500,
+         "latency": 10.0, "user_agent": "Mozilla/5.0"}
+        for i in range(10)
+    ]
+
+class _env:
+    """Temporarily set/unset environment variables (None unsets)."""
+    def __init__(self, **kw): self.kw = kw
+    def __enter__(self):
+        self.old = {k: os.environ.get(k) for k in self.kw}
+        for k, v in self.kw.items():
+            if v is None: os.environ.pop(k, None)
+            else: os.environ[k] = v
+    def __exit__(self, *a):
+        for k, v in self.old.items():
+            if v is None: os.environ.pop(k, None)
+            else: os.environ[k] = v
+
+class _patched_llm_class:
+    """Replace engine.llm.client.LLMClient so _build_llm_client() builds a FakeLLM."""
+    def __init__(self, fake): self.fake = fake
+    def __enter__(self):
+        self.orig = llm_client_module.LLMClient
+        llm_client_module.LLMClient = lambda **kw: self.fake
+    def __exit__(self, *a):
+        llm_client_module.LLMClient = self.orig
+
+def t_llm_clean_batch_zero_calls():
+    fake = FakeLLM()
+    v = MetaAgentOrchestrator(SharedMemory(), llm_client=fake).run(_clean_records())
+    assert not v.is_attack
+    assert fake.calls == 0
+test("LLM: clean batch makes 0 calls", t_llm_clean_batch_zero_calls)
+
+def t_llm_attack_one_call_explanation_only():
+    fake = FakeLLM()
+    v = MetaAgentOrchestrator(SharedMemory(), llm_client=fake).run(_brute_records())
+    rule = MetaAgentOrchestrator(SharedMemory()).run(_brute_records())
+    assert rule.is_attack
+    assert fake.calls == 1
+    assert v.explanation == "FAKE EXPLANATION"
+    assert rule.explanation != "FAKE EXPLANATION"
+    assert _decision(v) == _decision(rule)
+test("LLM: attack makes exactly 1 call and only replaces the explanation", t_llm_attack_one_call_explanation_only)
+
+def t_llm_verdict_identical_whatever_llm_returns():
+    rule = MetaAgentOrchestrator(SharedMemory()).run(_brute_records())
+    replies = [
+        {"is_attack": False, "threat_type": "NONE", "confidence": 0.95, "explanation": "benign"},
+        {"is_attack": True, "threat_type": "DOS", "confidence": 0.01, "compound_signal": "x",
+         "reasoning": "r", "explanation": "e"},
+        {"explanation": ""},
+        {"explanation": 12345},
+        {"reasoning": "old schema key only"},
+        ["not", "a", "dict"],
+        LLMError("boom"),
+    ]
+    for reply in replies:
+        fake = FakeLLM(reply)
+        v = MetaAgentOrchestrator(SharedMemory(), llm_client=fake).run(_brute_records())
+        assert fake.calls == 1, reply
+        assert _decision(v) == _decision(rule), reply
+test("LLM: verdict fields identical to rule-only whatever the LLM returns", t_llm_verdict_identical_whatever_llm_returns)
+
+def t_llm_explanation_capped():
+    fake = FakeLLM({"explanation": "x" * 5000})
+    v = MetaAgentOrchestrator(SharedMemory(), llm_client=fake).run(_brute_records())
+    assert len(v.explanation) == 800
+test("LLM: explanation text is length-capped", t_llm_explanation_capped)
+
+def t_llm_budget_wrapper():
+    fake = FakeLLM()
+    b = BudgetedLLM(fake, 1)
+    b.reason("s", "u")
+    try:
+        b.reason("s", "u")
+        raise AssertionError("second call should have been refused")
+    except LLMError:
+        pass
+    assert fake.calls == 1 and b.calls_made == 1
+    unl = BudgetedLLM(FakeLLM(), None)
+    for _ in range(50):
+        unl.reason("s", "u")
+    assert unl.calls_made == 50
+test("LLM: BudgetedLLM stops at its budget, None is unlimited", t_llm_budget_wrapper)
+
+def t_llm_budget_zero_makes_no_calls():
+    fake = FakeLLM()
+    with _env(LLM_ENABLED="true", GROQ_API_KEY="test-key"), _patched_llm_class(fake):
+        out = run_module.run_pipeline(_brute_dicts(), "org-budget0", enable_llm_explanations=True, llm_call_budget=0)
+    assert out["is_attack"]
+    assert fake.calls == 0 and out["llm_calls_used"] == 0
+test("LLM: budget 0 makes 0 calls", t_llm_budget_zero_makes_no_calls)
+
+def t_llm_budget_reports_calls_used():
+    fake = FakeLLM()
+    with _env(LLM_ENABLED="true", GROQ_API_KEY="test-key"), _patched_llm_class(fake):
+        first = run_module.run_pipeline(_brute_dicts(), "org-budget1", enable_llm_explanations=True, llm_call_budget=1)
+        clean = run_module.run_pipeline(_clean_dicts(), "org-budget1b", enable_llm_explanations=True, llm_call_budget=1)
+    assert first["is_attack"] and first["llm_calls_used"] == 1 and first["explanation"] == "FAKE EXPLANATION"
+    assert not clean["is_attack"] and clean["llm_calls_used"] == 0
+    assert fake.calls == 1
+test("LLM: run_pipeline reports calls used (attack 1, clean 0)", t_llm_budget_reports_calls_used)
+
+def t_llm_kill_switch_makes_no_calls():
+    for off in (None, "", "false", "0", "no", "maybe"):
+        fake = FakeLLM()
+        with _env(LLM_ENABLED=off, GROQ_API_KEY="test-key"), _patched_llm_class(fake):
+            assert run_module._build_llm_client() is None, off
+            out = run_module.run_pipeline(_brute_dicts(), "org-kill", enable_llm_explanations=True)
+        assert out["is_attack"] and fake.calls == 0 and out["llm_calls_used"] == 0, off
+    for on in ("true", "TRUE", "1", "yes", "on"):
+        fake = FakeLLM()
+        with _env(LLM_ENABLED=on, GROQ_API_KEY="test-key"), _patched_llm_class(fake):
+            assert run_module._build_llm_client() is fake, on
+test("LLM: kill switch off (unset/falsy) makes 0 calls, truthy builds the client", t_llm_kill_switch_makes_no_calls)
+
+def t_llm_disabled_for_tier_makes_no_calls():
+    fake = FakeLLM()
+    with _env(LLM_ENABLED="true", GROQ_API_KEY="test-key"), _patched_llm_class(fake):
+        out = run_module.run_pipeline(_brute_dicts(), "org-tier", enable_llm_explanations=False)
+    assert fake.calls == 0 and out["llm_calls_used"] == 0
+test("LLM: enable_llm_explanations=False makes 0 calls", t_llm_disabled_for_tier_makes_no_calls)
+
 # ── Evaluator ─────────────────────────────────────────────────────────────────
 print("\n[Evaluator]")
 

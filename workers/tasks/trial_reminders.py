@@ -23,9 +23,11 @@ if str(_REPO_ROOT) not in sys.path:
 from sqlalchemy import or_
 
 from api.auth_utils import send_trial_reminder_email
+from api.tiers import CURRENCIES
 from db.models import Client, Organization, OrganizationMember
 from db.session import SessionLocal
 from workers.celery_app import celery_app
+from workers.tasks.billing_cycle import downgrade_org
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +64,10 @@ def send_trial_reminders() -> dict:
         for org in pending:
             trial_days_total = 30 if org.trial_source == "manual_outreach" else 7
             days_remaining = (org.trial_ends_at - now).days
+            # Phase 10: only link to checkout when it exists for the org's
+            # currency. A pilot has none set yet (it chooses a country at
+            # first checkout), so it gets the link.
+            checkout_ok = org.billing_currency is None or org.billing_currency in CURRENCIES
 
             # Item 27 point 6 / item 53 (section 4): trial ended with no
             # payment method added, revert to the permanent free Starter
@@ -69,9 +75,11 @@ def send_trial_reminders() -> dict:
             # longer excludes tier == "free" orgs from scanning, so this org
             # keeps being scanned within the free tier's call-volume cap.
             # TrialBanner.tsx already renders an "expired" message once
-            # trial_ends_at has passed.
+            # trial_ends_at has passed. Phase 3: goes through downgrade_org (the
+            # one downgrade path), so the pilot keeps its Growth retention for
+            # 30 days and auto-block is switched off.
             if org.trial_ends_at <= now and org.tier != "free":
-                org.tier = "free"
+                downgrade_org(org, db, "trial_end", now)
                 db.commit()
                 expired += 1
                 continue
@@ -82,14 +90,14 @@ def send_trial_reminders() -> dict:
                 and 0 <= days_remaining <= 5
             ):
                 for email in _owner_emails(db, org.id):
-                    send_trial_reminder_email(email, 5, trial_days_total)
+                    send_trial_reminder_email(email, 5, trial_days_total, checkout_ok)
                 org.trial_reminder_5d_sent = True
                 db.commit()
                 sent += 1
 
             if not org.trial_reminder_2d_sent and 0 <= days_remaining <= 2:
                 for email in _owner_emails(db, org.id):
-                    send_trial_reminder_email(email, 2, trial_days_total)
+                    send_trial_reminder_email(email, 2, trial_days_total, checkout_ok)
                 org.trial_reminder_2d_sent = True
                 db.commit()
                 sent += 1

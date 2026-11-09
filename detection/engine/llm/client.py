@@ -130,3 +130,31 @@ class LLMClient:
 
 class LLMError(Exception):
     """Raised when the LLM client cannot produce a usable response."""
+
+
+class LLMBudgetExhausted(LLMError):
+    """Raised instead of a network call once the per-run call budget is spent."""
+
+
+class BudgetedLLM:
+    """Wraps any client exposing reason() with a hard ceiling on call count.
+
+    Phase 2 guardrail: the engine must not know about tiers, so the caller
+    passes the remaining monthly budget in as a plain integer. budget=None
+    means unlimited. Every attempted call is counted, including ones that
+    then fail, because a failed Groq call can still be billed or rate-limited.
+    Once calls_made reaches the budget, reason() raises LLMBudgetExhausted
+    without touching the network, and callers fall back to the rule-based
+    explanation (the same path as any other LLMError).
+    """
+
+    def __init__(self, inner: Any, budget: Optional[int] = None):
+        self._inner = inner
+        self._budget = budget
+        self.calls_made = 0
+
+    def reason(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        if self._budget is not None and self.calls_made >= self._budget:
+            raise LLMBudgetExhausted("LLM call budget exhausted")
+        self.calls_made += 1
+        return self._inner.reason(*args, **kwargs)

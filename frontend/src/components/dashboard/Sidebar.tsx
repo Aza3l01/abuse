@@ -6,6 +6,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { API_URL, apiFetch } from "@/lib/api";
 import { SITE_URL } from "@/lib/urls";
 import { useIsMobile, MOBILE_TOPBAR_HEIGHT } from "@/lib/useIsMobile";
+import { SupportModal } from "@/components/dashboard/SupportModal";
 
 const NAV = [
   { href: "/",                   label: "Overview" },
@@ -31,6 +32,7 @@ export function DashboardSidebar({ company }: { company?: string }) {
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [switching,    setSwitching]    = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [supportOpen, setSupportOpen] = useState(false);
 
   useEffect(() => {
     apiFetch(`/auth/orgs`)
@@ -52,7 +54,7 @@ export function DashboardSidebar({ company }: { company?: string }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ org_id: orgId }),
       });
-      window.location.href = "/";
+      window.location.assign("/");
     } catch {
       setSwitching(false);
     }
@@ -138,6 +140,23 @@ export function DashboardSidebar({ company }: { company?: string }) {
           </Link>
         );
       })}
+      <button
+        onClick={() => { setSupportOpen(true); setMobileNavOpen(false); }}
+        style={{
+          display: "block",
+          width: "100%",
+          textAlign: "left",
+          padding: "8px 12px",
+          fontSize: "13px",
+          color: "var(--color-text-muted)",
+          background: "transparent",
+          border: "none",
+          cursor: "pointer",
+          marginBottom: "2px",
+        }}
+      >
+        Contact support
+      </button>
     </nav>
   );
 
@@ -212,11 +231,13 @@ export function DashboardSidebar({ company }: { company?: string }) {
             {footer}
           </div>
         )}
+        {supportOpen && <SupportModal onClose={() => setSupportOpen(false)} orgId={activeOrg?.id} />}
       </>
     );
   }
 
   return (
+    <>
     <aside style={{
       width: "192px",
       flexShrink: 0,
@@ -251,5 +272,7 @@ export function DashboardSidebar({ company }: { company?: string }) {
       {/* Footer */}
       {footer}
     </aside>
+    {supportOpen && <SupportModal onClose={() => setSupportOpen(false)} orgId={activeOrg?.id} />}
+    </>
   );
 }

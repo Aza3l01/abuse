@@ -59,7 +59,8 @@ function IntegrationBadge({ label, blocked, error }: { label: string; blocked: b
 export function BlockedIpsTab({ role, tier }: { role: string | null; tier: string | null }) {
   const [data, setData] = useState<IpList | null>(null);
   const [page, setPage] = useState(1);
-  const [loading, setLoading] = useState(true);
+  const [loadedPage, setLoadedPage] = useState<number | null>(null);
+  const loading = loadedPage !== page;
   const [confirmIp, setConfirmIp] = useState<BlockedIpRow | null>(null);
   const [unblocking, setUnblocking] = useState(false);
 
@@ -78,11 +79,10 @@ export function BlockedIpsTab({ role, tier }: { role: string | null; tier: strin
   const canBlockManually = canManage && MANUAL_BLOCK_TIERS.includes(tier ?? "");
 
   const load = useCallback(() => {
-    setLoading(true);
     apiFetch(`/ips?blocked_only=true&page=${page}&limit=${LIMIT}`)
       .then(r => r.ok ? r.json() : null)
       .then(d => { if (d) setData(d); })
-      .finally(() => setLoading(false));
+      .finally(() => setLoadedPage(page));
   }, [page]);
 
   useEffect(() => { load(); }, [load]);

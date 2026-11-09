@@ -21,6 +21,12 @@ Results are saved to results/ablation_study.json and printed in a summary table.
 
 Usage:
   python3 scripts/ablation_study.py [--max-records N]
+
+Status note (Phase 10): research tooling, kept deliberately, do not delete.
+It is not part of the product or of any test run. It reads
+datasets/processed/ (relative to detection/) through the CICIDS ingestion
+only, and results/ablation_study.json is not checked in, so the published
+numbers cannot be reproduced from a fresh clone without regenerating them.
 """
 
 from __future__ import annotations
