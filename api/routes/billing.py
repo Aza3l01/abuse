@@ -26,8 +26,8 @@ Owner-only plan management:
 Any member (viewers included):
   GET  /billing/banner             → the small subset the dashboard banner needs
 
-Referrals (api/referrals.py; the discount is no longer applied to charges):
-  GET /billing/referral-status → this org's own code and live slot count
+Referrals (api/referrals.py, a credit ledger, no discount on charges):
+  GET /billing/referral-status → this org's own code, its free bill state and its referral credits
 """
 from __future__ import annotations
 
@@ -50,6 +50,7 @@ from sqlalchemy.orm import Session
 
 from api.billing_notify import notify
 from api.billing_payments import (
+    REFUND_WINDOW,
     apply_captured_payment,
     bill_summary,
     lock_billing_currency,
@@ -63,7 +64,7 @@ from api.billing_payments import (
 )
 from api.billing_rules import PERIODS, classify_change, today_ist
 from api.deps import CurrentOrg, get_current_client, get_current_org, get_db, require_role
-from api.referrals import referral_summary
+from api.referrals import referral_summary, revoke_for_refunded_referee
 from api.tiers import PURCHASABLE_PLANS, plan_price
 from db.models import Client, Organization, Payment, ProcessedWebhookEvent
 from db.session import SessionLocal
@@ -91,8 +92,8 @@ def _init_stripe() -> None:
 # ---------------------------------------------------------------------------
 
 _PRICE_ENV: dict[tuple[str, str], str] = {
-    ("starter", "INR"): "STRIPE_PRICE_STARTER_INR",
-    ("starter", "USD"): "STRIPE_PRICE_STARTER_USD",
+    ("basic",   "INR"): "STRIPE_PRICE_BASIC_INR",
+    ("basic",   "USD"): "STRIPE_PRICE_BASIC_USD",
     ("growth",  "INR"): "STRIPE_PRICE_GROWTH_INR",
     ("growth",  "USD"): "STRIPE_PRICE_GROWTH_USD",
     ("pro",     "INR"): "STRIPE_PRICE_PRO_INR",
@@ -295,13 +296,36 @@ def billing_banner(
 # reads this live on every load, never caches slot count or discount.
 # ---------------------------------------------------------------------------
 
+class ReferralCreditOut(BaseModel):
+    id: str
+    status: str  # pending | available | applied
+    amount_paise: int
+    currency: str
+    earned_at: str | None
+    releases_at: str | None  # pending credits: when the referee's refund window ends
+    vests_at: str | None
+    applied_at: str | None
+
+
+class ReferralTotalsOut(BaseModel):
+    pending: int
+    available: int
+    applied: int
+
+
 class ReferralStatusOut(BaseModel):
     referral_code: str | None
-    slots_filled: int
-    slots_total: int
+    credit_pct: int
     is_referred: bool
-    discount_pct_monthly: float
-    discount_pct_annual: float
+    referred_state: str | None  # waiting_for_first_payment | waiting_for_first_bill | applied
+    free_bill_paise: int | None
+    free_bill_currency: str | None
+    plan_monthly_paise: int | None  # list price of this org's plan, None on the free plan
+    plan_currency: str | None
+    signups: int
+    paying: int
+    totals: dict[str, ReferralTotalsOut]  # by currency
+    credits: list[ReferralCreditOut]
 
 
 @router.get("/referral-status", response_model=ReferralStatusOut)
@@ -317,7 +341,7 @@ def billing_referral_status(
 # ---------------------------------------------------------------------------
 
 class CheckoutBody(BaseModel):
-    tier: str      # "starter" | "growth" | "pro"
+    tier: str      # "basic" | "growth" | "pro"
     currency: str  # "INR" | "USD"
 
 
@@ -488,7 +512,7 @@ def _handle_event(event: dict, db: Session) -> None:
         if status not in ("active", "trialing"):
             # Subscription canceled, past_due, or unpaid — revert to free
             db.query(Organization).filter(Organization.id == org.id).update(
-                {"tier": "free", "stripe_subscription_id": None, "tier_expires_at": None}
+                {"tier": "starter", "stripe_subscription_id": None, "tier_expires_at": None}
             )
             db.commit()
             logger.info(
@@ -854,10 +878,22 @@ def _handle_razorpay_event(event: dict, db: Session) -> list[str]:
         if entity.get("amount") is not None and entity["amount"] < payment.amount_paise:
             logger.warning("billing: partial refund on payment %s ignored, needs manual handling", payment.id)
             return applied_ids
-        if payment.status != "refunded":
+        newly_refunded = payment.status != "refunded"
+        if newly_refunded:
             payment.status = "refunded"
         if payment.refunded_at is None:
             payment.refunded_at = now
+        if newly_refunded and payment.org_id and payment.captured_at is not None:
+            # Phase 12: a refund made outside POST /billing/refund (the Razorpay
+            # dashboard) of a payment inside the 72 hour window also cancels
+            # the referrer's unvested credit.
+            refunded_org = db.get(Organization, payment.org_id)
+            if (
+                refunded_org is not None
+                and refunded_org.first_charged_at is not None
+                and payment.captured_at <= refunded_org.first_charged_at + REFUND_WINDOW
+            ):
+                revoke_for_refunded_referee(db, refunded_org.id, now)
 
     return applied_ids
 
@@ -930,6 +966,8 @@ def refund_first_payment(
         raise HTTPException(502, "Razorpay could not process the refund. Please retry shortly.")
 
     downgrade_org(org, db, "refund", now, amount_paise=refunded)
+    # Phase 12: a refund inside the window cancels the referrer's unvested credit.
+    revoke_for_refunded_referee(db, org.id, now)
     db.commit()
     return RefundOut(status="refunded", refunded_paise=refunded, failed_payments=failed)
 
@@ -1229,7 +1267,7 @@ def _cancel_stripe_subscription_now(org: Organization) -> None:
             org.stripe_subscription_id, org.id,
         )
     org.stripe_subscription_id = None
-    org.tier = "free"
+    org.tier = "starter"
 
 
 def cancel_org_subscriptions_for_deletion(org: Organization, db: Session) -> None:

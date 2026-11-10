@@ -133,7 +133,7 @@ def login(client, *, email="ops@clew.test", password=PASSWORD, code=None):
 
 def seed_account(db) -> Organization:
     org = make_org(
-        db, tier="starter", period="monthly", name="Acme Corp",
+        db, tier="basic", period="monthly", name="Acme Corp",
         next_bill=today_ist() + timedelta(days=10),
         first_charged_at=datetime.now(timezone.utc),
         cloudflare_token="CF-SECRET-123", aws_external_id="EXT-SECRET-456",
@@ -269,6 +269,7 @@ def test_staff_rows_are_created_only_by_the_cli():
         "/internal/orgs/{org_id}/extend-period", "/internal/orgs/{org_id}/pause-downgrade",
         "/internal/orgs/{org_id}/reinstate", "/internal/orgs/{org_id}/extend-pilot",
         "/internal/pilot-codes",
+        "/internal/referrals/credits/{credit_id}/revoke", "/internal/referrals/credits/{credit_id}/approve",
     ])
 
 
@@ -390,7 +391,7 @@ def test_mark_paid_refusals_change_nothing(panel, db):
 
 
 def seed_other_org(db) -> Organization:
-    return make_org(db, tier="starter", period="monthly", name="Other Co")
+    return make_org(db, tier="basic", period="monthly", name="Other Co")
 
 
 def test_marking_a_bill_paid_twice_is_refused(panel, db):
@@ -434,7 +435,7 @@ def test_extend_period_refusals(panel, db):
     assert panel.post(url, {"months": 13, "reason": LONG_REASON}).status_code == 400
     make_bill(db, org)
     assert panel.post(url, {"months": 1, "reason": LONG_REASON}).status_code == 409
-    free = make_org(db, tier="free", period=None, name="Free Co")
+    free = make_org(db, tier="starter", period=None, name="Free Co")
     assert panel.post(f"/internal/orgs/{free.id}/extend-period",
                       {"months": 1, "reason": LONG_REASON}).status_code == 409
     assert panel.audit("period_extend") == []
@@ -462,24 +463,24 @@ def test_pause_downgrade_refusals(panel, db):
 
 def test_reinstate_restores_a_nonpayment_downgrade(panel, env, db):
     org = env.act_as(make_org(
-        db, tier="free", period=None, name="Late Co",
+        db, tier="starter", period=None, name="Late Co",
         nonpayment_downgraded_at=datetime.now(timezone.utc) - timedelta(days=3),
         blocking_tos_accepted_at=datetime.now(timezone.utc) - timedelta(days=90),
         retention_grace_tier="growth",
         retention_grace_until=datetime.now(timezone.utc) + timedelta(days=27),
     ))
     bill = make_bill(db, org, tier="growth", amount=499_900)
-    expected = restore_amount_paise([bill], "starter", "monthly", currency="INR")
+    expected = restore_amount_paise([bill], "basic", "monthly", currency="INR")
     r = panel.post(f"/internal/orgs/{org.id}/reinstate",
-                   {"tier": "starter", "period": "monthly", "reference": "NEFT-1", "reason": LONG_REASON})
+                   {"tier": "basic", "period": "monthly", "reference": "NEFT-1", "reason": LONG_REASON})
     assert r.status_code == 200, r.text
     db.expire_all()
     org = db.get(Organization, org.id)
-    assert (org.tier, org.billing_period) == ("starter", "monthly")
+    assert (org.tier, org.billing_period) == ("basic", "monthly")
     assert org.nonpayment_downgraded_at is None and org.retention_grace_until is None
     assert db.get(Bill, bill.id).status == "paid"
     assert db.get(Payment, r.json()["payment_id"]).amount_paise == expected
-    assert env.client.get("/billing/banner").json()["tier"] == "starter"
+    assert env.client.get("/billing/banner").json()["tier"] == "basic"
     [row] = panel.audit("org_reinstate")
     assert row.details["amount_minor"] == expected
 
@@ -487,7 +488,7 @@ def test_reinstate_restores_a_nonpayment_downgrade(panel, env, db):
 def test_reinstate_refused_for_an_org_not_downgraded_for_nonpayment(panel, db):
     org = seed_account(db)
     r = panel.post(f"/internal/orgs/{org.id}/reinstate",
-                   {"tier": "starter", "period": "monthly", "reference": "R", "reason": LONG_REASON})
+                   {"tier": "basic", "period": "monthly", "reference": "R", "reason": LONG_REASON})
     assert r.status_code in (400, 403, 409)
     assert db.query(Payment).count() == 0
     assert panel.audit("org_reinstate") == []
@@ -509,7 +510,7 @@ def test_extend_pilot(panel, db):
 
 def test_extend_pilot_reactivates_an_expired_pilot(panel, db):
     now = datetime.now(timezone.utc)
-    org = make_org(db, tier="free", period=None, name="Gone Pilot", billing_provider="pilot",
+    org = make_org(db, tier="starter", period=None, name="Gone Pilot", billing_provider="pilot",
                    trial_ends_at=now - timedelta(days=5))
     r = panel.post(f"/internal/orgs/{org.id}/extend-pilot", {"days": 14, "reason": LONG_REASON})
     assert r.status_code == 200 and r.json()["reactivated"] is True
@@ -544,8 +545,93 @@ def test_pilot_codes(panel, db):
     assert row.details["count"] == 3 and row.org_id is None
 
 
+# --- referrals (Phase 12) -------------------------------------------------------
+
+def _referral_credit(db, org, status="available", amount=199_900, source=None):
+    from db.models import Credit
+
+    credit = Credit(
+        org_id=org.id, kind="referrer_reward", status=status, amount_paise=amount, currency="INR",
+        basis_tier="basic", basis_period="monthly", source_org_id=source.id if source else None,
+        earned_at=datetime.now(timezone.utc),
+    )
+    db.add(credit)
+    db.commit()
+    return credit
+
+
+def test_staff_can_revoke_an_unused_credit_with_a_reason_and_an_audit_row(panel, db):
+    org = seed_account(db)
+    credit = _referral_credit(db, org, "pending")
+    url = f"/internal/referrals/credits/{credit.id}/revoke"
+    assert panel.post(url, {"reason": "short"}).status_code == 400
+    assert panel.post(url, {"reason": LONG_REASON}).status_code == 200
+    db.expire_all()
+    db.refresh(credit)
+    assert credit.status == "revoked" and credit.revoked_reason == LONG_REASON
+    [row] = panel.audit("referral_credit_revoke")
+    assert row.org_id == org.id and row.details["credit_id"] == credit.id
+    assert panel.post(url, {"reason": LONG_REASON}).status_code == 409  # already revoked
+
+
+def test_staff_cannot_revoke_an_applied_credit_or_find_a_missing_one(panel, db):
+    org = seed_account(db)
+    credit = _referral_credit(db, org, "applied")
+    assert panel.post(f"/internal/referrals/credits/{credit.id}/revoke", {"reason": LONG_REASON}).status_code == 409
+    for bad in ("00000000-0000-0000-0000-000000000000", "not-a-uuid"):
+        assert panel.post(f"/internal/referrals/credits/{bad}/revoke", {"reason": LONG_REASON}).status_code == 404
+    assert panel.audit("referral_credit_revoke") == []
+
+
+def test_approve_releases_only_a_held_credit(panel, db):
+    org = seed_account(db)
+    held = _referral_credit(db, org, "held")
+    pending = _referral_credit(db, org, "pending")
+    assert panel.post(f"/internal/referrals/credits/{pending.id}/approve", {"reason": LONG_REASON}).status_code == 409
+    assert panel.post(f"/internal/referrals/credits/{held.id}/approve", {"reason": LONG_REASON}).status_code == 200
+    db.expire_all()
+    db.refresh(held)
+    assert held.status == "available" and held.vests_at is not None
+    assert len(panel.audit("referral_credit_approve")) == 1
+
+
+def test_referral_overview_lists_referrers_edges_and_held_credits(panel, db):
+    from db.models import PromoCodeRedemption
+
+    referrer = seed_account(db)
+    code = PromoCode(code="REF-STAFF", kind="referral", owner_org_id=referrer.id, max_redemptions=0)
+    db.add(code)
+    db.commit()
+    referee = make_org(db, tier="starter", period=None, name="Referee Co", referred_by_promo_code_id=code.id)
+    db.add(PromoCodeRedemption(promo_code_id=code.id, redeemed_by_org_id=referee.id,
+                               redeemed_at=datetime.now(timezone.utc)))
+    db.commit()
+    _referral_credit(db, referrer, "held", source=referee)
+
+    body = panel.get("/internal/referrals").json()
+    [row] = body["referrers"]
+    assert (row["org_id"], row["code"], row["signups"], row["paying"], row["held"]) == (referrer.id, "REF-STAFF", 1, 0, 1)
+    [edge] = body["edges"]
+    assert edge["referee_org_id"] == referee.id and edge["referrer_org_id"] == referrer.id
+    assert edge["free_bill_applied"] is False
+    assert [c["status"] for c in body["held"]] == ["held"]
+    assert body["held"][0]["source_org_name"] == "Referee Co"
+
+
+def test_account_view_carries_credits_and_the_credit_applied_on_bills(panel, db):
+    org = seed_account(db)
+    _referral_credit(db, org, "available")
+    bill = make_bill(db, org)
+    bill.credit_applied_paise = 5_000
+    db.commit()
+    body = panel.get(f"/internal/orgs/{org.id}").json()
+    assert [c["status"] for c in body["credits"]] == ["available"]
+    assert body["bills"][0]["credit_applied_paise"] == 5_000
+    assert body["referral"]["credit_available_inr_minor"] == 199_900
+
+
 def test_writes_to_a_deleted_account_are_refused(panel, db):
-    org = make_org(db, tier="starter", period="monthly", name="Gone Co",
+    org = make_org(db, tier="basic", period="monthly", name="Gone Co",
                    deleted_at=datetime.now(timezone.utc))
     bill = make_bill(db, org)
     r = panel.post(f"/internal/orgs/{org.id}/bills/mark-paid",
@@ -593,7 +679,7 @@ def test_health_lists_every_expected_task_and_flags_stuck_and_failed_payments(pa
 # --- metrics routes ---------------------------------------------------------------
 
 def test_metrics_json_has_a_row_per_currency(panel, db):
-    make_org(db, tier="starter", period="monthly", name="Payer", first_charged_at=datetime.now(timezone.utc))
+    make_org(db, tier="basic", period="monthly", name="Payer", first_charged_at=datetime.now(timezone.utc))
     body = panel.get("/internal/metrics").json()
     assert [r["currency"] for r in body["current"]] == ["USD", "INR"]
     inr = body["current"][1]
@@ -602,7 +688,7 @@ def test_metrics_json_has_a_row_per_currency(panel, db):
 
 
 def test_csv_export_parses_and_is_audited(panel, db):
-    make_org(db, tier="starter", period="monthly", name="Payer", first_charged_at=datetime.now(timezone.utc))
+    make_org(db, tier="basic", period="monthly", name="Payer", first_charged_at=datetime.now(timezone.utc))
     r = panel.get("/internal/metrics/export.csv")
     assert r.status_code == 200 and r.headers["content-type"].startswith("text/csv")
     rows = list(csv.reader(io.StringIO(r.text)))
@@ -616,9 +702,9 @@ def test_csv_export_parses_and_is_audited(panel, db):
 def test_metrics_json_has_a_combined_block(panel, db, monkeypatch):
     monkeypatch.setenv("METRICS_INR_PER_USD", "88")
     now = datetime.now(timezone.utc)
-    make_org(db, tier="starter", period="monthly", name="Payer", first_charged_at=now)
+    make_org(db, tier="basic", period="monthly", name="Payer", first_charged_at=now)
     make_org(
-        db, tier="starter", period="monthly", name="UsdPayer", first_charged_at=now,
+        db, tier="basic", period="monthly", name="UsdPayer", first_charged_at=now,
         billing_currency="USD", billing_country="US",
     )
     make_org(
@@ -638,7 +724,7 @@ def test_metrics_json_has_a_combined_block(panel, db, monkeypatch):
 
 def test_metrics_json_says_rate_not_set_for_combined_only(panel, db, monkeypatch):
     monkeypatch.delenv("METRICS_INR_PER_USD", raising=False)
-    make_org(db, tier="starter", period="monthly", name="Payer", first_charged_at=datetime.now(timezone.utc))
+    make_org(db, tier="basic", period="monthly", name="Payer", first_charged_at=datetime.now(timezone.utc))
     body = panel.get("/internal/metrics").json()
     assert body["rate"] is None
     assert body["combined_current"]["inr_per_usd"] is None and "mrr_minor" not in body["combined_current"]
@@ -653,7 +739,7 @@ def test_metrics_json_says_rate_not_set_for_combined_only(panel, db, monkeypatch
 
 def test_csv_export_has_combined_columns(panel, db, monkeypatch):
     monkeypatch.setenv("METRICS_INR_PER_USD", "88")
-    make_org(db, tier="starter", period="monthly", name="Payer", first_charged_at=datetime.now(timezone.utc))
+    make_org(db, tier="basic", period="monthly", name="Payer", first_charged_at=datetime.now(timezone.utc))
     rows = list(csv.reader(io.StringIO(panel.get("/internal/metrics/export.csv").text)))
     assert all(len(row) == len(CSV_HEADER) for row in rows)
     for row in rows[-2:]:  # both currency rows of the live date carry the same combined block
@@ -664,9 +750,9 @@ def test_csv_export_has_combined_columns(panel, db, monkeypatch):
 def test_entered_rate_overrides_the_server_rate_and_is_not_stored(panel, db, monkeypatch):
     monkeypatch.setenv("METRICS_INR_PER_USD", "88")
     now = datetime.now(timezone.utc)
-    make_org(db, tier="starter", period="monthly", name="Payer", first_charged_at=now)
+    make_org(db, tier="basic", period="monthly", name="Payer", first_charged_at=now)
     make_org(
-        db, tier="starter", period="monthly", name="UsdPayer", first_charged_at=now,
+        db, tier="basic", period="monthly", name="UsdPayer", first_charged_at=now,
         billing_currency="USD", billing_country="US",
     )
     body = panel.get("/internal/metrics", params={"rate": "83.5"}).json()
@@ -680,7 +766,7 @@ def test_entered_rate_overrides_the_server_rate_and_is_not_stored(panel, db, mon
 
 def test_entered_rate_works_when_the_server_rate_is_not_set(panel, db, monkeypatch):
     monkeypatch.delenv("METRICS_INR_PER_USD", raising=False)
-    make_org(db, tier="starter", period="monthly", name="Payer", first_charged_at=datetime.now(timezone.utc))
+    make_org(db, tier="basic", period="monthly", name="Payer", first_charged_at=datetime.now(timezone.utc))
     assert panel.get("/internal/metrics").json()["rate_source"] is None
     body = panel.get("/internal/metrics", params={"rate": "90"}).json()
     assert body["rate_source"] == "entered" and body["combined_current"]["mrr_minor"] == 199_900

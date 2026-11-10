@@ -104,6 +104,12 @@ export default function AccountPage({ params }: { params: Promise<{ id: string }
 
   const openBills = view.bills.filter((b) => b.status === "open");
   const money = (r: Row) => formatMinor(r.amount_paise, r.currency);
+  const revocable = view.credits.filter((c) => c.status === "pending" || c.status === "held" || c.status === "available");
+  const held = view.credits.filter((c) => c.status === "held");
+  const creditOptions = (rows: Row[]) =>
+    rows.length
+      ? rows.map((c) => ({ value: String(c.id), label: `${c.status} ${money(c)} (${String(c.earned_at).slice(0, 10)})` }))
+      : [{ value: "", label: "No credits" }];
   const deleted = view.org.deleted_at !== null;
 
   return (
@@ -131,6 +137,23 @@ export default function AccountPage({ params }: { params: Promise<{ id: string }
       <Section title="Referral">
         <KvTable data={view.referral} />
       </Section>
+      <Section title="Credits">
+        <DataTable
+          empty="No credits."
+          columns={[
+            { key: "earned_at", label: "Earned" },
+            { key: "kind", label: "Kind" },
+            { key: "status", label: "Status" },
+            { key: "amount_paise", label: "Amount", render: money },
+            { key: "source_org_id", label: "From org" },
+            { key: "vests_at", label: "Vested" },
+            { key: "held_reason", label: "Held because" },
+            { key: "applied_bill_id", label: "Applied to bill" },
+            { key: "revoked_reason", label: "Revoked because" },
+          ]}
+          rows={view.credits}
+        />
+      </Section>
       <Section title="Members">
         <DataTable
           columns={[
@@ -153,7 +176,8 @@ export default function AccountPage({ params }: { params: Promise<{ id: string }
             { key: "cancel_on", label: "Cancels on" },
             { key: "tier", label: "Tier" },
             { key: "period", label: "Period" },
-            { key: "amount_paise", label: "Amount", render: money },
+            { key: "amount_paise", label: "Amount due", render: money },
+            { key: "credit_applied_paise", label: "Credit applied", render: (r) => formatMinor(r.credit_applied_paise, r.currency) },
             { key: "status", label: "Status" },
             { key: "paid_at", label: "Paid" },
           ]}
@@ -250,7 +274,7 @@ export default function AccountPage({ params }: { params: Promise<{ id: string }
                   label: "Tier",
                   kind: "select",
                   options: [
-                    { value: "starter", label: "starter" },
+                    { value: "basic", label: "basic" },
                     { value: "growth", label: "growth" },
                     { value: "pro", label: "pro" },
                   ],
@@ -273,6 +297,20 @@ export default function AccountPage({ params }: { params: Promise<{ id: string }
               help="Pilot accounts only. Adds days to the pilot end and re-arms the reminder emails."
               path={`/orgs/${id}/extend-pilot`}
               fields={[{ name: "days", label: "Days (1 to 90)", kind: "number", initial: "14" }]}
+              onDone={load}
+            />
+            <ActionForm
+              title="Revoke a referral credit"
+              help="Cancels a credit that has not been used on a bill (pending, held or available). A used credit cannot be revoked."
+              path={(values) => `/referrals/credits/${encodeURIComponent(values.credit_id)}/revoke`}
+              fields={[{ name: "credit_id", label: "Credit", kind: "select", options: creditOptions(revocable) }]}
+              onDone={load}
+            />
+            <ActionForm
+              title="Approve a held referral credit"
+              help="Releases a credit held for review (more than 3 vested in 30 days). It becomes available at once."
+              path={(values) => `/referrals/credits/${encodeURIComponent(values.credit_id)}/approve`}
+              fields={[{ name: "credit_id", label: "Held credit", kind: "select", options: creditOptions(held) }]}
               onDone={load}
             />
           </>

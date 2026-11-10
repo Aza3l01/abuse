@@ -70,7 +70,7 @@ def make_session_factory():
 def make_org(
     db,
     *,
-    tier: str = "starter",
+    tier: str = "basic",
     period: str | None = "monthly",
     next_bill: date | None = None,
     name: str = "Acme",
@@ -84,7 +84,7 @@ def make_org(
         "company_name": name,
         "tier": tier,
         "billing_period": period,
-        "billing_provider": "razorpay" if tier != "free" else None,
+        "billing_provider": "razorpay" if tier != "starter" else None,
         "next_billing_date": ist_midnight(next_bill) if next_bill else None,
         "billing_currency": "INR",
         "billing_country": "IN",

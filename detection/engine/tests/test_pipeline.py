@@ -50,6 +50,9 @@ def test(name: str, fn) -> None:
         _results.append(("FAIL", name))
 
 
+test.__test__ = False  # a script helper, not a pytest test
+
+
 # ---------------------------------------------------------------------------
 # Helper: build a normalised log dict
 # ---------------------------------------------------------------------------

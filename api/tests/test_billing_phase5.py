@@ -29,10 +29,10 @@ EM_DASH = "\u2014"
 
 def _fresh_org(db, **extra) -> Organization:
     """A free org that has not chosen a billing country yet."""
-    return make_org(db, tier="free", period=None, billing_country=None, billing_currency="USD", **extra)
+    return make_org(db, tier="starter", period=None, billing_country=None, billing_currency="USD", **extra)
 
 
-def _order(env, *, country=None, tier="starter", period="monthly", **extra):
+def _order(env, *, country=None, tier="basic", period="monthly", **extra):
     body = {"purpose": "initial", "tier": tier, "period": period, "accept_blocking_tos": True}
     if country is not None:
         body["billing_country"] = country
@@ -53,7 +53,7 @@ def test_india_is_charged_in_inr_and_locks_the_org(env, db):
     resp = _order(env, country="in")
     assert resp.status_code == 200
     assert resp.json()["currency"] == "INR"
-    assert resp.json()["amount"] == plan_price("INR", "starter", "monthly")
+    assert resp.json()["amount"] == plan_price("INR", "basic", "monthly")
     db.expire_all()
     org = db.get(Organization, org.id)
     assert (org.billing_currency, org.billing_country) == ("INR", "IN")
@@ -83,7 +83,7 @@ def test_the_amount_in_usd_follows_the_published_cents(env, db):
 
 
 def test_a_locked_org_cannot_switch_country_or_currency(env, db):
-    org = env.act_as(make_org(db, tier="free", period=None, billing_country="US", billing_currency="USD"))
+    org = env.act_as(make_org(db, tier="starter", period=None, billing_country="US", billing_currency="USD"))
     resp = _order(env, country="IN")
     assert resp.status_code == 409
     assert env.rp.orders == {}
@@ -95,11 +95,11 @@ def test_a_locked_org_cannot_switch_country_or_currency(env, db):
 
 
 def test_a_locked_org_is_charged_in_its_own_currency_whatever_the_client_says(env, db):
-    env.act_as(make_org(db, tier="free", period=None, billing_country="IN", billing_currency="INR"))
+    env.act_as(make_org(db, tier="starter", period=None, billing_country="IN", billing_currency="INR"))
     resp = _order(env, currency="USD", amount=1)
     assert resp.status_code == 200
     assert resp.json()["currency"] == "INR"
-    assert resp.json()["amount"] == plan_price("INR", "starter", "monthly")
+    assert resp.json()["amount"] == plan_price("INR", "basic", "monthly")
 
 
 def test_the_country_must_be_two_letters(env, db):
@@ -121,14 +121,14 @@ def test_a_failed_razorpay_order_does_not_lock_the_currency(env, db, monkeypatch
 
 
 def test_mixed_currency_open_bills_are_refused(env, db):
-    org = env.act_as(make_org(db, tier="starter", period="monthly"))
+    org = env.act_as(make_org(db, tier="basic", period="monthly"))
     make_bill(db, org, currency="USD", amount=4900)
     resp = env.create_order(purpose="upgrade", tier="growth", period="monthly", accept_blocking_tos=True)
     assert resp.status_code == 409
 
 
 def test_paying_an_open_bill_uses_the_bill_currency(env, db):
-    org = env.act_as(make_org(db, tier="starter", period="monthly", billing_country="US", billing_currency="USD"))
+    org = env.act_as(make_org(db, tier="basic", period="monthly", billing_country="US", billing_currency="USD"))
     bill = make_bill(db, org, currency="USD", amount=4900)
     resp = env.create_order(purpose="bill", bill_id=bill.id)
     assert resp.status_code == 200
@@ -139,21 +139,21 @@ def test_paying_an_open_bill_uses_the_bill_currency(env, db):
 # --- annual acknowledgement --------------------------------------------------
 
 def test_annual_needs_the_non_refundable_acknowledgement(env, db):
-    env.act_as(make_org(db, tier="free", period=None))
+    env.act_as(make_org(db, tier="starter", period=None))
     resp = _order(env, period="annual")
     assert resp.status_code == 403
     assert env.rp.orders == {}
 
 
 def test_annual_acknowledgement_is_recorded_on_the_payment(env, db):
-    env.act_as(make_org(db, tier="free", period=None))
+    env.act_as(make_org(db, tier="starter", period=None))
     resp = _order(env, period="annual", accept_annual_nonrefundable=True)
     assert resp.status_code == 200
     assert db.query(Payment).one().line_items["annual_nonrefundable_accepted"] is True
 
 
 def test_monthly_orders_do_not_need_the_acknowledgement(env, db):
-    env.act_as(make_org(db, tier="free", period=None))
+    env.act_as(make_org(db, tier="starter", period=None))
     assert _order(env).status_code == 200
 
 
@@ -171,7 +171,7 @@ def test_verify_accepts_a_usd_payment_and_applies_it(env, db):
     assert env.verify(order["order_id"], rz_id).status_code == 200
     db.expire_all()
     org = db.get(Organization, org.id)
-    assert (org.tier, org.billing_currency) == ("starter", "USD")
+    assert (org.tier, org.billing_currency) == ("basic", "USD")
 
 
 def test_verify_rejects_a_payment_in_the_wrong_currency(env, db):
@@ -179,7 +179,7 @@ def test_verify_rejects_a_payment_in_the_wrong_currency(env, db):
     rz_id = env.rp.pay(order["order_id"], currency="INR")
     assert env.verify(order["order_id"], rz_id).status_code == 400
     db.expire_all()
-    assert db.get(Organization, org.id).tier == "free"
+    assert db.get(Organization, org.id).tier == "starter"
     assert db.query(Payment).one().status == "created"
 
 
@@ -188,7 +188,7 @@ def test_webhook_ignores_a_payment_in_the_wrong_currency(env, db):
     rz_id = env.rp.pay(order["order_id"], currency="INR")
     assert env.webhook(env.captured_event(rz_id)).status_code == 200
     db.expire_all()
-    assert db.get(Organization, org.id).tier == "free"
+    assert db.get(Organization, org.id).tier == "starter"
     assert db.query(Payment).one().status == "created"
 
 
@@ -197,11 +197,11 @@ def test_webhook_applies_a_usd_payment(env, db):
     rz_id = env.rp.pay(order["order_id"])
     assert env.webhook(env.captured_event(rz_id)).status_code == 200
     db.expire_all()
-    assert db.get(Organization, org.id).tier == "starter"
+    assert db.get(Organization, org.id).tier == "basic"
 
 
 def test_an_international_card_on_an_inr_order_is_logged_not_blocked(env, db, caplog):
-    org = env.act_as(make_org(db, tier="free", period=None))
+    org = env.act_as(make_org(db, tier="starter", period=None))
     order = _order(env).json()
     rz_id = env.rp.pay(order["order_id"])
     env.rp.payments[rz_id]["international"] = True
@@ -209,13 +209,13 @@ def test_an_international_card_on_an_inr_order_is_logged_not_blocked(env, db, ca
         assert env.verify(order["order_id"], rz_id).status_code == 200
     assert any("international card" in r.getMessage() for r in caplog.records)
     db.expire_all()
-    assert db.get(Organization, org.id).tier == "starter"
+    assert db.get(Organization, org.id).tier == "basic"
 
 
 # --- payment_received is queued once, after the commit -----------------------
 
 def test_a_captured_payment_queues_one_payment_received_email(env, db, notifications):
-    org = env.act_as(make_org(db, tier="free", period=None))
+    org = env.act_as(make_org(db, tier="starter", period=None))
     order = _order(env).json()
     rz_id = env.rp.pay(order["order_id"])
     assert env.verify(order["order_id"], rz_id).status_code == 200
@@ -227,7 +227,7 @@ def test_a_captured_payment_queues_one_payment_received_email(env, db, notificat
 
 
 def test_the_webhook_alone_queues_payment_received(env, db, notifications):
-    org = env.act_as(make_org(db, tier="free", period=None))
+    org = env.act_as(make_org(db, tier="starter", period=None))
     order = _order(env).json()
     rz_id = env.rp.pay(order["order_id"])
     assert env.webhook(env.captured_event(rz_id)).status_code == 200
@@ -238,7 +238,7 @@ def test_the_webhook_alone_queues_payment_received(env, db, notifications):
 
 
 def test_a_failed_verification_queues_nothing(env, db, notifications):
-    env.act_as(make_org(db, tier="free", period=None))
+    env.act_as(make_org(db, tier="starter", period=None))
     order = _order(env).json()
     rz_id = env.rp.pay(order["order_id"], status="failed")
     assert env.verify(order["order_id"], rz_id).status_code == 409
@@ -264,21 +264,21 @@ def test_quote_matches_create_order_and_creates_nothing(env, db):
 
 
 def test_quote_for_an_upgrade_with_the_bill_open_is_refused(env, db):
-    org = env.act_as(make_org(db, tier="starter", period="monthly"))
+    org = env.act_as(make_org(db, tier="basic", period="monthly"))
     make_bill(db, org)
     resp = env.client.post("/billing/quote", json={"purpose": "upgrade", "tier": "growth", "period": "monthly"})
     assert resp.status_code == 409
 
 
 def test_quote_for_an_upgrade_with_nothing_open_is_the_difference(env, db):
-    env.act_as(make_org(db, tier="starter", period="monthly"))
+    env.act_as(make_org(db, tier="basic", period="monthly"))
     data = env.client.post("/billing/quote", json={"purpose": "upgrade", "tier": "pro", "period": "monthly"}).json()
-    assert data["amount"] == plan_price("INR", "pro", "monthly") - plan_price("INR", "starter", "monthly")
+    assert data["amount"] == plan_price("INR", "pro", "monthly") - plan_price("INR", "basic", "monthly")
     assert data["currency"] == "INR"
 
 
 def test_quote_is_owner_only_and_rejects_bad_input(env, db):
-    org = env.act_as(make_org(db, tier="starter", period="monthly"), role="admin")
+    org = env.act_as(make_org(db, tier="basic", period="monthly"), role="admin")
     assert env.client.post("/billing/quote", json={"purpose": "upgrade", "tier": "pro", "period": "monthly"}).status_code == 403
     env.act_as(org, role="owner")
     assert env.client.post("/billing/quote", json={"purpose": "upgrade", "tier": "pro", "period": "weekly"}).status_code == 400
@@ -302,7 +302,7 @@ def test_details_can_set_the_country_once(env, db):
 # --- status, banner, receipts ----------------------------------------------------
 
 def test_status_and_banner_carry_the_currency(env, db):
-    env.act_as(make_org(db, tier="free", period=None, billing_country="US", billing_currency="USD"))
+    env.act_as(make_org(db, tier="starter", period=None, billing_country="US", billing_currency="USD"))
     status = env.client.get("/billing/status").json()
     assert (status["billing_currency"], status["billing_country"]) == ("USD", "US")
     banner = env.client.get("/billing/banner").json()
@@ -316,7 +316,7 @@ def test_status_next_bill_follows_the_plan_that_will_be_billed(env, db):
     status = env.client.get("/billing/status").json()
     assert (status["next_bill_amount_paise"], status["next_bill_plan"]) == (12900, "Growth monthly")
 
-    org.pending_tier, org.pending_period = "starter", "monthly"
+    org.pending_tier, org.pending_period = "basic", "monthly"
     db.commit()
     status = env.client.get("/billing/status").json()
     assert (status["next_bill_amount_paise"], status["next_bill_plan"]) == (4900, "Basic monthly")
@@ -329,13 +329,13 @@ def test_status_next_bill_follows_the_plan_that_will_be_billed(env, db):
 
 
 def test_status_next_bill_is_none_without_a_paid_plan(env, db):
-    env.act_as(make_org(db, tier="free", period=None))
+    env.act_as(make_org(db, tier="starter", period=None))
     status = env.client.get("/billing/status").json()
     assert status["next_bill_amount_paise"] is None and status["next_bill_plan"] is None
 
 
 def test_bill_summaries_carry_their_currency(env, db):
-    org = env.act_as(make_org(db, tier="starter", period="monthly", billing_country="US", billing_currency="USD"))
+    org = env.act_as(make_org(db, tier="basic", period="monthly", billing_country="US", billing_currency="USD"))
     make_bill(db, org, currency="USD", amount=4900)
     bills = env.client.get("/billing/status").json()["open_bills"]
     assert [(b["currency"], b["amount_paise"]) for b in bills] == [("USD", 4900)]
@@ -349,7 +349,7 @@ def test_payment_rows_carry_their_currency(env, db):
 
 
 def test_receipt_shows_the_snapshot_not_the_current_details(env, db):
-    org = env.act_as(make_org(db, tier="free", period=None, billing_legal_name="Acme Pvt Ltd", billing_address="1 Road"))
+    org = env.act_as(make_org(db, tier="starter", period=None, billing_legal_name="Acme Pvt Ltd", billing_address="1 Road"))
     order = _order(env).json()
     env.verify(order["order_id"], env.rp.pay(order["order_id"]))
     payment = db.query(Payment).one()
@@ -360,36 +360,36 @@ def test_receipt_shows_the_snapshot_not_the_current_details(env, db):
     assert data["customer_name"] == "Acme Pvt Ltd"
     assert data["customer_address"] == "1 Road"
     assert data["currency"] == "INR"
-    assert data["lines"] == [{"description": "Basic monthly", "amount_paise": plan_price("INR", "starter", "monthly")}]
+    assert data["lines"] == [{"description": "Basic monthly", "amount_paise": plan_price("INR", "basic", "monthly")}]
 
 
 def test_restore_receipt_splits_bills_and_the_new_period(env, db):
-    org = env.act_as(make_org(db, tier="free", period=None, nonpayment_downgraded_at=datetime.now(timezone.utc)))
+    org = env.act_as(make_org(db, tier="starter", period=None, nonpayment_downgraded_at=datetime.now(timezone.utc)))
     bill = make_bill(db, org)
-    resp = env.create_order(purpose="restore", tier="starter", period="monthly", accept_blocking_tos=True)
+    resp = env.create_order(purpose="restore", tier="basic", period="monthly", accept_blocking_tos=True)
     assert resp.status_code == 200, resp.text
     order = resp.json()
     env.verify(order["order_id"], env.rp.pay(order["order_id"]))
     payment = db.query(Payment).one()
     lines = env.client.get(f"/billing/payments/{payment.id}").json()["lines"]
-    assert [l["amount_paise"] for l in lines] == [bill.amount_paise, plan_price("INR", "starter", "monthly")]
+    assert [l["amount_paise"] for l in lines] == [bill.amount_paise, plan_price("INR", "basic", "monthly")]
     assert lines[0]["description"] == "Open bills (1)"
 
 
 def test_receipts_are_owner_only_and_never_cross_orgs(env, db):
-    org = env.act_as(make_org(db, tier="free", period=None))
+    org = env.act_as(make_org(db, tier="starter", period=None))
     order = _order(env).json()
     env.verify(order["order_id"], env.rp.pay(order["order_id"]))
     payment = db.query(Payment).one()
     env.act_as(org, role="admin")
     assert env.client.get(f"/billing/payments/{payment.id}").status_code == 403
-    other = env.act_as(make_org(db, name="Other", tier="free", period=None))
+    other = env.act_as(make_org(db, name="Other", tier="starter", period=None))
     assert other.id != org.id
     assert env.client.get(f"/billing/payments/{payment.id}").status_code == 404
 
 
 def test_an_unpaid_order_has_no_receipt(env, db):
-    env.act_as(make_org(db, tier="free", period=None))
+    env.act_as(make_org(db, tier="starter", period=None))
     _order(env)
     payment = db.query(Payment).one()
     assert payment.status == "created"
@@ -405,7 +405,7 @@ def test_undo_pending_clears_a_scheduled_cancel_and_downgrade(env, db):
     db.expire_all()
     assert db.get(Organization, org.id).cancel_at_period_end is False
 
-    org.pending_tier, org.pending_period = "starter", "monthly"
+    org.pending_tier, org.pending_period = "basic", "monthly"
     db.commit()
     assert env.client.post("/billing/undo-pending").json()["status"] == "pending_cleared"
     db.expire_all()
@@ -427,7 +427,7 @@ def test_undo_pending_is_owner_only(env, db):
 # --- notification settings ----------------------------------------------------------
 
 def test_notification_settings_default_and_update(env, db):
-    org = env.act_as(make_org(db, tier="starter", period="monthly"))
+    org = env.act_as(make_org(db, tier="basic", period="monthly"))
     assert env.client.get("/billing/notifications").json() == {"mode": "owner", "reminders_enabled": True}
     resp = env.client.put("/billing/notifications", json={"mode": "all", "reminders_enabled": False})
     assert resp.status_code == 200
@@ -438,7 +438,7 @@ def test_notification_settings_default_and_update(env, db):
 
 
 def test_notification_settings_reject_unknown_modes_and_non_owners(env, db):
-    org = env.act_as(make_org(db, tier="starter", period="monthly"))
+    org = env.act_as(make_org(db, tier="basic", period="monthly"))
     assert env.client.put("/billing/notifications", json={"mode": "everyone", "reminders_enabled": True}).status_code == 422
     env.act_as(org, role="admin")
     assert env.client.get("/billing/notifications").status_code == 403
@@ -462,7 +462,7 @@ def _member(db, org, email, role="viewer", contact=False, name="A Person", delet
 
 
 def test_member_list_has_names_and_the_billing_contact_flag(env, db):
-    org = env.act_as(make_org(db, tier="starter", period="monthly"))
+    org = env.act_as(make_org(db, tier="basic", period="monthly"))
     _member(db, org, "owner@example.com", role="owner", name="Olive Owner")
     _member(db, org, "view@example.com", contact=True, name="Vi Viewer")
     members = {m["email"]: m for m in env.client.get("/org/members").json()}
@@ -472,7 +472,7 @@ def test_member_list_has_names_and_the_billing_contact_flag(env, db):
 
 
 def test_the_owner_can_mark_and_unmark_a_billing_contact(env, db):
-    org = env.act_as(make_org(db, tier="starter", period="monthly"))
+    org = env.act_as(make_org(db, tier="basic", period="monthly"))
     member = _member(db, org, "view@example.com")
     url = f"/org/members/{member.id}/billing-contact"
     assert env.client.patch(url, json={"is_billing_contact": True}).json() == {"is_billing_contact": True}
@@ -482,9 +482,9 @@ def test_the_owner_can_mark_and_unmark_a_billing_contact(env, db):
 
 
 def test_billing_contact_is_owner_only_and_org_scoped(env, db):
-    org = env.act_as(make_org(db, tier="starter", period="monthly"))
+    org = env.act_as(make_org(db, tier="basic", period="monthly"))
     member = _member(db, org, "view@example.com")
-    other_org = make_org(db, name="Other", tier="starter", period="monthly")
+    other_org = make_org(db, name="Other", tier="basic", period="monthly")
     foreign = _member(db, other_org, "foreign@example.com")
     url = f"/org/members/{member.id}/billing-contact"
     assert env.client.patch(f"/org/members/{foreign.id}/billing-contact", json={"is_billing_contact": True}).status_code == 404
@@ -496,7 +496,7 @@ def test_billing_contact_is_owner_only_and_org_scoped(env, db):
 
 @pytest.fixture
 def team(db):
-    org = make_org(db, tier="starter", period="monthly")
+    org = make_org(db, tier="basic", period="monthly")
     _member(db, org, "owner@example.com", role="owner")
     _member(db, org, "admin@example.com", role="admin")
     _member(db, org, "finance@example.com", role="viewer", contact=True)
@@ -515,7 +515,7 @@ def test_selected_mode_goes_to_marked_members_not_deleted_ones(db, team):
 
 
 def test_selected_mode_with_nobody_marked_falls_back_to_owners(db):
-    org = make_org(db, tier="starter", period="monthly", billing_emails_mode="selected")
+    org = make_org(db, tier="basic", period="monthly", billing_emails_mode="selected")
     _member(db, org, "owner@example.com", role="owner")
     _member(db, org, "viewer@example.com", role="viewer")
     assert resolve_billing_recipients(org, db) == ["owner@example.com"]
@@ -542,7 +542,7 @@ def test_always_owners_adds_the_owner_without_duplicates(db, team):
 
 def _bill(currency="INR", amount=199900):
     return SimpleNamespace(
-        id="b1", tier="starter", period="monthly", amount_paise=amount, currency=currency,
+        id="b1", tier="basic", period="monthly", amount_paise=amount, currency=currency,
         due_date=date(2026, 12, 20), cancel_on=date(2027, 1, 1),
     )
 
@@ -640,7 +640,7 @@ def test_each_recipient_gets_one_email_and_the_cancel_notice_always_reaches_the_
 
 
 def test_sending_with_no_recipients_is_a_quiet_zero(db, outbox):
-    org = make_org(db, tier="starter", period="monthly")
+    org = make_org(db, tier="basic", period="monthly")
     assert send_billing_emails(db, "ready", org, _bill()) == 0
     assert outbox == []
 
@@ -664,7 +664,7 @@ def test_the_celery_task_loads_rows_and_sends(db, team, outbox, session_factory,
 def test_notify_validates_the_kind_and_swallows_queue_errors(db, monkeypatch):
     import api.billing_notify as billing_notify
 
-    org = make_org(db, tier="starter", period="monthly")
+    org = make_org(db, tier="basic", period="monthly")
     with pytest.raises(ValueError):
         notify("typo", org)
 

@@ -57,3 +57,25 @@ celery_app.conf.update(
 
 # Registers the task_postrun handler behind the ops panel's last-run times.
 import workers.task_runs  # noqa: E402,F401
+
+
+# Phase 11 error tracking. Both handlers are best effort (api.analytics never
+# raises). Imported here, at module level, so forked workers have them ready.
+from celery.signals import task_failure, task_postrun  # noqa: E402
+
+from api import analytics  # noqa: E402
+
+
+@task_failure.connect
+def _report_task_failure(sender=None, task_id=None, exception=None, **kwargs):
+    if exception is not None:
+        analytics.capture_exception(
+            exception,
+            {"source": "celery", "task": getattr(sender, "name", None), "task_id": task_id},
+        )
+
+
+@task_postrun.connect
+def _flush_analytics(**kwargs):
+    # A prefork child can be recycled before PostHog's sender thread runs.
+    analytics.flush()

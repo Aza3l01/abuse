@@ -44,7 +44,10 @@ export default function DpaPage() {
       <p style={legalPStyle}>
         Clew uses these subprocessors: Amazon Web Services (hosting),
         Razorpay (payment processing, no log data), Resend (transactional
-        email, no log data), MaxMind (IP geolocation lookups) and, for
+        email, no log data), MaxMind (IP geolocation lookups), PostHog
+        (product analytics and error tracking, EU region, no log data),
+        Cloudflare (bot check at sign-up, no log data), Better Stack (uptime
+        monitoring, no log data) and, for
         Growth plans and above, Groq (plain-language threat explanations,
         which receive the IP address under investigation, aggregated traffic
         metrics and short indicator strings, not raw request bodies). Clew

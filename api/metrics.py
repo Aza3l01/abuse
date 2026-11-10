@@ -1,8 +1,9 @@
 """api/metrics.py: Phase 6 business metrics, computed from Postgres only.
 
 Definitions (TODO.md assumption 11, confirmed by the founder):
-  - Paying org: tier starter, growth or pro, billed through Razorpay, with a
-    billing_period and a first captured payment, not deleted. Pilots, free and
+  - Paying org: tier basic, growth or pro, billed through Razorpay, with a
+    billing_period and a first captured payment, not deleted. Pilots, starter
+    (free) and
     enterprise orgs are not paying.
   - MRR: monthly plans at list price, annual plans at list price / 12, excluding
     GST, from PLAN_PRICES in the org's billing currency. ARR = MRR x 12.
@@ -47,7 +48,7 @@ MONEY_COLUMNS = (
 
 SNAPSHOT_COLUMNS = (
     "users_total", "users_verified", "orgs_total", "active_pilots", "pilots_converted",
-    "pilots_expired_unpaid", "paying_orgs", "paying_starter", "paying_growth", "paying_pro",
+    "pilots_expired_unpaid", "paying_orgs", "paying_basic", "paying_growth", "paying_pro",
     "mrr_minor", "arr_minor", "paying_orgs_start", "mrr_start_minor", "new_mrr_minor",
     "expansion_mrr_minor", "contraction_mrr_minor", "churned_mrr_minor", "churned_orgs",
     "refunds_count", "refunds_minor", "overdue_bills", "overdue_minor",
@@ -58,7 +59,7 @@ HEADLINE_CURRENCY = "INR"
 
 # Counts that add across currencies (an org belongs to exactly one currency).
 _SUMMED_COUNTS = (
-    "paying_orgs", "paying_starter", "paying_growth", "paying_pro", "paying_orgs_start",
+    "paying_orgs", "paying_basic", "paying_growth", "paying_pro", "paying_orgs_start",
     "churned_orgs", "refunds_count", "overdue_bills",
 )
 
@@ -242,7 +243,7 @@ def compute_snapshot(db, now: datetime | None = None) -> list[dict]:
             "pilots_converted": pilots_converted,
             "pilots_expired_unpaid": pilots_expired_unpaid,
             "paying_orgs": len(paying),
-            "paying_starter": sum(1 for o in paying if o.tier == "starter"),
+            "paying_basic": sum(1 for o in paying if o.tier == "basic"),
             "paying_growth": sum(1 for o in paying if o.tier == "growth"),
             "paying_pro": sum(1 for o in paying if o.tier == "pro"),
             "mrr_minor": mrr,

@@ -99,6 +99,10 @@ class PilotCodesBody(BaseModel):
     reason: str = Field(max_length=500)
 
 
+class CreditActionBody(BaseModel):
+    reason: str = Field(max_length=500)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -369,6 +373,59 @@ def pilot_codes(
           details={"count": len(codes)})
     db.commit()
     return {"codes": codes}
+
+
+# ---------------------------------------------------------------------------
+# Referrals (Phase 12): the graph and velocity view, revoke and approve
+# ---------------------------------------------------------------------------
+
+@router.get("/referrals")
+def referrals_overview(
+    response: Response,
+    limit: int = Query(default=100, ge=1, le=500),
+    staff: StaffUser = Depends(require_staff),
+    db: Session = Depends(get_db),
+):
+    response.headers["Cache-Control"] = "no-store"
+    return staff_views.referral_overview(db, limit)
+
+
+@router.post("/referrals/credits/{credit_id}/revoke")
+def referral_credit_revoke(
+    credit_id: str,
+    request: Request,
+    body: CreditActionBody,
+    staff: StaffUser = Depends(require_staff),
+    db: Session = Depends(get_db),
+):
+    reason = staff_ops.clean_reason(body.reason)
+    credit = staff_ops.revoke_referral_credit(db, credit_id, reason)
+    audit(
+        db, staff, "referral_credit_revoke", org=db.get(Organization, credit.org_id), reason=reason,
+        request=request,
+        details={"credit_id": credit.id, "amount_minor": credit.amount_paise, "currency": credit.currency},
+    )
+    db.commit()
+    return {"ok": True}
+
+
+@router.post("/referrals/credits/{credit_id}/approve")
+def referral_credit_approve(
+    credit_id: str,
+    request: Request,
+    body: CreditActionBody,
+    staff: StaffUser = Depends(require_staff),
+    db: Session = Depends(get_db),
+):
+    reason = staff_ops.clean_reason(body.reason)
+    credit = staff_ops.approve_referral_credit(db, credit_id)
+    audit(
+        db, staff, "referral_credit_approve", org=db.get(Organization, credit.org_id), reason=reason,
+        request=request,
+        details={"credit_id": credit.id, "amount_minor": credit.amount_paise, "currency": credit.currency},
+    )
+    db.commit()
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------

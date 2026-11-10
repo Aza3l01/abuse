@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { PRICING_TIERS as TIERS, FEATURE_ROWS } from "@/lib/pricing";
 import { DASHBOARD_URL } from "@/lib/urls";
+import { track } from "@/lib/analytics";
 import { useDetectedCurrency } from "@/lib/useDetectedCurrency";
 
 type Currency = "INR" | "USD";
@@ -227,11 +228,12 @@ export function Pricing({ standalone = false }: { standalone?: boolean } = {}) {
                 href={
                   tier.name === "Enterprise"
                     ? "mailto:support@clewsec.com"
-                    : tier.tier === "free"
+                    : tier.tier === "starter"
                     ? `${DASHBOARD_URL}/register`
                     : `${DASHBOARD_URL}/register?plan=${tier.tier}`
                 }
                 className="text-sm font-medium text-center transition-opacity hover:opacity-80"
+                onClick={() => track("plan_selected", { tier: tier.tier, period: billingPeriod, currency })}
                 style={{
                   padding: "10px 0",
                   background: tier.highlight

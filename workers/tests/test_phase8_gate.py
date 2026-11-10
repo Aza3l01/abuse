@@ -137,7 +137,7 @@ def test_dry_run_is_inert_without_the_agreement(db, run_task):
 
 
 def test_non_blocking_tier_never_stamps_or_pushes(db, run_task):
-    pushed, verdicts = run_task(_org(db, tier="starter", auto_block_dry_run=True), confidence=0.90)
+    pushed, verdicts = run_task(_org(db, tier="basic", auto_block_dry_run=True), confidence=0.90)
     assert pushed == []
     assert verdicts[0].would_have_blocked_at is None
 

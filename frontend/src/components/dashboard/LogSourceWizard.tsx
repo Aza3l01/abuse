@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { apiFetch } from "@/lib/api";
 import { AWS_REGIONS } from "@/lib/awsRegions";
+import { trackS3Connected } from "@/lib/analytics";
 import type { OrgConfigForOnboarding } from "@/components/dashboard/OnboardingModal";
 
 // ---------------------------------------------------------------------------
@@ -159,6 +160,7 @@ export function LogSourceWizard({
         return;
       }
       const updated: OrgConfigForOnboarding = await r.json();
+      trackS3Connected(config?.s3_status, updated);
       setConfig(updated);
       setStep("externalId");
     } catch {
@@ -183,6 +185,7 @@ export function LogSourceWizard({
         return;
       }
       const updated: OrgConfigForOnboarding = await r.json();
+      trackS3Connected(config?.s3_status, updated);
       setConfig(updated);
       if (updated.s3_status === "connected") {
         setRoleResult({ status: "connected", message: "Connected." });

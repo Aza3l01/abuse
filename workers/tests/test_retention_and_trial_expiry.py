@@ -43,15 +43,15 @@ def _verdict_count(db, org) -> int:
 def test_purge_keeps_the_old_tiers_window_while_the_grace_lasts(db, session_factory, monkeypatch):
     monkeypatch.setattr(purge_module, "SessionLocal", session_factory)
     in_grace = make_org(
-        db, tier="free", period=None, name="InGrace",
-        retention_grace_tier="starter", retention_grace_until=_now() + timedelta(days=10),
+        db, tier="starter", period=None, name="InGrace",
+        retention_grace_tier="basic", retention_grace_until=_now() + timedelta(days=10),
     )
     grace_over = make_org(
-        db, tier="free", period=None, name="GraceOver",
-        retention_grace_tier="starter", retention_grace_until=_now() - timedelta(days=1),
+        db, tier="starter", period=None, name="GraceOver",
+        retention_grace_tier="basic", retention_grace_until=_now() - timedelta(days=1),
     )
-    never_paid = make_org(db, tier="free", period=None, name="NeverPaid")
-    still_paying = make_org(db, tier="starter", name="StillPaying")
+    never_paid = make_org(db, tier="starter", period=None, name="NeverPaid")
+    still_paying = make_org(db, tier="basic", name="StillPaying")
     for org in (in_grace, grace_over, never_paid, still_paying):
         _verdict(db, org, age_days=20)   # between free (7) and starter (30)
 
@@ -67,8 +67,8 @@ def test_purge_keeps_the_old_tiers_window_while_the_grace_lasts(db, session_fact
 def test_purge_still_applies_the_grace_tiers_own_limit(db, session_factory, monkeypatch):
     monkeypatch.setattr(purge_module, "SessionLocal", session_factory)
     org = make_org(
-        db, tier="free", period=None,
-        retention_grace_tier="starter", retention_grace_until=_now() + timedelta(days=10),
+        db, tier="starter", period=None,
+        retention_grace_tier="basic", retention_grace_until=_now() + timedelta(days=10),
     )
     _verdict(db, org, age_days=40, ip="203.0.113.6")   # older than Starter's 30 days
     _verdict(db, org, age_days=20, ip="203.0.113.7")
@@ -80,7 +80,7 @@ def test_purge_still_applies_the_grace_tiers_own_limit(db, session_factory, monk
 def test_enterprise_grace_means_nothing_is_purged(db, session_factory, monkeypatch):
     monkeypatch.setattr(purge_module, "SessionLocal", session_factory)
     org = make_org(
-        db, tier="free", period=None,
+        db, tier="starter", period=None,
         retention_grace_tier="enterprise", retention_grace_until=_now() + timedelta(days=5),
     )
     _verdict(db, org, age_days=400)
@@ -92,7 +92,7 @@ def test_enterprise_grace_means_nothing_is_purged(db, session_factory, monkeypat
 def test_purge_fails_closed_for_an_unrecognised_tier(db, session_factory, monkeypatch, caplog):
     monkeypatch.setattr(purge_module, "SessionLocal", session_factory)
     odd = make_org(db, tier="platinum", period=None, name="Odd")
-    normal = make_org(db, tier="free", period=None, name="Normal")
+    normal = make_org(db, tier="starter", period=None, name="Normal")
     _verdict(db, odd, age_days=400)
     _verdict(db, normal, age_days=400, ip="203.0.113.8")
     with caplog.at_level("ERROR", logger=purge_module.logger.name):
@@ -119,14 +119,14 @@ def test_expired_pilot_trial_goes_through_downgrade_org(db, session_factory, mon
 
     assert result["expired"] == 1
     org = db.get(Organization, pid)
-    assert org.tier == "free"
+    assert org.tier == "starter"
     assert org.retention_grace_tier == "growth"
     grace_left = org.retention_grace_until - _now()
     assert timedelta(days=29, hours=23) < grace_left <= timedelta(days=30)
     assert org.auto_block_enabled is False
     assert org.nonpayment_downgraded_at is None
     event = db.query(BillingEvent).filter(BillingEvent.org_id == pid).one()
-    assert (event.event, event.from_tier, event.to_tier) == ("trial_end", "growth", "free")
+    assert (event.event, event.from_tier, event.to_tier) == ("trial_end", "growth", "starter")
 
 
 def test_pilot_keeps_growth_retention_after_the_trial(db, session_factory, monkeypatch):

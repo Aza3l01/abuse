@@ -2,13 +2,13 @@
 // landing page (components/home/Pricing.tsx) and the dashboard billing
 // section (app/dashboard/settings/page.tsx) so the two can never drift apart.
 //
-// "free" (item 53/section 4, built 2026-09-20) is the permanent free Starter
+// "starter" (item 53/section 4, built 2026-09-20) is the permanent free Starter
 // plan every self-serve signup lands on: no trial, no card, no expiry.
 // `dashboard/settings/page.tsx` still excludes it from its billing cards,
 // not because it is unbuilt, but because it is never a purchasable plan.
 
 export interface PricingTier {
-  tier: "free" | "starter" | "growth" | "pro" | "enterprise";
+  tier: "starter" | "basic" | "growth" | "pro" | "enterprise";
   name: string;
   monthlyINR: string | null;
   monthlyUSD: string | null;
@@ -22,7 +22,7 @@ export interface PricingTier {
   contactOnly?: boolean;
 }
 
-// Internal tier code -> marketing name (e.g. "starter" -> "Basic"). Falls
+// Internal tier code -> marketing name (they match, e.g. "basic" -> "Basic"). Falls
 // back to the raw value for an unrecognized or missing code.
 export function tierDisplayName(tier: string | null | undefined): string {
   if (!tier) return "—";
@@ -31,7 +31,7 @@ export function tierDisplayName(tier: string | null | undefined): string {
 
 export const PRICING_TIERS: PricingTier[] = [
   {
-    tier: "free",
+    tier: "starter",
     name: "Starter",
     monthlyINR: "Free",
     monthlyUSD: "Free",
@@ -44,7 +44,7 @@ export const PRICING_TIERS: PricingTier[] = [
     highlight: false,
   },
   {
-    tier: "starter",
+    tier: "basic",
     name: "Basic",
     monthlyINR: "₹1,999/mo",
     monthlyUSD: "$49/mo",

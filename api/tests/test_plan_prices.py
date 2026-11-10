@@ -53,7 +53,7 @@ def _parse_pricing_ts(currency: str) -> dict[str, dict[str, int]]:
 
 @pytest.mark.parametrize("currency", CURRENCIES)
 def test_pricing_ts_parses_the_three_paid_tiers(currency):
-    assert set(_parse_pricing_ts(currency)) == {"starter", "growth", "pro"}
+    assert set(_parse_pricing_ts(currency)) == {"basic", "growth", "pro"}
 
 
 @pytest.mark.parametrize("currency", CURRENCIES)
@@ -64,7 +64,7 @@ def test_plan_prices_match_pricing_ts_exactly(currency):
 
 
 def test_plan_prices_cover_every_currency_tier_and_period():
-    expected = {(c, t, p) for c in CURRENCIES for t in ("starter", "growth", "pro") for p in ("monthly", "annual")}
+    expected = {(c, t, p) for c in CURRENCIES for t in ("basic", "growth", "pro") for p in ("monthly", "annual")}
     assert set(PLAN_PRICES) == expected
 
 
@@ -77,16 +77,16 @@ def test_annual_per_month_display_is_the_annual_price_over_twelve(currency):
 
 def test_annual_is_half_of_twelve_months_in_both_currencies():
     for currency in CURRENCIES:
-        for tier in ("starter", "growth", "pro"):
+        for tier in ("basic", "growth", "pro"):
             assert plan_price(currency, tier, "annual") * 2 == plan_price(currency, tier, "monthly") * 12
 
 
 def test_the_published_inr_paise_values():
     assert {k[1:]: v for k, v in PLAN_PRICES.items() if k[0] == "INR"} == {
-        ("starter", "monthly"): 199900,
+        ("basic", "monthly"): 199900,
         ("growth", "monthly"): 499900,
         ("pro", "monthly"): 999900,
-        ("starter", "annual"): 1199400,
+        ("basic", "annual"): 1199400,
         ("growth", "annual"): 2999400,
         ("pro", "annual"): 5999400,
     }
@@ -94,10 +94,10 @@ def test_the_published_inr_paise_values():
 
 def test_the_published_usd_cent_values():
     assert {k[1:]: v for k, v in PLAN_PRICES.items() if k[0] == "USD"} == {
-        ("starter", "monthly"): 4900,
+        ("basic", "monthly"): 4900,
         ("growth", "monthly"): 12900,
         ("pro", "monthly"): 24900,
-        ("starter", "annual"): 29400,
+        ("basic", "annual"): 29400,
         ("growth", "annual"): 77400,
         ("pro", "annual"): 149400,
     }
@@ -105,7 +105,7 @@ def test_the_published_usd_cent_values():
 
 def test_plan_price_rejects_an_unknown_currency_or_plan():
     with pytest.raises(ValueError):
-        plan_price("EUR", "starter", "monthly")
+        plan_price("EUR", "basic", "monthly")
     with pytest.raises(ValueError):
         plan_price("USD", "enterprise", "monthly")
 

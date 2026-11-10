@@ -126,7 +126,7 @@ export default function MetricsPage() {
             { key: "mrr_minor", label: "MRR", render: money("mrr_minor") },
             { key: "arr_minor", label: "ARR", render: money("arr_minor") },
             { key: "arpa_minor", label: "ARPA", render: money("arpa_minor") },
-            { key: "paying_starter", label: "Basic" },
+            { key: "paying_basic", label: "Basic" },
             { key: "paying_growth", label: "Growth" },
             { key: "paying_pro", label: "Pro" },
             { key: "overdue_bills", label: "Overdue bills" },

@@ -67,7 +67,7 @@ def test_invalid_config_is_rejected(raw):
 def test_effective_config_only_for_eligible_tiers():
     assert effective_detection_config("pro", GOOD) == GOOD
     assert effective_detection_config("enterprise", GOOD) == GOOD
-    for tier in ("free", "starter", "growth"):
+    for tier in ("starter", "basic", "growth"):
         assert effective_detection_config(tier, GOOD) == {}
 
 
@@ -127,7 +127,7 @@ def test_out_of_range_config_is_a_422_and_nothing_is_stored(env, db):
     assert db.get(type(org), org.id).detection_config is None
 
 
-@pytest.mark.parametrize("tier", ["free", "starter", "growth"])
+@pytest.mark.parametrize("tier", ["starter", "basic", "growth"])
 def test_lower_tiers_cannot_set_a_config(env, db, tier):
     org = make_org(db, tier=tier)
     r = _patch(env, org, {"detection_config": GOOD})
@@ -149,7 +149,7 @@ def test_auto_block_tiers_can_turn_dry_run_on(env, db, tier):
     assert r.json()["auto_block_dry_run"] is True
 
 
-@pytest.mark.parametrize("tier", ["free", "starter"])
+@pytest.mark.parametrize("tier", ["starter", "basic"])
 def test_lower_tiers_cannot_turn_dry_run_on_but_can_turn_it_off(env, db, tier):
     org = make_org(db, tier=tier)
     assert _patch(env, org, {"auto_block_dry_run": True}).status_code == 403

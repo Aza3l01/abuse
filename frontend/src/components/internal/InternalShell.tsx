@@ -9,6 +9,7 @@ import { secondaryButtonStyle } from "@/components/internal/ui";
 const LINKS = [
   { href: "/", label: "Accounts" },
   { href: "/pilots", label: "Pilots" },
+  { href: "/referrals", label: "Referrals" },
   { href: "/health", label: "Health" },
   { href: "/metrics", label: "Metrics" },
   { href: "/audit", label: "Audit" },

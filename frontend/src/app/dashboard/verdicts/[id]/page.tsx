@@ -177,11 +177,11 @@ export default function VerdictDetailPage() {
     return <main style={{ padding: "32px", color: "var(--color-text-muted)", fontSize: "13px" }}>{error ?? "Not found."}</main>;
   }
 
-  // Mirrors api/tiers.py's MANUAL_BLOCK_TIERS (item 55): Basic (starter) can
+  // Mirrors api/tiers.py's MANUAL_BLOCK_TIERS (item 55): Basic can
   // block too, not just Growth/Pro. Unblock has no tier gate at all backend-
   // side, a downgraded org must still be able to remove its own blocks.
   const canManage = v.viewer_role === "owner" || v.viewer_role === "admin";
-  const MANUAL_BLOCK_TIERS = ["starter", "growth", "pro", "enterprise"];
+  const MANUAL_BLOCK_TIERS = ["basic", "growth", "pro", "enterprise"];
   const canBlock = canManage && (v.blocked || MANUAL_BLOCK_TIERS.includes(v.org_tier));
   const hasThreatExplanations = ["growth", "pro", "enterprise"].includes(v.org_tier);
 

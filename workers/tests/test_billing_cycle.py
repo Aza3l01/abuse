@@ -60,7 +60,7 @@ def events_of(db, org_id: str) -> list[str]:
 
 def test_nov_4_payer_timeline(db, notices):
     # Paid Nov 4: next bill 1 Dec (anchor rule).
-    org = make_org(db, tier="starter", next_bill=date(2026, 12, 1))
+    org = make_org(db, tier="basic", next_bill=date(2026, 12, 1))
     oid = org.id
 
     run_days(db, notices, date(2026, 11, 25), date(2026, 11, 30))
@@ -83,12 +83,12 @@ def test_nov_4_payer_timeline(db, notices):
     assert days_of(notices, "due_in_3") == [date(2026, 12, 17)]
     # Cancel date 1 Jan, so the warning is 29 Dec (cancel_on minus 3 days).
     assert days_of(notices, "cancel_in_3") == [date(2026, 12, 29)]
-    assert db.get(Organization, oid).tier == "starter"
+    assert db.get(Organization, oid).tier == "basic"
     assert days_of(notices, "cancelled") == []
 
     run_day(db, notices, date(2027, 1, 1))
     org = db.get(Organization, oid)
-    assert org.tier == "free"
+    assert org.tier == "starter"
     assert org.nonpayment_downgraded_at is not None
     [bill] = bills_of(db, oid)          # no second bill, the first is still open
     assert bill.status == "open"
@@ -102,7 +102,7 @@ def test_nov_4_payer_timeline(db, notices):
 
 def test_nov_20_payer_timeline(db, notices):
     # Paid Nov 20: day 16 or later, so the first bill is 1 Jan, not 1 Dec.
-    org = make_org(db, tier="starter", next_bill=date(2027, 1, 1))
+    org = make_org(db, tier="basic", next_bill=date(2027, 1, 1))
     oid = org.id
     run_days(db, notices, date(2026, 11, 20), date(2026, 12, 31))
     assert bills_of(db, oid) == []
@@ -139,7 +139,7 @@ def test_annual_timeline(db, notices):
 
 
 def test_a_paid_bill_is_never_enforced_and_the_next_month_is_billed(db, notices):
-    org = make_org(db, tier="starter", next_bill=date(2026, 12, 1))
+    org = make_org(db, tier="basic", next_bill=date(2026, 12, 1))
     oid = org.id
     run_day(db, notices, date(2026, 12, 1))
     [bill] = bills_of(db, oid)
@@ -149,7 +149,7 @@ def test_a_paid_bill_is_never_enforced_and_the_next_month_is_billed(db, notices)
 
     run_days(db, notices, date(2026, 12, 2), date(2027, 1, 1))
     org = db.get(Organization, oid)
-    assert org.tier == "starter"
+    assert org.tier == "basic"
     assert [b.period_start for b in bills_of(db, oid)] == [date(2026, 12, 1), date(2027, 1, 1)]
     # Reminders were only for the open bills.
     assert days_of(notices, "due_in_3") == []
@@ -157,7 +157,7 @@ def test_a_paid_bill_is_never_enforced_and_the_next_month_is_billed(db, notices)
 
 
 def test_february_reminder_dates_in_a_real_run(db, notices):
-    org = make_org(db, tier="starter", next_bill=date(2027, 2, 1))
+    org = make_org(db, tier="basic", next_bill=date(2027, 2, 1))
     run_days(db, notices, date(2027, 2, 1), date(2027, 2, 28))
     assert days_of(notices, "due_in_3") == [date(2027, 2, 17)]
     assert days_of(notices, "cancel_in_3") == [date(2027, 2, 26)]
@@ -168,19 +168,19 @@ def test_february_reminder_dates_in_a_real_run(db, notices):
 def test_pending_downgrade_is_applied_at_issue(db, notices):
     org = make_org(
         db, tier="growth", period="monthly", next_bill=date(2026, 12, 1),
-        pending_tier="starter",
+        pending_tier="basic",
     )
     oid = org.id
     run_day(db, notices, date(2026, 12, 1))
     org = db.get(Organization, oid)
     [bill] = bills_of(db, oid)
-    assert bill.tier == "starter"
+    assert bill.tier == "basic"
     assert bill.amount_paise == 199900
-    assert org.tier == "starter"
+    assert org.tier == "basic"
     assert org.pending_tier is None and org.pending_period is None
     assert events_of(db, oid) == ["downgraded"]
     event = db.query(BillingEvent).filter(BillingEvent.org_id == oid).one()
-    assert (event.from_tier, event.to_tier, event.period) == ("growth", "starter", "monthly")
+    assert (event.from_tier, event.to_tier, event.period) == ("growth", "basic", "monthly")
 
 
 def test_pending_annual_to_monthly_is_applied_at_issue(db, notices):
@@ -213,7 +213,7 @@ def test_double_run_on_the_same_day_creates_one_bill_and_one_notice(db, notices)
 
 
 def test_double_run_on_the_downgrade_day_changes_nothing_the_second_time(db, notices):
-    org = make_org(db, tier="starter", next_bill=date(2026, 12, 1))
+    org = make_org(db, tier="basic", next_bill=date(2026, 12, 1))
     oid = org.id
     run_days(db, notices, date(2026, 12, 1), date(2027, 1, 1))
     grace_until = db.get(Organization, oid).retention_grace_until
@@ -225,7 +225,7 @@ def test_double_run_on_the_downgrade_day_changes_nothing_the_second_time(db, not
 
 
 def test_a_missed_day_catches_up_with_the_same_bill_dates(db, notices):
-    org = make_org(db, tier="starter", next_bill=date(2026, 12, 1))
+    org = make_org(db, tier="basic", next_bill=date(2026, 12, 1))
     oid = org.id
     # The 1 Dec run never happened. The 2 Dec run issues the 1 Dec bill.
     run_day(db, notices, date(2026, 11, 30))
@@ -238,7 +238,7 @@ def test_a_missed_day_catches_up_with_the_same_bill_dates(db, notices):
 
 
 def test_a_missed_day_still_sends_the_reminder_window(db, notices):
-    org = make_org(db, tier="starter", next_bill=date(2026, 12, 1))
+    org = make_org(db, tier="basic", next_bill=date(2026, 12, 1))
     run_day(db, notices, date(2026, 12, 1))
     # 17 Dec was missed, the 18 Dec run is still inside the window.
     run_day(db, notices, date(2026, 12, 18))
@@ -250,7 +250,7 @@ def test_a_missed_day_still_sends_the_reminder_window(db, notices):
 
 
 def test_at_most_one_bill_per_org_per_run_after_a_long_outage(db, notices):
-    org = make_org(db, tier="starter", next_bill=date(2026, 12, 1))
+    org = make_org(db, tier="basic", next_bill=date(2026, 12, 1))
     oid = org.id
     stats = run_day(db, notices, date(2027, 1, 5))
     assert stats["bills_issued"] == 1
@@ -258,7 +258,7 @@ def test_at_most_one_bill_per_org_per_run_after_a_long_outage(db, notices):
     assert bill.period_start == date(2026, 12, 1)
     # The next run enforces that bill (its cancel_on has passed).
     run_day(db, notices, date(2027, 1, 6))
-    assert db.get(Organization, oid).tier == "free"
+    assert db.get(Organization, oid).tier == "starter"
     assert len(bills_of(db, oid)) == 1
 
 
@@ -272,7 +272,7 @@ def test_voluntary_cancel_at_period_end_issues_no_bill(db, notices):
 
     run_day(db, notices, date(2026, 12, 1))
     org = db.get(Organization, oid)
-    assert org.tier == "free"
+    assert org.tier == "starter"
     assert org.retention_grace_tier == "growth"
     assert org.nonpayment_downgraded_at is None     # only nonpayment sets it
     assert org.cancel_at_period_end is False
@@ -282,7 +282,7 @@ def test_voluntary_cancel_at_period_end_issues_no_bill(db, notices):
 
 
 def test_open_bill_beats_a_cancel_request_and_counts_as_nonpayment(db, notices):
-    org = make_org(db, tier="starter", next_bill=date(2026, 12, 1))
+    org = make_org(db, tier="basic", next_bill=date(2026, 12, 1))
     oid = org.id
     run_day(db, notices, date(2026, 12, 1))
     db.get(Organization, oid).cancel_at_period_end = True
@@ -295,7 +295,7 @@ def test_open_bill_beats_a_cancel_request_and_counts_as_nonpayment(db, notices):
 # --- reminders switch ------------------------------------------------------
 
 def test_routine_reminders_can_be_turned_off_but_the_cancel_warning_cannot(db, notices):
-    org = make_org(db, tier="starter", next_bill=date(2026, 12, 1), billing_reminders_enabled=False)
+    org = make_org(db, tier="basic", next_bill=date(2026, 12, 1), billing_reminders_enabled=False)
     oid = org.id
     run_days(db, notices, date(2026, 12, 1), date(2026, 12, 31))
     assert days_of(notices, "ready", oid) == []
@@ -307,14 +307,14 @@ def test_routine_reminders_can_be_turned_off_but_the_cancel_warning_cannot(db, n
 # --- not billable ----------------------------------------------------------
 
 def test_orgs_the_engine_must_not_bill(db, notices):
-    free = make_org(db, tier="free", period=None, name="Free")
+    free = make_org(db, tier="starter", period=None, name="Free")
     pilot = make_org(
         db, tier="growth", period=None, name="Pilot",
         billing_provider="pilot", trial_ends_at=datetime(2026, 12, 15, tzinfo=timezone.utc),
     )
     legacy = make_org(db, tier="growth", period=None, name="Legacy", next_bill=date(2026, 12, 1))
     deleted = make_org(
-        db, tier="starter", name="Gone", next_bill=date(2026, 12, 1),
+        db, tier="basic", name="Gone", next_bill=date(2026, 12, 1),
         deleted_at=datetime(2026, 11, 30, tzinfo=timezone.utc),
     )
     db.commit()
@@ -323,9 +323,9 @@ def test_orgs_the_engine_must_not_bill(db, notices):
     assert stats["skipped_unbillable"] == 1      # the legacy org, logged and skipped
     assert db.query(Bill).count() == 0
     assert db.get(Organization, pilot.id).tier == "growth"
-    assert db.get(Organization, free.id).tier == "free"
+    assert db.get(Organization, free.id).tier == "starter"
     assert db.get(Organization, legacy.id).tier == "growth"
-    assert db.get(Organization, deleted.id).tier == "starter"
+    assert db.get(Organization, deleted.id).tier == "basic"
 
 
 # --- currency --------------------------------------------------------------
@@ -352,7 +352,7 @@ def test_a_usd_annual_org_is_billed_the_usd_annual_price(db, notices):
 
 def test_a_paid_org_with_no_billing_country_is_skipped_not_billed_in_a_guess(db, notices):
     org = make_org(
-        db, tier="starter", next_bill=date(2026, 12, 1), billing_country=None, billing_currency="USD",
+        db, tier="basic", next_bill=date(2026, 12, 1), billing_country=None, billing_currency="USD",
     )
     stats = run_day(db, notices, date(2026, 12, 1))
     assert stats["bills_issued"] == 0
@@ -364,17 +364,17 @@ def test_a_paid_org_with_no_billing_country_is_skipped_not_billed_in_a_guess(db,
 def test_the_pending_downgrade_bills_the_new_plan_in_the_same_currency(db, notices):
     org = make_org(
         db, tier="pro", next_bill=date(2026, 12, 1), billing_country="US", billing_currency="USD",
-        pending_tier="starter", pending_period="monthly",
+        pending_tier="basic", pending_period="monthly",
     )
     run_day(db, notices, date(2026, 12, 1))
     [bill] = bills_of(db, org.id)
-    assert (bill.tier, bill.amount_paise, bill.currency) == ("starter", 4900, "USD")
+    assert (bill.tier, bill.amount_paise, bill.currency) == ("basic", 4900, "USD")
 
 
 def test_reminders_are_queued_after_the_commit(db, notices, monkeypatch):
     """A reminder must never go out for a state that was rolled back, so the
     notifier is only called once the day's changes are committed."""
-    org = make_org(db, tier="starter", next_bill=date(2026, 12, 1))
+    org = make_org(db, tier="basic", next_bill=date(2026, 12, 1))
     run_day(db, notices, date(2026, 12, 1))
     seen: list[bool] = []
 
@@ -388,7 +388,7 @@ def test_reminders_are_queued_after_the_commit(db, notices, monkeypatch):
 
 
 def test_one_failing_org_does_not_stop_the_others(db, notices, monkeypatch):
-    good = make_org(db, tier="starter", name="Good", next_bill=date(2026, 12, 1))
+    good = make_org(db, tier="basic", name="Good", next_bill=date(2026, 12, 1))
     bad = make_org(db, tier="growth", name="Bad", next_bill=date(2026, 12, 1))
     bad_id, good_id = bad.id, good.id
     real = cycle.next_bill_date_after_issue
@@ -423,7 +423,7 @@ def test_downgrade_org_resets_everything_for_each_reason(db):
         )
         assert cycle.downgrade_org(org, db, reason, now) is True
         db.commit()
-        assert org.tier == "free"
+        assert org.tier == "starter"
         assert org.retention_grace_tier == "pro"
         assert org.retention_grace_until == now + timedelta(days=30) or \
             org.retention_grace_until.replace(tzinfo=timezone.utc) == now + timedelta(days=30)
@@ -434,22 +434,22 @@ def test_downgrade_org_resets_everything_for_each_reason(db):
         assert org.pending_tier is None and org.pending_period is None
         assert (org.nonpayment_downgraded_at is not None) == (reason == "nonpayment")
         ev = db.query(BillingEvent).filter(BillingEvent.org_id == org.id).one()
-        assert (ev.event, ev.from_tier, ev.to_tier, ev.period) == (event, "pro", "free", "annual")
+        assert (ev.event, ev.from_tier, ev.to_tier, ev.period) == (event, "pro", "starter", "annual")
 
 
 def test_downgrade_org_leaves_a_free_org_alone_and_rejects_a_bad_reason(db):
-    org = make_org(db, tier="free", period=None)
+    org = make_org(db, tier="starter", period=None)
     assert cycle.downgrade_org(org, db, "nonpayment") is False
     assert org.retention_grace_tier is None
     assert db.query(BillingEvent).count() == 0
-    paid = make_org(db, tier="starter", name="Paid")
+    paid = make_org(db, tier="basic", name="Paid")
     with pytest.raises(ValueError):
         cycle.downgrade_org(paid, db, "because")
-    assert paid.tier == "starter"
+    assert paid.tier == "basic"
 
 
 def test_downgrade_keeps_open_bills_open(db, notices):
-    org = make_org(db, tier="starter", next_bill=date(2026, 12, 1))
+    org = make_org(db, tier="basic", next_bill=date(2026, 12, 1))
     oid = org.id
     run_days(db, notices, date(2026, 12, 1), date(2027, 1, 1))
     assert [b.status for b in bills_of(db, oid)] == ["open"]

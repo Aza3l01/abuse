@@ -16,7 +16,7 @@ hardcoding a tier list.
 """
 from __future__ import annotations
 
-MANUAL_BLOCK_TIERS = frozenset({"starter", "growth", "pro", "enterprise"})
+MANUAL_BLOCK_TIERS = frozenset({"basic", "growth", "pro", "enterprise"})
 AUTO_BLOCK_TIERS = frozenset({"growth", "pro", "enterprise"})
 
 # Phase 8: tiers that may tune detection (confidence thresholds, per-agent and
@@ -29,8 +29,8 @@ CUSTOM_THRESHOLD_TIERS = frozenset({"pro", "enterprise"})
 # contract-negotiated per item 74). Matches the numbers already published
 # on the pricing cards (frontend/src/lib/pricing.ts's `volume` strings).
 CALL_VOLUME_CAPS: dict[str, int | None] = {
-    "free": 2_000_000,
-    "starter": 10_000_000,
+    "starter": 2_000_000,
+    "basic": 10_000_000,
     "growth": 50_000_000,
     "pro": 200_000_000,
     "enterprise": None,
@@ -40,8 +40,8 @@ CALL_VOLUME_CAPS: dict[str, int | None] = {
 # means unlimited (enterprise, carried forward from the old pricing table
 # per section 5's own text). Used by the daily purge task.
 RETENTION_DAYS: dict[str, int | None] = {
-    "free": 7,
-    "starter": 30,
+    "starter": 7,
+    "basic": 30,
     "growth": 90,   # "3 months"
     "pro": 365,     # "1 year"
     "enterprise": None,
@@ -56,7 +56,7 @@ RETENTION_DAYS: dict[str, int | None] = {
 # _LTM_TTL_SECONDS). Only present here, not in RETENTION_DAYS, because this
 # is a Redis TTL in days, not a Postgres purge-by-timestamp window.
 LTM_TTL_DAYS: dict[str, int] = {
-    "free": 7,
+    "starter": 7,
 }
 
 # Phase 3 (legacy item 33): tiers that get a real Groq-generated verdict
@@ -81,19 +81,20 @@ LLM_CALL_CAPS: dict[str, int | None] = {
 # Phase 3 + Phase 5 section C: the single price table the billing engine and
 # the Razorpay order flow read, keyed by (currency, internal tier, period).
 # Amounts are minor units of the currency: paise for INR (exclusive of GST),
-# cents for USD. "starter" is the marketing name "Basic". Only purchasable
-# tiers appear here: "free" is never bought and "enterprise" is contact-only.
+# cents for USD. Tier codes are the marketing names, lower case. Only
+# purchasable tiers appear here: "starter" (free) is never bought and
+# "enterprise" is contact-only.
 # frontend/src/lib/pricing.ts is the display copy of these numbers;
 # api/tests/test_plan_prices.py fails if the two drift apart.
 PLAN_PRICES: dict[tuple[str, str, str], int] = {
-    ("INR", "starter", "monthly"): 199_900,
-    ("INR", "starter", "annual"): 1_199_400,
+    ("INR", "basic", "monthly"): 199_900,
+    ("INR", "basic", "annual"): 1_199_400,
     ("INR", "growth", "monthly"): 499_900,
     ("INR", "growth", "annual"): 2_999_400,
     ("INR", "pro", "monthly"): 999_900,
     ("INR", "pro", "annual"): 5_999_400,
-    ("USD", "starter", "monthly"): 4_900,
-    ("USD", "starter", "annual"): 29_400,
+    ("USD", "basic", "monthly"): 4_900,
+    ("USD", "basic", "annual"): 29_400,
     ("USD", "growth", "monthly"): 12_900,
     ("USD", "growth", "annual"): 77_400,
     ("USD", "pro", "monthly"): 24_900,
@@ -130,4 +131,4 @@ def currency_for_country(country: str) -> str:
 
 # Purchasable tiers from cheapest to dearest, used to classify a plan change
 # as an upgrade or a downgrade.
-PAID_TIER_ORDER: tuple[str, ...] = ("starter", "growth", "pro")
+PAID_TIER_ORDER: tuple[str, ...] = ("basic", "growth", "pro")

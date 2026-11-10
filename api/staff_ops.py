@@ -22,7 +22,8 @@ from api.billing_payments import (
     plan_label,
 )
 from api.billing_rules import add_months, as_utc, ist_date, ist_midnight
-from db.models import Bill, Organization, Payment, PromoCode
+from api.referrals import approve_credit, revoke_credit
+from db.models import Bill, Credit, Organization, Payment, PromoCode
 
 MIN_REASON_LENGTH = 10
 _CODE_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"  # no 0/O/1/I
@@ -114,7 +115,7 @@ def pause_downgrade(db, org: Organization, days: int) -> dict:
     """Delay the non-payment downgrade of an org's open bills by `days`."""
     if not 1 <= days <= 30:
         raise HTTPException(400, "Days must be between 1 and 30.")
-    if org.tier == "free":
+    if org.tier == "starter":
         raise HTTPException(409, "This organisation is already on the free tier.")
     bills = open_bills(org.id, db)
     if not bills:
@@ -152,7 +153,7 @@ def extend_pilot(db, org: Organization, days: int, now: datetime | None = None) 
     org.trial_reminder_5d_sent = False
     org.trial_reminder_2d_sent = False
     reactivated = False
-    if org.tier == "free":
+    if org.tier == "starter":
         org.tier = "growth"
         org.retention_grace_tier = None
         org.retention_grace_until = None
@@ -162,6 +163,35 @@ def extend_pilot(db, org: Organization, days: int, now: datetime | None = None) 
         "trial_ends_at_after": org.trial_ends_at.isoformat(),
         "reactivated": reactivated,
     }
+
+
+def _locked_credit(db, credit_id: str) -> Credit:
+    try:
+        canonical = str(uuid.UUID(credit_id))
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(404, "No credit with that id.")
+    credit = (
+        db.query(Credit).filter(Credit.id == canonical).populate_existing().with_for_update().first()
+    )
+    if credit is None:
+        raise HTTPException(404, "No credit with that id.")
+    return credit
+
+
+def revoke_referral_credit(db, credit_id: str, reason: str, now: datetime | None = None) -> Credit:
+    """Revoke a credit that has not been used (pending, held or available)."""
+    credit = _locked_credit(db, credit_id)
+    if not revoke_credit(credit, reason, _now(now)):
+        raise HTTPException(409, f"A {credit.status} credit cannot be revoked.")
+    return credit
+
+
+def approve_referral_credit(db, credit_id: str, now: datetime | None = None) -> Credit:
+    """Release a credit held for review: it becomes available."""
+    credit = _locked_credit(db, credit_id)
+    if not approve_credit(credit, _now(now)):
+        raise HTTPException(409, f"Only a held credit can be approved, this one is {credit.status}.")
+    return credit
 
 
 def generate_pilot_codes(db, count: int) -> list[str]:

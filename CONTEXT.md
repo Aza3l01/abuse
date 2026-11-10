@@ -81,8 +81,8 @@ a manual toggle on the pricing page and in the dashboard's billing section.
 
 | Tier | Marketing name | Internal tier code | Price | Blocking | Retention | Volume cap |
 |---|---|---|---|---|---|---|
-| Free | Starter | `free` | $0, no card, no trial, no expiry | None | 7 days | 2M calls/mo |
-| Basic | Basic | `starter` | $49 / Rs.1,999 per month | Manual only (dashboard button) | 30 days | 10M calls/mo |
+| Starter (free) | Starter | `starter` | $0, no card, no trial, no expiry | None | 7 days | 2M calls/mo |
+| Basic | Basic | `basic` | $49 / Rs.1,999 per month | Manual only (dashboard button) | 30 days | 10M calls/mo |
 | Growth | Growth | `growth` | $129 / Rs.4,999 per month | Manual + automatic (WAF/Cloudflare) | 3 months | 50M calls/mo |
 | Pro | Pro | `pro` | $249 / Rs.9,999 per month | Manual + automatic | 1 year | 200M calls/mo |
 | Enterprise | Enterprise | `enterprise` | Custom | Manual + automatic + inline proxy (future) | Unlimited | Beyond 200M calls/mo, uncapped |
@@ -94,11 +94,10 @@ sold as a standalone way to show value before any subscription commitment.
 It isn't self-serve checkout, the pricing page routes it to a `mailto:`
 link, not Razorpay/Stripe.
 
-The internal tier code intentionally still says `starter` for the Basic
-plan and reuses `free` for the permanent no-card plan: both predate the
-marketing rename, and keeping them unchanged avoided touching billing
-logic and every tier-gated constant across the
-backend. Don't rename these strings without a real reason, `api/tiers.py`'s
+Internal tier codes equal the marketing names (`starter` is the permanent
+free plan, `basic` is the first paid plan). They were renamed on 2026-11-24
+(migration `f4b9d2a6c718`) so the two vocabularies never drift again. Do not
+introduce a different internal name for a tier. `api/tiers.py`'s
 `MANUAL_BLOCK_TIERS`/`AUTO_BLOCK_TIERS`/`CALL_VOLUME_CAPS`/`RETENTION_DAYS`/
 `LTM_TTL_DAYS`, `PLAN_PRICES_PAISE` and `PAID_TIER_ORDER` all key off these exact values.
 
@@ -285,7 +284,8 @@ hand off the organization before leaving can do so; nothing forces them to.
 
 **Phase 8, operations and repo hygiene.** Originally scoped as nightly
 database backups plus three layers of uptime/health monitoring
-(UptimeRobot, a Cronitor heartbeat, and Sentry). Sentry was cut to post-MVP
+(UptimeRobot, a Cronitor heartbeat, and Sentry; Phase 11 later replaced these
+with Better Stack and PostHog error tracking). Sentry was cut to post-MVP
 from the start. Partway through, the backup and monitoring work was itself
 reconsidered and pushed to post-MVP too: there's no real customer data yet
 that a backup would be protecting, and a monitoring setup done "properly"

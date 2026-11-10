@@ -9,7 +9,7 @@ export const metadata: Metadata = {
 
 export default function PrivacyPage() {
   return (
-    <LegalLayout title="Privacy Policy" lastUpdated="November 9, 2026">
+    <LegalLayout title="Privacy Policy" lastUpdated="November 10, 2026">
       <p style={legalPStyle}>
         This Privacy Policy describes how Clew (&quot;we&quot;, &quot;us&quot;) collects,
         uses, and protects personal data in connection with the Clew service,
@@ -28,7 +28,8 @@ export default function PrivacyPage() {
         blocking integration settings. Usage data: the API access logs you
         connect for analysis, which may include IP addresses, request
         methods, endpoints, and user-agents originating from your own
-        traffic.
+        traffic. Analytics data: how our website and dashboard are used and
+        errors they hit, described in section 10.
       </p>
 
       <h2 style={legalH2Style}>2. How we use it</h2>
@@ -43,8 +44,12 @@ export default function PrivacyPage() {
         We use the following subprocessors to operate the service: Razorpay
         (payment processing; you enter your payment details directly in
         Razorpay Checkout, and Clew sends Razorpay only the amount and an
-        internal order reference), Resend (transactional email) and MaxMind
-        (IP geolocation lookups for GeoIP-based detection). For Growth-tier
+        internal order reference), Resend (transactional email), MaxMind
+        (IP geolocation lookups for GeoIP-based detection), Cloudflare (a bot
+        check on sign-up and password reset, which sees your IP address and
+        browser signals), Better Stack (uptime monitoring and our status page,
+        which receive no customer or log data) and PostHog (product
+        analytics and error tracking, EU region; see section 10). For Growth-tier
         accounts and above, Groq processes the IP
         address under investigation, aggregated traffic metrics (request rate,
         failure counts, timing patterns), and short indicator strings describing
@@ -124,6 +129,42 @@ export default function PrivacyPage() {
         Technologies Private Limited (CIN U62090KL2026PTC104122), a private
         limited company incorporated in India. Registered office: Idukki,
         Kerala, India; the full registered address is available on request.
+      </p>
+
+      <h2 style={legalH2Style}>10. Cookies and analytics</h2>
+      <p style={legalPStyle}>
+        Essential cookies keep you signed in and protect your session. They are
+        set when you sign in and need no consent.
+      </p>
+      <p style={legalPStyle}>
+        We also use PostHog (EU region) to understand how our website and
+        dashboard are used and to find errors. In your browser this uses one
+        analytics cookie, named after our PostHog project and ending in
+        &quot;_posthog&quot;, which is set only if you accept it in the cookie
+        banner and lasts up to one year. It holds a random visitor ID and, once
+        you sign in, the internal ID of your account (not your name or email).
+        With it we record the pages viewed (the address without query
+        parameters other than campaign tags such as utm_source), the referring
+        site, your browser and device type, an approximate location derived
+        from your IP address, a few steps of the sign-up and set-up journey
+        (registration started and completed, plan selected, S3 connection
+        completed), and JavaScript errors with their stack trace. We do not
+        record sessions, keystrokes, or what is shown on your dashboard such as
+        IP addresses and verdicts. We do not use analytics data for
+        advertising. The banner also stores your choice in a cookie named
+        clew_consent for up to 6 months. Both cookies apply to clewsec.com and
+        its subdomains, which includes our status page hosted by Better Stack.
+        Declining stops the browser analytics and deletes the
+        PostHog cookie.
+      </p>
+      <p style={legalPStyle}>
+        Separately from the cookie, our servers send PostHog a small number of
+        events about your account when you subscribe, a payment is captured, an
+        organisation becomes active, a bill becomes overdue, or a plan is
+        cancelled. These carry the plan and amount and the internal account ID,
+        never your name, email or log content. Our servers and background
+        workers also send PostHog error reports (stack traces) when something
+        fails.
       </p>
     </LegalLayout>
   );

@@ -58,12 +58,22 @@ export interface AccountView {
   billing: Kv;
   trial: Kv;
   referral: Kv;
+  credits: Row[];
   members: Row[];
   bills: Row[];
   payments: Row[];
   events: Row[];
   audit: Row[];
   as_of: string;
+}
+
+/** The staff referrals page (Phase 12): the graph, the velocity per referrer and the credits needing review. */
+export interface ReferralOverview {
+  as_of: string;
+  referrers: Row[];
+  held: Row[];
+  recent: Row[];
+  edges: Row[];
 }
 
 export interface HealthView {

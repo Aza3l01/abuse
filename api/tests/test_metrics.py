@@ -45,32 +45,32 @@ def _paying(db, name, tier, period, currency="INR", **extra):
 
 def seed(db):
     # INR
-    a = _paying(db, "A", "starter", "monthly")
-    _event(db, a, "first_paid", None, "starter", "monthly", _utc(4, 10))
+    a = _paying(db, "A", "basic", "monthly")
+    _event(db, a, "first_paid", None, "basic", "monthly", _utc(4, 10))
     b = _paying(db, "B", "growth", "annual")
     _event(db, b, "first_paid", None, "growth", "annual", _utc(6, 3))
-    c = make_org(db, tier="free", period=None, name="C", first_charged_at=FIRST_CHARGE)
+    c = make_org(db, tier="starter", period=None, name="C", first_charged_at=FIRST_CHARGE)
     _event(db, c, "first_paid", None, "pro", "monthly", _utc(3, 5))
-    _event(db, c, "cancelled", "pro", "free", "monthly", _utc(6, 10))
+    _event(db, c, "cancelled", "pro", "starter", "monthly", _utc(6, 10))
     d = _paying(db, "D", "growth", "monthly", pilot_code_used="CLEW-DDDDD")
-    _event(db, d, "first_paid", None, "starter", "monthly", _utc(4, 20))
-    _event(db, d, "upgraded", "starter", "growth", "monthly", _utc(6, 5))
-    f = _paying(db, "F", "starter", "monthly", deleted_at=_utc(6, 12))
-    _event(db, f, "first_paid", None, "starter", "monthly", _utc(4, 15))
+    _event(db, d, "first_paid", None, "basic", "monthly", _utc(4, 20))
+    _event(db, d, "upgraded", "basic", "growth", "monthly", _utc(6, 5))
+    f = _paying(db, "F", "basic", "monthly", deleted_at=_utc(6, 12))
+    _event(db, f, "first_paid", None, "basic", "monthly", _utc(4, 15))
     # Pilots are never revenue.
     make_org(
         db, tier="growth", period=None, name="P", billing_provider="pilot",
         pilot_code_used="CLEW-PPPPP", trial_ends_at=NOW + timedelta(days=10),
     )
     make_org(
-        db, tier="free", period=None, name="E", billing_provider="pilot",
+        db, tier="starter", period=None, name="E", billing_provider="pilot",
         pilot_code_used="CLEW-EEEEE", trial_ends_at=NOW - timedelta(days=3),
     )
     # USD
     g = _paying(db, "G", "pro", "monthly", currency="USD")
     _event(db, g, "first_paid", None, "pro", "monthly", _utc(5, 10), currency="USD")
-    h = _paying(db, "H", "starter", "annual", currency="USD")
-    _event(db, h, "first_paid", None, "starter", "annual", _utc(6, 2), currency="USD")
+    h = _paying(db, "H", "basic", "annual", currency="USD")
+    _event(db, h, "first_paid", None, "basic", "annual", _utc(6, 2), currency="USD")
 
     # One overdue bill and one not yet due, both on A.
     make_bill(db, a, start=date(2026, 5, 25))
@@ -98,7 +98,7 @@ def test_inr_row_matches_hand_totals(db):
     assert (inr["active_pilots"], inr["pilots_converted"], inr["pilots_expired_unpaid"]) == (1, 1, 1)
     # Paying: A starter monthly, B growth annual, D growth monthly. The pilot is not revenue.
     assert inr["paying_orgs"] == 3
-    assert (inr["paying_starter"], inr["paying_growth"], inr["paying_pro"]) == (1, 2, 0)
+    assert (inr["paying_basic"], inr["paying_growth"], inr["paying_pro"]) == (1, 2, 0)
     assert inr["mrr_minor"] == 199_900 + 249_950 + 499_900
     assert inr["arr_minor"] == inr["mrr_minor"] * 12
     # Start of month: A, C, D and F were paying.
@@ -159,7 +159,7 @@ def test_store_snapshot_is_idempotent_for_a_day(db):
     seed(db)
     store_snapshot(db, compute_snapshot(db, NOW))
     db.commit()
-    make_org(db, name="late", tier="free", period=None)
+    make_org(db, name="late", tier="starter", period=None)
     store_snapshot(db, compute_snapshot(db, NOW))
     db.commit()
     rows = db.query(MetricsDaily).all()

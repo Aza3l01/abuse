@@ -124,7 +124,7 @@ export function VerdictsTab({ role, tier }: { role: string | null; tier: string 
   // hidden for viewers, and for owner/admin on a tier with no blocking,
   // except an already-blocked IP can still be unblocked after a downgrade.
   const canManage = role === "owner" || role === "admin";
-  const MANUAL_BLOCK_TIERS = ["starter", "growth", "pro", "enterprise"];
+  const MANUAL_BLOCK_TIERS = ["basic", "growth", "pro", "enterprise"];
 
   const [page,       setPage]       = useState(1);
   const [limit,      setLimit]      = useState<number>(25);

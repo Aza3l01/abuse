@@ -4,6 +4,7 @@ api/routes/auth.py — All authentication endpoints.
 Routes
 ------
 POST   /auth/register
+GET    /auth/validate-code
 POST   /auth/verify-email
 POST   /auth/resend-verification
 POST   /auth/login
@@ -31,7 +32,7 @@ from functools import wraps
 from typing import Optional
 
 import redis as _redis_lib
-from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Query, Request, Response
 from jose import JWTError as _JWTError, jwt as _jose_jwt
 import pyotp
 from pydantic import BaseModel
@@ -63,8 +64,9 @@ from api.auth_utils import (
 )
 from api.deps import get_current_client, get_current_org, get_db
 from api.limiter import limiter
+from api.referrals import code_unavailable_reason
 from api.routes.billing import cancel_org_subscriptions_for_deletion
-from db.models import Client, MfaBackupCode, Organization, OrganizationMember, RefreshToken
+from db.models import Client, MfaBackupCode, Organization, OrganizationMember, PromoCode, RefreshToken
 
 router = APIRouter()
 
@@ -352,6 +354,28 @@ async def register(
 
     send_verification_email(body.email.lower(), otp)
     return {"message": "Account created. Check your email for a verification code."}
+
+
+# ---------------------------------------------------------------------------
+# GET /auth/validate-code (Phase 12)
+#
+# Public, rate limited. The register form calls it on blur so a mistyped code
+# is caught before the form is submitted, and a referral code can say what it
+# gives. It reveals only whether a code is usable and its kind, never who
+# owns it. Registration itself re-checks the code, this is advice only.
+# ---------------------------------------------------------------------------
+
+@router.get("/validate-code")
+@limiter.limit("20/hour")
+async def validate_code(
+    request: Request,
+    code: str = Query(..., min_length=1, max_length=50),
+    db: Session = Depends(get_db),
+):
+    promo = db.query(PromoCode).filter(PromoCode.code == code.strip().upper()).first()
+    if code_unavailable_reason(promo, db) is not None:
+        return {"valid": False, "kind": None}
+    return {"valid": True, "kind": promo.kind}
 
 
 # ---------------------------------------------------------------------------

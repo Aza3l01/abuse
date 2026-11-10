@@ -72,10 +72,10 @@ export function BlockedIpsTab({ role, tier }: { role: string | null; tier: strin
 
   const LIMIT = 25;
   const canManage = role === "owner" || role === "admin";
-  // Mirrors api/tiers.py's MANUAL_BLOCK_TIERS (item 55): Basic (starter) can
+  // Mirrors api/tiers.py's MANUAL_BLOCK_TIERS (item 55): Basic can
   // block too, not just Growth/Pro. Unblock has no tier gate at all backend-
   // side, a downgraded org must still be able to remove its own blocks.
-  const MANUAL_BLOCK_TIERS = ["starter", "growth", "pro", "enterprise"];
+  const MANUAL_BLOCK_TIERS = ["basic", "growth", "pro", "enterprise"];
   const canBlockManually = canManage && MANUAL_BLOCK_TIERS.includes(tier ?? "");
 
   const load = useCallback(() => {

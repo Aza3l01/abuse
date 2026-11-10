@@ -17,8 +17,14 @@ generation so an org that missed a payment never gets a fresh bill):
   3. Generate: a paid org whose next_billing_date has arrived gets a bill
      (a scheduled pending_tier / pending_period is applied first) and
      next_billing_date moves forward one period. At most one bill per org
-     per run, so a long outage catches up one period per day.
+     per run, so a long outage catches up one period per day. Phase 12:
+     the bill is reduced by the org's referral credit (api/referrals.py),
+     and a bill covered in full is issued already paid.
   4. Remind: notify "ready", "due_in_3" and "cancel_in_3" once per bill.
+
+Phase 12 adds a vest step between 2 and 3: a pending referrer credit whose
+referee's first payment has stood for the 72 hour refund window becomes
+available, so it can reduce a bill generated in the same run.
 
 downgrade_org is the one and only downgrade path (the nonpayment and cancel
 steps above, and trial_reminders.py for an expired pilot trial). Pilot and
@@ -38,6 +44,7 @@ _REPO_ROOT = Path(__file__).parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from api import analytics
 from api.billing_notify import notify
 from api.billing_rules import (
     RETENTION_GRACE_DAYS,
@@ -50,10 +57,12 @@ from api.billing_rules import (
     next_bill_date_after_issue,
     today_ist,
 )
+from api.referrals import apply_credits_to_bill, pending_reward_ids, vest_one
 from api.tiers import PAID_TIER_ORDER, PURCHASABLE_PLANS, plan_price
 from db.models import Bill, BillingEvent, Organization
 from db.session import SessionLocal
 from workers.celery_app import celery_app
+from workers.heartbeat import ping as ping_heartbeat
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +94,7 @@ def downgrade_org(
     """
     if reason not in _DOWNGRADE_EVENTS:
         raise ValueError(f"unknown downgrade reason: {reason!r}")
-    if org.tier == "free":
+    if org.tier == "starter":
         return False
 
     moment = now if now is not None else datetime.now(timezone.utc)
@@ -94,7 +103,7 @@ def downgrade_org(
 
     org.retention_grace_tier = old_tier
     org.retention_grace_until = moment + timedelta(days=RETENTION_GRACE_DAYS)
-    org.tier = "free"
+    org.tier = "starter"
     org.auto_block_enabled = False
     org.next_billing_date = None
     org.billing_period = None
@@ -109,13 +118,19 @@ def downgrade_org(
             org_id=org.id,
             event=_DOWNGRADE_EVENTS[reason],
             from_tier=old_tier,
-            to_tier="free",
+            to_tier="starter",
             period=old_period,
             amount_paise=amount_paise,
             currency=org.billing_currency if amount_paise is not None else None,
             created_at=moment,
         )
     )
+    if reason != "trial_end":
+        # Phase 11: queued on the session, sent only after the caller commits.
+        analytics.queue_org_event(
+            db, org.id, "plan_cancelled",
+            {"reason": reason, "from_tier": old_tier, "period": old_period},
+        )
     return True
 
 
@@ -148,7 +163,7 @@ def _voluntary_cancel(db, today: date, now: datetime, stats: dict) -> None:
         db.query(Organization)
         .filter(
             Organization.cancel_at_period_end.is_(True),
-            Organization.tier != "free",
+            Organization.tier != "starter",
             Organization.next_billing_date.isnot(None),
             Organization.deleted_at.is_(None),
         )
@@ -195,6 +210,25 @@ def _apply_pending(org, db, now: datetime) -> None:
         org.billing_period = new_period
     org.pending_tier = None
     org.pending_period = None
+
+
+def _vest_credits(db, now: datetime, stats: dict) -> None:
+    """Phase 12: vest every pending referrer credit whose referee's first
+    payment has cleared the 72 hour refund window. One credit per
+    transaction, so a bad row cannot block the others. Idempotent: a vested
+    or held credit is no longer pending."""
+    for credit_id in pending_reward_ids(db):
+        try:
+            outcome = vest_one(db, credit_id, now)
+            db.commit()
+            if outcome == "vested":
+                stats["credits_vested"] += 1
+            elif outcome == "held":
+                stats["credits_held"] += 1
+        except Exception:
+            db.rollback()
+            stats["errors"] += 1
+            logger.exception("billing_cycle: vest failed for credit %s", credit_id)
 
 
 def _generate(db, today: date, now: datetime, stats: dict) -> None:
@@ -244,22 +278,24 @@ def _generate(db, today: date, now: datetime, stats: dict) -> None:
                 .first()
             )
             if exists is None:
-                db.add(
-                    Bill(
-                        org_id=org.id,
-                        org_name_snapshot=org.company_name,
-                        tier=org.tier,
-                        period=org.billing_period,
-                        period_start=issue,
-                        period_end=next_issue,
-                        amount_paise=plan_price(org.billing_currency, org.tier, org.billing_period),
-                        currency=org.billing_currency,
-                        status="open",
-                        issued_at=now,
-                        due_date=due_date_for(issue),
-                        cancel_on=cancel_on_for(issue),
-                    )
+                bill = Bill(
+                    org_id=org.id,
+                    org_name_snapshot=org.company_name,
+                    tier=org.tier,
+                    period=org.billing_period,
+                    period_start=issue,
+                    period_end=next_issue,
+                    amount_paise=plan_price(org.billing_currency, org.tier, org.billing_period),
+                    currency=org.billing_currency,
+                    status="open",
+                    issued_at=now,
+                    due_date=due_date_for(issue),
+                    cancel_on=cancel_on_for(issue),
                 )
+                db.add(bill)
+                db.flush()
+                if apply_credits_to_bill(db, org, bill, now) > 0:
+                    stats["credits_applied"] += 1
                 stats["bills_issued"] += 1
             else:
                 logger.warning(
@@ -286,7 +322,7 @@ def _remind(db, today: date, now: datetime, stats: dict) -> None:
     for bill in bills:
         try:
             org = db.get(Organization, bill.org_id)
-            if org is None or org.deleted_at is not None or org.tier == "free":
+            if org is None or org.deleted_at is not None or org.tier == "starter":
                 continue
             routine = bool(org.billing_reminders_enabled)
             to_send: list[str] = []
@@ -322,6 +358,37 @@ def _remind(db, today: date, now: datetime, stats: dict) -> None:
             logger.exception("billing_cycle: reminders failed for bill %s", bill.id)
 
 
+def _announce_overdue(db, today: date) -> None:
+    """Step 5 (Phase 11): tell PostHog once per bill when it is past its due
+    date and still unpaid. Reads state only and never changes a bill, so a
+    failure here is logged and ignored."""
+    if not analytics.enabled():
+        return
+    bills = (
+        db.query(Bill)
+        .filter(Bill.status == "open", Bill.due_date < today, Bill.org_id.isnot(None))
+        .all()
+    )
+    for bill in bills:
+        try:
+            org = db.get(Organization, bill.org_id)
+            if org is None or org.deleted_at is not None or org.tier == "starter":
+                continue
+            analytics.capture_org_event_once(
+                db, org.id, "bill_overdue", f"bill_overdue:{bill.id}",
+                {
+                    "tier": bill.tier,
+                    "period": bill.period,
+                    "amount": analytics.major_units(bill.amount_paise),
+                    "currency": bill.currency,
+                    "due_date": bill.due_date.isoformat(),
+                    "cancel_on": bill.cancel_on.isoformat(),
+                },
+            )
+        except Exception:
+            logger.exception("billing_cycle: overdue event failed for bill %s", bill.id)
+
+
 def run_billing_cycle(db, today: date, now: datetime | None = None) -> dict:
     """Run one daily billing pass as of the IST date `today`. `now` is the
     wall-clock instant used for timestamps (defaults to the current time).
@@ -335,12 +402,17 @@ def run_billing_cycle(db, today: date, now: datetime | None = None) -> dict:
         "ready_notices": 0,
         "due_reminders": 0,
         "cancel_reminders": 0,
+        "credits_vested": 0,
+        "credits_held": 0,
+        "credits_applied": 0,
         "errors": 0,
     }
     _enforce(db, today, moment, stats)
     _voluntary_cancel(db, today, moment, stats)
+    _vest_credits(db, moment, stats)
     _generate(db, today, moment, stats)
     _remind(db, today, moment, stats)
+    _announce_overdue(db, today)
     logger.info("billing_cycle %s: %s", today, stats)
     return stats
 
@@ -349,6 +421,13 @@ def run_billing_cycle(db, today: date, now: datetime | None = None) -> dict:
 def billing_cycle() -> dict:
     db = SessionLocal()
     try:
-        return run_billing_cycle(db, today_ist())
+        stats = run_billing_cycle(db, today_ist())
+    except Exception:
+        ping_heartbeat("BILLING_HEARTBEAT_URL", failed=True)
+        raise
     finally:
         db.close()
+    # Better Stack heartbeat: a green ping only when the whole pass ran clean,
+    # a /fail ping when any org errored. Never fails the task.
+    ping_heartbeat("BILLING_HEARTBEAT_URL", failed=stats["errors"] > 0)
+    return stats

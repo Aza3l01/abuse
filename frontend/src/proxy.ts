@@ -24,10 +24,19 @@ const IS_DEV = process.env.NODE_ENV !== "production";
  * only (React debugging). style-src keeps 'unsafe-inline': React inline style
  * attributes cannot carry a nonce.
  *
+ * Phase 11: PostHog EU. Events go to POSTHOG_API, and posthog-js may lazy load
+ * its small extension scripts (exception capture) from POSTHOG_ASSETS, which
+ * strict-dynamic already permits and the host list repeats for old browsers.
+ *
  * The internal (staff) host gets the strict variant: no third party at all.
  */
+const POSTHOG_API    = "https://eu.i.posthog.com";
+const POSTHOG_ASSETS = "https://eu-assets.i.posthog.com";
+
 function buildCsp(nonce: string, internal: boolean): string {
-  const thirdPartyScripts = internal ? "" : " https://challenges.cloudflare.com https://checkout.razorpay.com";
+  const thirdPartyScripts = internal
+    ? ""
+    : ` https://challenges.cloudflare.com https://checkout.razorpay.com ${POSTHOG_ASSETS}`;
   const directives = [
     "default-src 'self'",
     `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'${thirdPartyScripts}${IS_DEV ? " 'unsafe-eval'" : ""}`,
@@ -36,7 +45,7 @@ function buildCsp(nonce: string, internal: boolean): string {
     "font-src 'self' data:",
     internal
       ? `connect-src 'self'${IS_DEV ? " ws: wss:" : ""}`
-      : `connect-src 'self' https://challenges.cloudflare.com https://*.razorpay.com${IS_DEV ? " ws: wss:" : ""}`,
+      : `connect-src 'self' https://challenges.cloudflare.com https://*.razorpay.com ${POSTHOG_API} ${POSTHOG_ASSETS}${IS_DEV ? " ws: wss:" : ""}`,
     internal ? "" : "frame-src https://challenges.cloudflare.com https://*.razorpay.com",
     internal ? "frame-ancestors 'none'" : "frame-ancestors 'self'",
     "object-src 'none'",

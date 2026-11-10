@@ -162,13 +162,13 @@ def test_cancel_reminder_for_a_january_cancel_is_29_december():
 @pytest.mark.parametrize(
     "old, new, expected",
     [
-        (("starter", "monthly"), ("growth", "monthly"), "upgrade"),
+        (("basic", "monthly"), ("growth", "monthly"), "upgrade"),
         (("growth", "monthly"), ("pro", "monthly"), "upgrade"),
-        (("starter", "monthly"), ("pro", "monthly"), "upgrade"),
+        (("basic", "monthly"), ("pro", "monthly"), "upgrade"),
         (("pro", "monthly"), ("growth", "monthly"), "downgrade"),
-        (("growth", "monthly"), ("starter", "monthly"), "downgrade"),
-        (("starter", "annual"), ("growth", "annual"), "upgrade"),
-        (("pro", "annual"), ("starter", "annual"), "downgrade"),
+        (("growth", "monthly"), ("basic", "monthly"), "downgrade"),
+        (("basic", "annual"), ("growth", "annual"), "upgrade"),
+        (("pro", "annual"), ("basic", "annual"), "downgrade"),
         (("growth", "monthly"), ("growth", "annual"), "upgrade"),
         (("growth", "annual"), ("growth", "monthly"), "downgrade"),
         (("growth", "monthly"), ("growth", "monthly"), "same"),
@@ -182,12 +182,12 @@ def test_classify_change(old, new, expected):
 @pytest.mark.parametrize(
     "old, new",
     [
-        (("starter", "monthly"), ("growth", "annual")),    # tier and period at once
-        (("pro", "annual"), ("starter", "monthly")),
-        (("free", None), ("starter", "monthly")),          # not a change, a first purchase
-        (("starter", "monthly"), ("enterprise", "monthly")),
-        (("starter", "monthly"), ("free", None)),
-        (("starter", "weekly"), ("growth", "weekly")),
+        (("basic", "monthly"), ("growth", "annual")),    # tier and period at once
+        (("pro", "annual"), ("basic", "monthly")),
+        (("starter", None), ("basic", "monthly")),          # not a change, a first purchase
+        (("basic", "monthly"), ("enterprise", "monthly")),
+        (("basic", "monthly"), ("starter", None)),
+        (("basic", "weekly"), ("growth", "weekly")),
     ],
 )
 def test_classify_change_unsupported(old, new):
@@ -197,14 +197,14 @@ def test_classify_change_unsupported(old, new):
 # --- upgrade_amount_paise --------------------------------------------------
 
 def test_tier_upgrade_pays_the_flat_difference():
-    assert upgrade_amount_paise(("starter", "monthly"), ("growth", "monthly"), currency="INR") == 499900 - 199900
+    assert upgrade_amount_paise(("basic", "monthly"), ("growth", "monthly"), currency="INR") == 499900 - 199900
     assert upgrade_amount_paise(("growth", "monthly"), ("pro", "monthly"), currency="INR") == 999900 - 499900
-    assert upgrade_amount_paise(("starter", "monthly"), ("pro", "monthly"), currency="INR") == 999900 - 199900
+    assert upgrade_amount_paise(("basic", "monthly"), ("pro", "monthly"), currency="INR") == 999900 - 199900
 
 
 def test_tier_upgrade_in_usd_pays_the_flat_difference_in_cents():
-    assert upgrade_amount_paise(("starter", "monthly"), ("growth", "monthly"), currency="USD") == 12900 - 4900
-    assert upgrade_amount_paise(("starter", "monthly"), ("pro", "monthly"), currency="USD") == 24900 - 4900
+    assert upgrade_amount_paise(("basic", "monthly"), ("growth", "monthly"), currency="USD") == 12900 - 4900
+    assert upgrade_amount_paise(("basic", "monthly"), ("pro", "monthly"), currency="USD") == 24900 - 4900
 
 
 def test_annual_tier_upgrade_pays_the_full_new_annual_price():
@@ -213,7 +213,7 @@ def test_annual_tier_upgrade_pays_the_full_new_annual_price():
 
 
 def test_monthly_to_annual_pays_the_full_annual_price():
-    for tier in ("starter", "growth", "pro"):
+    for tier in ("basic", "growth", "pro"):
         for currency in ("INR", "USD"):
             assert (
                 upgrade_amount_paise((tier, "monthly"), (tier, "annual"), currency=currency)
@@ -224,9 +224,9 @@ def test_monthly_to_annual_pays_the_full_annual_price():
 @pytest.mark.parametrize(
     "old, new",
     [
-        (("growth", "monthly"), ("starter", "monthly")),
+        (("growth", "monthly"), ("basic", "monthly")),
         (("growth", "monthly"), ("growth", "monthly")),
-        (("starter", "monthly"), ("growth", "annual")),
+        (("basic", "monthly"), ("growth", "annual")),
     ],
 )
 def test_upgrade_amount_rejects_non_upgrades(old, new):
@@ -236,7 +236,7 @@ def test_upgrade_amount_rejects_non_upgrades(old, new):
 
 def test_upgrade_amount_needs_a_known_currency():
     with pytest.raises(ValueError):
-        upgrade_amount_paise(("starter", "monthly"), ("growth", "monthly"), currency="EUR")
+        upgrade_amount_paise(("basic", "monthly"), ("growth", "monthly"), currency="EUR")
 
 
 # --- restore_amount_paise --------------------------------------------------
@@ -247,21 +247,21 @@ def _bill(amount, status="open", currency="INR"):
 
 def test_restore_is_open_bills_plus_a_new_period():
     # Basic with one missed month: 2x Basic.
-    assert restore_amount_paise([_bill(199900)], "starter", "monthly", currency="INR") == 2 * 199900
+    assert restore_amount_paise([_bill(199900)], "basic", "monthly", currency="INR") == 2 * 199900
 
 
 def test_restore_in_usd():
-    assert restore_amount_paise([_bill(4900, currency="USD")], "starter", "monthly", currency="USD") == 2 * 4900
+    assert restore_amount_paise([_bill(4900, currency="USD")], "basic", "monthly", currency="USD") == 2 * 4900
 
 
 def test_restore_rejects_a_mixed_currency_open_bill_set():
     with pytest.raises(ValueError):
-        restore_amount_paise([_bill(199900), _bill(4900, currency="USD")], "starter", "monthly", currency="INR")
+        restore_amount_paise([_bill(199900), _bill(4900, currency="USD")], "basic", "monthly", currency="INR")
 
 
 def test_restore_sums_several_open_bills_and_ignores_paid_ones():
     bills = [_bill(199900), _bill(199900), _bill(199900, "paid"), _bill(199900, "void")]
-    assert restore_amount_paise(bills, "starter", "monthly", currency="INR") == 3 * 199900
+    assert restore_amount_paise(bills, "basic", "monthly", currency="INR") == 3 * 199900
 
 
 def test_restore_can_choose_a_different_plan_for_the_new_period():
@@ -283,26 +283,26 @@ _NOW = datetime(2026, 12, 1, 12, 0, tzinfo=timezone.utc)
 
 
 def _org(**kw):
-    base = dict(tier="free", retention_grace_tier=None, retention_grace_until=None)
+    base = dict(tier="starter", retention_grace_tier=None, retention_grace_until=None)
     base.update(kw)
     return SimpleNamespace(**base)
 
 
 def test_grace_tier_applies_while_the_grace_is_in_the_future():
-    org = _org(retention_grace_tier="starter", retention_grace_until=_NOW + timedelta(days=1))
-    assert effective_retention_tier(org, _NOW) == "starter"
+    org = _org(retention_grace_tier="basic", retention_grace_until=_NOW + timedelta(days=1))
+    assert effective_retention_tier(org, _NOW) == "basic"
 
 
 def test_current_tier_applies_once_the_grace_has_ended():
-    org = _org(retention_grace_tier="starter", retention_grace_until=_NOW)
-    assert effective_retention_tier(org, _NOW) == "free"
-    org = _org(retention_grace_tier="starter", retention_grace_until=_NOW - timedelta(seconds=1))
-    assert effective_retention_tier(org, _NOW) == "free"
+    org = _org(retention_grace_tier="basic", retention_grace_until=_NOW)
+    assert effective_retention_tier(org, _NOW) == "starter"
+    org = _org(retention_grace_tier="basic", retention_grace_until=_NOW - timedelta(seconds=1))
+    assert effective_retention_tier(org, _NOW) == "starter"
 
 
 def test_current_tier_applies_when_there_is_no_grace():
     assert effective_retention_tier(_org(tier="growth"), _NOW) == "growth"
-    assert effective_retention_tier(_org(retention_grace_until=_NOW + timedelta(days=5)), _NOW) == "free"
+    assert effective_retention_tier(_org(retention_grace_until=_NOW + timedelta(days=5)), _NOW) == "starter"
 
 
 def test_naive_grace_datetime_is_read_as_utc():

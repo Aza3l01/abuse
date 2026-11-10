@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { AuthLayout, inputStyle, labelStyle, primaryBtnStyle } from "@/components/auth/AuthLayout";
 import { apiFetch } from "@/lib/api";
+import { identifyUser } from "@/lib/analytics";
 import { LoadingCursor } from "@/components/dashboard/LoadingCursor";
 
 interface OrgChoice {
@@ -38,8 +39,10 @@ export function DashboardGate({ children }: { children: ReactNode }) {
         if (!r.ok) throw new Error("API error");
         return r.json();
       })
-      .then(async (me: { orgs?: unknown[] } | null) => {
+      .then(async (me: { id?: string; orgs?: unknown[] } | null) => {
         if (!me) return;
+        // Same UUID the backend business events use, so web and server events join.
+        if (me.id) identifyUser(me.id);
         const count = me.orgs?.length ?? 0;
         if (count === 0) {
           setStatus("needs-org");

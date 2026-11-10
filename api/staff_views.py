@@ -13,19 +13,23 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func
+from sqlalchemy.orm import aliased
 
 from api.billing_payments import open_bills
-from api.referrals import referral_summary
+from api.referrals import FREE_BILL_KIND, REWARD_KIND, VELOCITY_WINDOW, staff_referral_summary
 from api.tiers import CALL_VOLUME_CAPS, LLM_CALL_CAPS
 from db.models import (
     Bill,
     BillingEvent,
     Client,
+    Credit,
     IpMemory,
     Organization,
     OrganizationMember,
     Payment,
     ProcessedWebhookEvent,
+    PromoCode,
+    PromoCodeRedemption,
     StaffAuditLog,
     Verdict,
 )
@@ -132,6 +136,10 @@ def account_view(db, org: Organization, now: datetime | None = None) -> dict:
     verdict_count = db.query(func.count(Verdict.id)).filter(Verdict.org_id == org.id).scalar() or 0
     ip_count = db.query(func.count(IpMemory.id)).filter(IpMemory.org_id == org.id).scalar() or 0
 
+    credits = (
+        db.query(Credit).filter(Credit.org_id == org.id).order_by(Credit.created_at.desc()).limit(50).all()
+    )
+
     return {
         "org": {
             "id": org.id,
@@ -197,7 +205,8 @@ def account_view(db, org: Organization, now: datetime | None = None) -> dict:
             "reminder_5d_sent": bool(org.trial_reminder_5d_sent),
             "reminder_2d_sent": bool(org.trial_reminder_2d_sent),
         },
-        "referral": referral_summary(org, db),
+        "referral": staff_referral_summary(org, db),
+        "credits": [credit_row(c) for c in credits],
         "members": [
             {
                 "email": client.email,
@@ -217,6 +226,7 @@ def account_view(db, org: Organization, now: datetime | None = None) -> dict:
                 "period_start": b.period_start.isoformat(),
                 "period_end": b.period_end.isoformat(),
                 "amount_paise": b.amount_paise,
+                "credit_applied_paise": b.credit_applied_paise or 0,
                 "currency": b.currency,
                 "status": b.status,
                 "due_date": b.due_date.isoformat(),
@@ -256,6 +266,150 @@ def account_view(db, org: Organization, now: datetime | None = None) -> dict:
         ],
         "audit": [audit_row(a) for a in audit_rows],
         "as_of": moment.isoformat(),
+    }
+
+
+def credit_row(c: Credit, names: dict[str, str] | None = None) -> dict:
+    names = names or {}
+    return {
+        "id": c.id,
+        "org_id": c.org_id,
+        "org_name": names.get(c.org_id),
+        "kind": c.kind,
+        "status": c.status,
+        "amount_paise": c.amount_paise,
+        "currency": c.currency,
+        "basis_tier": c.basis_tier,
+        "basis_period": c.basis_period,
+        "source_org_id": c.source_org_id,
+        "source_org_name": names.get(c.source_org_id) if c.source_org_id else None,
+        "earned_at": _iso(c.earned_at),
+        "vests_at": _iso(c.vests_at),
+        "held_reason": c.held_reason,
+        "applied_at": _iso(c.applied_at),
+        "applied_bill_id": c.applied_bill_id,
+        "revoked_at": _iso(c.revoked_at),
+        "revoked_reason": c.revoked_reason,
+    }
+
+
+def referral_overview(db, limit: int = 100, now: datetime | None = None) -> dict:
+    """The referral graph and credit velocity for the staff referrals page:
+    who referred whom, one row per referrer with credit counts, the credits
+    held for review, and the latest credits of every kind."""
+    moment = now or datetime.now(timezone.utc)
+    referee = aliased(Organization)
+    referrer = aliased(Organization)
+    edges = (
+        db.query(PromoCodeRedemption, referee, PromoCode, referrer)
+        .join(referee, referee.id == PromoCodeRedemption.redeemed_by_org_id)
+        .join(PromoCode, PromoCode.id == PromoCodeRedemption.promo_code_id)
+        .outerjoin(referrer, referrer.id == PromoCode.owner_org_id)
+        .order_by(PromoCodeRedemption.redeemed_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+    signups = {
+        owner: count
+        for owner, count in db.query(PromoCode.owner_org_id, func.count(PromoCodeRedemption.id))
+        .join(PromoCodeRedemption, PromoCodeRedemption.promo_code_id == PromoCode.id)
+        .filter(PromoCode.kind == "referral", PromoCode.owner_org_id.isnot(None))
+        .group_by(PromoCode.owner_org_id)
+        .all()
+    }
+    paying = {
+        owner: count
+        for owner, count in db.query(PromoCode.owner_org_id, func.count(PromoCodeRedemption.id))
+        .join(PromoCodeRedemption, PromoCodeRedemption.promo_code_id == PromoCode.id)
+        .filter(
+            PromoCode.kind == "referral",
+            PromoCode.owner_org_id.isnot(None),
+            PromoCodeRedemption.first_payment_confirmed_at.isnot(None),
+        )
+        .group_by(PromoCode.owner_org_id)
+        .all()
+    }
+    by_status: dict[str, dict[str, int]] = {}
+    for org_id, status, count in (
+        db.query(Credit.org_id, Credit.status, func.count(Credit.id))
+        .filter(Credit.kind == REWARD_KIND)
+        .group_by(Credit.org_id, Credit.status)
+        .all()
+    ):
+        by_status.setdefault(org_id, {})[status] = count
+    recent_vests = {
+        org_id: count
+        for org_id, count in db.query(Credit.org_id, func.count(Credit.id))
+        .filter(
+            Credit.kind == REWARD_KIND,
+            Credit.status.in_(("available", "applied")),
+            Credit.vests_at >= moment - VELOCITY_WINDOW,
+        )
+        .group_by(Credit.org_id)
+        .all()
+    }
+
+    held = db.query(Credit).filter(Credit.status == "held").order_by(Credit.earned_at).all()
+    recent = db.query(Credit).order_by(Credit.created_at.desc()).limit(limit).all()
+
+    wanted = set(signups) | set(by_status) | {c.org_id for c in held} | {c.org_id for c in recent}
+    wanted |= {c.source_org_id for c in held + recent if c.source_org_id}
+    names = {
+        org_id: name
+        for org_id, name in db.query(Organization.id, Organization.company_name)
+        .filter(Organization.id.in_(wanted or {""}))
+        .all()
+    }
+    codes = {
+        owner: code
+        for owner, code in db.query(PromoCode.owner_org_id, PromoCode.code)
+        .filter(PromoCode.kind == "referral", PromoCode.owner_org_id.in_(wanted or {""}))
+        .all()
+    }
+
+    referrers = []
+    for org_id in sorted(set(signups) | set(by_status), key=lambda o: (-signups.get(o, 0), names.get(o) or "")):
+        counts = by_status.get(org_id, {})
+        referrers.append({
+            "org_id": org_id,
+            "org_name": names.get(org_id),
+            "code": codes.get(org_id),
+            "signups": signups.get(org_id, 0),
+            "paying": paying.get(org_id, 0),
+            "pending": counts.get("pending", 0),
+            "held": counts.get("held", 0),
+            "available": counts.get("available", 0),
+            "applied": counts.get("applied", 0),
+            "revoked": counts.get("revoked", 0),
+            "vested_30d": recent_vests.get(org_id, 0),
+        })
+
+    return {
+        "as_of": moment.isoformat(),
+        "referrers": referrers[:limit],
+        "held": [credit_row(c, names) for c in held],
+        "recent": [credit_row(c, names) for c in recent],
+        "edges": [
+            {
+                "referee_org_id": ref_org.id,
+                "referee_name": ref_org.company_name,
+                "referee_tier": ref_org.tier,
+                "referee_deleted": ref_org.deleted_at is not None,
+                "code": code.code,
+                "referrer_org_id": owner.id if owner is not None else None,
+                "referrer_name": owner.company_name if owner is not None else None,
+                "redeemed_at": _iso(redemption.redeemed_at),
+                "first_payment_confirmed_at": _iso(redemption.first_payment_confirmed_at),
+                "free_bill_applied": db.query(Credit.id)
+                .filter(
+                    Credit.org_id == ref_org.id, Credit.kind == FREE_BILL_KIND, Credit.status == "applied"
+                )
+                .first()
+                is not None,
+            }
+            for redemption, ref_org, code, owner in edges
+        ],
     }
 
 

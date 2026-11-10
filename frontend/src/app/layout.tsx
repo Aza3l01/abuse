@@ -4,6 +4,7 @@ import { GeistSans } from "geist/font/sans";
 import { GeistMono } from "geist/font/mono";
 import { Courier_Prime } from "next/font/google";
 import { ThemeProvider } from "@/components/providers/ThemeProvider";
+import { Analytics } from "@/components/providers/Analytics";
 import "./globals.css";
 
 const courierPrime = Courier_Prime({
@@ -49,7 +50,11 @@ export default async function RootLayout({
   // Next.js can only stamp it on scripts when the page renders per request.
   // Reading the header also opts the route into dynamic rendering. The nonce
   // goes to the theme bootstrap script, the one inline script we own.
-  const nonce = (await headers()).get("x-nonce") ?? undefined;
+  const requestHeaders = await headers();
+  const nonce = requestHeaders.get("x-nonce") ?? undefined;
+  // The staff host has a strict CSP with no third parties, so no analytics there.
+  const internalHost = (process.env.INTERNAL_HOST ?? "internal.localhost:3000").toLowerCase();
+  const isInternal = (requestHeaders.get("host") ?? "").toLowerCase() === internalHost;
   return (
     <html
       lang="en"
@@ -58,6 +63,7 @@ export default async function RootLayout({
     >
       <body>
         <ThemeProvider nonce={nonce}>{children}</ThemeProvider>
+        <Analytics enabled={!isInternal} />
       </body>
     </html>
   );

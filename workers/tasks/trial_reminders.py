@@ -72,13 +72,13 @@ def send_trial_reminders() -> dict:
             # Item 27 point 6 / item 53 (section 4): trial ended with no
             # payment method added, revert to the permanent free Starter
             # tier (not a lockout). poll_all_clients() (process_logs.py) no
-            # longer excludes tier == "free" orgs from scanning, so this org
+            # longer excludes tier == "starter" orgs from scanning, so this org
             # keeps being scanned within the free tier's call-volume cap.
             # TrialBanner.tsx already renders an "expired" message once
             # trial_ends_at has passed. Phase 3: goes through downgrade_org (the
             # one downgrade path), so the pilot keeps its Growth retention for
             # 30 days and auto-block is switched off.
-            if org.trial_ends_at <= now and org.tier != "free":
+            if org.trial_ends_at <= now and org.tier != "starter":
                 downgrade_org(org, db, "trial_end", now)
                 db.commit()
                 expired += 1

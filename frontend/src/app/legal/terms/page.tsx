@@ -110,6 +110,23 @@ export default function TermsPage() {
         until Clew holds a GST registration; GST tax invoices will be
         available later.
       </p>
+      <p style={legalPStyle}>
+        Referrals. If you register with another customer&apos;s referral code
+        and then make a first payment, one month of the second bill issued to
+        you is credited and free; the rest of that bill, if any, stays
+        payable. The customer who referred you earns a credit that is pending
+        at first and becomes available once your first payment has stood for
+        72 hours without being refunded. A referral credit is worth the lower
+        of your first payment and the price of a year of the referrer&apos;s
+        current plan, in the referrer&apos;s billing currency. A credit only
+        reduces your own future bills. It is never
+        paid out in cash, cannot be transferred and does not expire. If the
+        referred customer is refunded before the credit becomes available,
+        the credit is cancelled. We may hold, review or cancel credits that
+        we reasonably believe come from fake, self-referred or otherwise
+        abusive accounts, and a credit that has been applied to a bill is not
+        reversed afterwards.
+      </p>
 
       <h2 style={legalH2Style}>5. Refunds and cancellations</h2>
       <p style={legalPStyle}>

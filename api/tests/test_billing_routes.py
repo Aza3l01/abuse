@@ -12,12 +12,12 @@ from api.tests.conftest import checkout_signature, make_bill
 from api.tiers import plan_price
 from db.models import Bill, BillingEvent, Organization, Payment
 
-STARTER_M = plan_price("INR", "starter", "monthly")
+BASIC_M = plan_price("INR", "basic", "monthly")
 GROWTH_M = plan_price("INR", "growth", "monthly")
-STARTER_A = plan_price("INR", "starter", "annual")
+BASIC_A = plan_price("INR", "basic", "annual")
 
 
-def _buy(env, org, tier="starter", period="monthly", **extra):
+def _buy(env, org, tier="basic", period="monthly", **extra):
     """create-order, pay on the fake gateway, verify. Returns (order, payment_id, verify response)."""
     resp = env.create_order(purpose="initial", tier=tier, period=period, accept_blocking_tos=True, **extra)
     assert resp.status_code == 200, resp.text
@@ -36,28 +36,28 @@ def _events(db, org, event=None):
 # --- create-order ----------------------------------------------------------
 
 def test_create_order_amount_comes_from_the_server(env, db):
-    org = env.act_as(make_org(db, tier="free", period=None))
-    resp = env.create_order(purpose="initial", tier="starter", period="monthly",
+    org = env.act_as(make_org(db, tier="starter", period=None))
+    resp = env.create_order(purpose="initial", tier="basic", period="monthly",
                             accept_blocking_tos=True, amount=1, amount_paise=1)
     assert resp.status_code == 200
     data = resp.json()
-    assert data["amount"] == STARTER_M
+    assert data["amount"] == BASIC_M
     assert data["key_id"] == "rzp_test_unit"
-    assert env.rp.orders[data["order_id"]]["amount"] == STARTER_M
+    assert env.rp.orders[data["order_id"]]["amount"] == BASIC_M
     payment = db.query(Payment).one()
-    assert payment.amount_paise == STARTER_M
+    assert payment.amount_paise == BASIC_M
     assert payment.status == "created"
     assert env.rp.orders[data["order_id"]]["receipt"] == payment.id
     # Nothing is applied by creating an order.
     db.refresh(org)
-    assert org.tier == "free"
+    assert org.tier == "starter"
     assert org.blocking_tos_accepted_at is None
 
 
 def test_tos_and_gstin_are_stamped_only_at_capture(env, db):
-    org = env.act_as(make_org(db, tier="free", period=None))
+    org = env.act_as(make_org(db, tier="starter", period=None))
     gstin = "29ABCDE1234F1Z5"
-    resp = env.create_order(purpose="initial", tier="starter", period="monthly",
+    resp = env.create_order(purpose="initial", tier="basic", period="monthly",
                             accept_blocking_tos=True, gstin=gstin)
     assert resp.status_code == 200
     db.refresh(org)
@@ -72,50 +72,50 @@ def test_tos_and_gstin_are_stamped_only_at_capture(env, db):
 
 
 def test_blocking_agreement_required_for_blocking_tiers(env, db):
-    env.act_as(make_org(db, tier="free", period=None))
-    resp = env.create_order(purpose="initial", tier="starter", period="monthly")
+    env.act_as(make_org(db, tier="starter", period=None))
+    resp = env.create_order(purpose="initial", tier="basic", period="monthly")
     assert resp.status_code == 403
     assert db.query(Payment).count() == 0
 
 
 def test_invalid_gstin_rejected_before_any_order(env, db):
-    env.act_as(make_org(db, tier="free", period=None))
-    resp = env.create_order(purpose="initial", tier="starter", period="monthly",
+    env.act_as(make_org(db, tier="starter", period=None))
+    resp = env.create_order(purpose="initial", tier="basic", period="monthly",
                             accept_blocking_tos=True, gstin="NOT-A-GSTIN")
     assert resp.status_code == 400
     assert env.rp.orders == {}
 
 
 @pytest.mark.parametrize("body", [
-    {"purpose": "nonsense", "tier": "starter", "period": "monthly"},
-    {"purpose": "initial", "tier": "starter", "period": "weekly"},
+    {"purpose": "nonsense", "tier": "basic", "period": "monthly"},
+    {"purpose": "initial", "tier": "basic", "period": "weekly"},
     {"purpose": "initial", "tier": "enterprise", "period": "monthly"},
-    {"purpose": "initial", "tier": "free", "period": "monthly"},
+    {"purpose": "initial", "tier": "starter", "period": "monthly"},
 ])
 def test_create_order_rejects_unknown_plans(env, db, body):
-    env.act_as(make_org(db, tier="free", period=None))
+    env.act_as(make_org(db, tier="starter", period=None))
     assert env.create_order(accept_blocking_tos=True, **body).status_code == 400
 
 
 def test_create_order_rejects_stripe_and_enterprise_orgs(env, db):
-    org = env.act_as(make_org(db, tier="free", period=None, billing_provider="stripe"))
-    assert env.create_order(purpose="initial", tier="starter", period="monthly",
+    org = env.act_as(make_org(db, tier="starter", period=None, billing_provider="stripe"))
+    assert env.create_order(purpose="initial", tier="basic", period="monthly",
                             accept_blocking_tos=True).status_code == 409
     org.billing_provider = None
     org.tier = "enterprise"
     db.commit()
-    assert env.create_order(purpose="initial", tier="starter", period="monthly",
+    assert env.create_order(purpose="initial", tier="basic", period="monthly",
                             accept_blocking_tos=True).status_code == 409
 
 
 def test_create_order_is_owner_only(env, db):
-    env.act_as(make_org(db, tier="free", period=None), role="admin")
-    assert env.create_order(purpose="initial", tier="starter", period="monthly",
+    env.act_as(make_org(db, tier="starter", period=None), role="admin")
+    assert env.create_order(purpose="initial", tier="basic", period="monthly",
                             accept_blocking_tos=True).status_code == 403
 
 
 def test_initial_order_blocked_while_a_paid_plan_exists(env, db):
-    env.act_as(make_org(db, tier="starter", period="monthly"))
+    env.act_as(make_org(db, tier="basic", period="monthly"))
     assert env.create_order(purpose="initial", tier="growth", period="monthly",
                             accept_blocking_tos=True).status_code == 409
 
@@ -123,13 +123,13 @@ def test_initial_order_blocked_while_a_paid_plan_exists(env, db):
 # --- verify-payment --------------------------------------------------------
 
 def test_verify_applies_the_plan_once(env, db):
-    org = env.act_as(make_org(db, tier="free", period=None))
+    org = env.act_as(make_org(db, tier="starter", period=None))
     order, rz_id, resp = _buy(env, org)
     assert resp.status_code == 200
     assert resp.json() == {"status": "captured", "payment_id": order["payment_id"], "applied": True}
     db.expire_all()
     org = db.get(Organization, org.id)
-    assert (org.tier, org.billing_period, org.billing_provider) == ("starter", "monthly", "razorpay")
+    assert (org.tier, org.billing_period, org.billing_provider) == ("basic", "monthly", "razorpay")
     assert org.first_charged_at is not None
     assert org.next_billing_date is not None
     assert org.blocking_tos_accepted_at is not None
@@ -141,8 +141,8 @@ def test_verify_applies_the_plan_once(env, db):
 
 
 def test_verify_bad_signature_changes_nothing(env, db):
-    org = env.act_as(make_org(db, tier="free", period=None))
-    order = env.create_order(purpose="initial", tier="starter", period="monthly",
+    org = env.act_as(make_org(db, tier="starter", period=None))
+    order = env.create_order(purpose="initial", tier="basic", period="monthly",
                              accept_blocking_tos=True).json()
     rz_id = env.rp.pay(order["order_id"])
     resp = env.verify(order["order_id"], rz_id, signature="0" * 64)
@@ -151,66 +151,66 @@ def test_verify_bad_signature_changes_nothing(env, db):
     resp = env.verify(order["order_id"], rz_id, signature=checkout_signature(order["order_id"], rz_id, "other"))
     assert resp.status_code == 400
     db.expire_all()
-    assert db.get(Organization, org.id).tier == "free"
+    assert db.get(Organization, org.id).tier == "starter"
     assert db.get(Payment, order["payment_id"]).status == "created"
 
 
 def test_verify_requires_all_fields(env, db):
-    env.act_as(make_org(db, tier="free", period=None))
+    env.act_as(make_org(db, tier="starter", period=None))
     resp = env.client.post("/billing/razorpay/verify-payment", json={"razorpay_order_id": "order_x"})
     assert resp.status_code == 400
 
 
 def test_verify_rejects_an_amount_that_does_not_match(env, db):
-    org = env.act_as(make_org(db, tier="free", period=None))
-    order = env.create_order(purpose="initial", tier="starter", period="monthly",
+    org = env.act_as(make_org(db, tier="starter", period=None))
+    order = env.create_order(purpose="initial", tier="basic", period="monthly",
                              accept_blocking_tos=True).json()
     rz_id = env.rp.pay(order["order_id"], amount=100)
     assert env.verify(order["order_id"], rz_id).status_code == 400
     db.expire_all()
-    assert db.get(Organization, org.id).tier == "free"
+    assert db.get(Organization, org.id).tier == "starter"
     assert db.get(Payment, order["payment_id"]).status == "created"
 
 
 def test_verify_requires_a_captured_payment(env, db):
-    org = env.act_as(make_org(db, tier="free", period=None))
-    order = env.create_order(purpose="initial", tier="starter", period="monthly",
+    org = env.act_as(make_org(db, tier="starter", period=None))
+    order = env.create_order(purpose="initial", tier="basic", period="monthly",
                              accept_blocking_tos=True).json()
     rz_id = env.rp.pay(order["order_id"], status="authorized")
     assert env.verify(order["order_id"], rz_id).status_code == 409
     db.expire_all()
-    assert db.get(Organization, org.id).tier == "free"
+    assert db.get(Organization, org.id).tier == "starter"
 
 
 def test_verify_rejects_a_payment_for_a_different_order(env, db):
-    org = env.act_as(make_org(db, tier="free", period=None))
-    a = env.create_order(purpose="initial", tier="starter", period="monthly", accept_blocking_tos=True).json()
-    b = env.create_order(purpose="initial", tier="starter", period="monthly", accept_blocking_tos=True).json()
+    org = env.act_as(make_org(db, tier="starter", period=None))
+    a = env.create_order(purpose="initial", tier="basic", period="monthly", accept_blocking_tos=True).json()
+    b = env.create_order(purpose="initial", tier="basic", period="monthly", accept_blocking_tos=True).json()
     rz_b = env.rp.pay(b["order_id"])
     # Signature is valid for (a, rz_b) but Razorpay says rz_b belongs to order b.
     assert env.verify(a["order_id"], rz_b).status_code == 400
     db.expire_all()
-    assert db.get(Organization, org.id).tier == "free"
+    assert db.get(Organization, org.id).tier == "starter"
 
 
 def test_verify_cannot_touch_another_orgs_order(env, db):
-    owner = make_org(db, tier="free", period=None, name="A")
-    other = make_org(db, tier="free", period=None, name="B")
+    owner = make_org(db, tier="starter", period=None, name="A")
+    other = make_org(db, tier="starter", period=None, name="B")
     env.act_as(owner)
-    order = env.create_order(purpose="initial", tier="starter", period="monthly",
+    order = env.create_order(purpose="initial", tier="basic", period="monthly",
                              accept_blocking_tos=True).json()
     rz_id = env.rp.pay(order["order_id"])
     env.act_as(other)
     assert env.verify(order["order_id"], rz_id).status_code == 404
     db.expire_all()
-    assert db.get(Organization, other.id).tier == "free"
-    assert db.get(Organization, owner.id).tier == "free"
+    assert db.get(Organization, other.id).tier == "starter"
+    assert db.get(Organization, owner.id).tier == "starter"
 
 
 # --- double delivery (verify plus webhook) ---------------------------------
 
 def test_verify_then_webhook_credits_once(env, db):
-    org = env.act_as(make_org(db, tier="free", period=None))
+    org = env.act_as(make_org(db, tier="starter", period=None))
     order, rz_id, resp = _buy(env, org)
     assert resp.json()["applied"] is True
     assert env.webhook(env.captured_event(rz_id)).status_code == 200
@@ -222,13 +222,13 @@ def test_verify_then_webhook_credits_once(env, db):
 
 
 def test_webhook_then_verify_credits_once(env, db):
-    org = env.act_as(make_org(db, tier="free", period=None))
-    order = env.create_order(purpose="initial", tier="starter", period="monthly",
+    org = env.act_as(make_org(db, tier="starter", period=None))
+    order = env.create_order(purpose="initial", tier="basic", period="monthly",
                              accept_blocking_tos=True).json()
     rz_id = env.rp.pay(order["order_id"])
     assert env.webhook(env.captured_event(rz_id)).status_code == 200
     db.expire_all()
-    assert db.get(Organization, org.id).tier == "starter"
+    assert db.get(Organization, org.id).tier == "basic"
     resp = env.verify(order["order_id"], rz_id)
     assert resp.status_code == 200 and resp.json()["applied"] is False
     db.expire_all()
@@ -236,8 +236,8 @@ def test_webhook_then_verify_credits_once(env, db):
 
 
 def test_duplicate_webhook_event_id_is_skipped(env, db):
-    org = env.act_as(make_org(db, tier="free", period=None))
-    order = env.create_order(purpose="initial", tier="starter", period="monthly",
+    org = env.act_as(make_org(db, tier="starter", period=None))
+    order = env.create_order(purpose="initial", tier="basic", period="monthly",
                              accept_blocking_tos=True).json()
     rz_id = env.rp.pay(order["order_id"])
     event = env.captured_event(rz_id)
@@ -250,43 +250,43 @@ def test_duplicate_webhook_event_id_is_skipped(env, db):
 # --- webhook ---------------------------------------------------------------
 
 def test_webhook_rejects_a_bad_signature(env, db):
-    org = env.act_as(make_org(db, tier="free", period=None))
-    order = env.create_order(purpose="initial", tier="starter", period="monthly",
+    org = env.act_as(make_org(db, tier="starter", period=None))
+    order = env.create_order(purpose="initial", tier="basic", period="monthly",
                              accept_blocking_tos=True).json()
     rz_id = env.rp.pay(order["order_id"])
     assert env.webhook(env.captured_event(rz_id), secret="wrong").status_code == 400
     db.expire_all()
-    assert db.get(Organization, org.id).tier == "free"
+    assert db.get(Organization, org.id).tier == "starter"
 
 
 def test_webhook_does_not_apply_a_mismatched_amount(env, db):
-    org = env.act_as(make_org(db, tier="free", period=None))
-    order = env.create_order(purpose="initial", tier="starter", period="monthly",
+    org = env.act_as(make_org(db, tier="starter", period=None))
+    order = env.create_order(purpose="initial", tier="basic", period="monthly",
                              accept_blocking_tos=True).json()
     rz_id = env.rp.pay(order["order_id"], amount=100)
     assert env.webhook(env.captured_event(rz_id)).status_code == 200
     db.expire_all()
-    assert db.get(Organization, org.id).tier == "free"
+    assert db.get(Organization, org.id).tier == "starter"
     assert db.get(Payment, order["payment_id"]).status == "created"
 
 
 def test_webhook_ignores_unknown_orders_and_events(env, db):
-    env.act_as(make_org(db, tier="free", period=None))
+    env.act_as(make_org(db, tier="starter", period=None))
     stranger = {"event": "payment.captured", "payload": {"payment": {"entity": {"order_id": "order_nope", "amount": 1}}}}
     assert env.webhook(stranger).status_code == 200
     assert env.webhook({"event": "subscription.activated", "payload": {}}).status_code == 200
 
 
 def test_failed_payment_changes_nothing_and_a_retry_still_applies(env, db):
-    org = env.act_as(make_org(db, tier="free", period=None))
-    order = env.create_order(purpose="initial", tier="starter", period="monthly",
+    org = env.act_as(make_org(db, tier="starter", period=None))
+    order = env.create_order(purpose="initial", tier="basic", period="monthly",
                              accept_blocking_tos=True).json()
     failed = env.rp.pay(order["order_id"], status="failed")
     event = {"event": "payment.failed", "payload": {"payment": {"entity": env.rp.payments[failed]}}}
     assert env.webhook(event).status_code == 200
     db.expire_all()
     org = db.get(Organization, org.id)
-    assert (org.tier, org.billing_period, org.first_charged_at) == ("free", None, None)
+    assert (org.tier, org.billing_period, org.first_charged_at) == ("starter", None, None)
     assert org.blocking_tos_accepted_at is None
     assert db.get(Payment, order["payment_id"]).status == "failed"
     assert _events(db, org) == []
@@ -294,14 +294,14 @@ def test_failed_payment_changes_nothing_and_a_retry_still_applies(env, db):
     good = env.rp.pay(order["order_id"])
     assert env.verify(order["order_id"], good).status_code == 200
     db.expire_all()
-    assert db.get(Organization, org.id).tier == "starter"
+    assert db.get(Organization, org.id).tier == "basic"
 
 
 def test_refund_processed_marks_the_payment_refunded_once(env, db):
-    org = env.act_as(make_org(db, tier="free", period=None))
+    org = env.act_as(make_org(db, tier="starter", period=None))
     order, rz_id, _ = _buy(env, org)
     event = {"event": "refund.processed",
-             "payload": {"refund": {"entity": {"payment_id": rz_id, "amount": STARTER_M}}}}
+             "payload": {"refund": {"entity": {"payment_id": rz_id, "amount": BASIC_M}}}}
     assert env.webhook(event).status_code == 200
     db.expire_all()
     payment = db.get(Payment, order["payment_id"])
@@ -314,7 +314,7 @@ def test_refund_processed_marks_the_payment_refunded_once(env, db):
 
 
 def test_partial_refund_event_is_not_treated_as_a_full_refund(env, db):
-    org = env.act_as(make_org(db, tier="free", period=None))
+    org = env.act_as(make_org(db, tier="starter", period=None))
     order, rz_id, _ = _buy(env, org)
     event = {"event": "refund.processed", "payload": {"refund": {"entity": {"payment_id": rz_id, "amount": 100}}}}
     assert env.webhook(event).status_code == 200
@@ -325,9 +325,9 @@ def test_partial_refund_event_is_not_treated_as_a_full_refund(env, db):
 # --- open-bill gating ------------------------------------------------------
 
 def test_initial_blocked_by_open_bills_with_a_listing(env, db):
-    org = env.act_as(make_org(db, tier="free", period=None))
+    org = env.act_as(make_org(db, tier="starter", period=None))
     bill = make_bill(db, org)
-    resp = env.create_order(purpose="initial", tier="starter", period="monthly", accept_blocking_tos=True)
+    resp = env.create_order(purpose="initial", tier="basic", period="monthly", accept_blocking_tos=True)
     assert resp.status_code == 409
     detail = resp.json()["detail"]
     assert [b["id"] for b in detail["open_bills"]] == [bill.id]
@@ -335,7 +335,7 @@ def test_initial_blocked_by_open_bills_with_a_listing(env, db):
 
 
 def test_upgrade_with_a_stale_open_bill_is_blocked(env, db):
-    org = env.act_as(make_org(db, tier="starter", period="monthly"))
+    org = env.act_as(make_org(db, tier="basic", period="monthly"))
     make_bill(db, org, start=datetime.now(timezone.utc).date() - timedelta(days=90))
     resp = env.create_order(purpose="upgrade", tier="growth", period="monthly", accept_blocking_tos=True)
     assert resp.status_code == 409
@@ -343,15 +343,15 @@ def test_upgrade_with_a_stale_open_bill_is_blocked(env, db):
 
 
 def test_monthly_to_annual_with_an_open_bill_is_blocked(env, db):
-    org = env.act_as(make_org(db, tier="starter", period="monthly"))
+    org = env.act_as(make_org(db, tier="basic", period="monthly"))
     make_bill(db, org)
-    resp = env.create_order(purpose="upgrade", tier="starter", period="annual", accept_blocking_tos=True,
+    resp = env.create_order(purpose="upgrade", tier="basic", period="annual", accept_blocking_tos=True,
                             accept_annual_nonrefundable=True)
     assert resp.status_code == 409
 
 
 def test_tier_upgrade_with_the_current_bill_open_is_blocked_until_it_is_paid(env, db):
-    org = env.act_as(make_org(db, tier="starter", period="monthly"))
+    org = env.act_as(make_org(db, tier="basic", period="monthly"))
     bill = make_bill(db, org)
     resp = env.create_order(purpose="upgrade", tier="growth", period="monthly", accept_blocking_tos=True)
     assert resp.status_code == 409
@@ -359,8 +359,8 @@ def test_tier_upgrade_with_the_current_bill_open_is_blocked_until_it_is_paid(env
     assert env.rp.orders == {}
     assert db.query(Payment).count() == 0
     db.expire_all()
-    assert db.get(Organization, org.id).tier == "starter"
-    assert db.get(Bill, bill.id).amount_paise == STARTER_M
+    assert db.get(Organization, org.id).tier == "basic"
+    assert db.get(Bill, bill.id).amount_paise == BASIC_M
     quote = env.client.post(
         "/billing/quote", json={"purpose": "upgrade", "tier": "growth", "period": "monthly"}
     )
@@ -368,17 +368,17 @@ def test_tier_upgrade_with_the_current_bill_open_is_blocked_until_it_is_paid(env
 
 
 def test_upgrade_after_paying_the_open_bill_charges_the_difference(env, db):
-    org = env.act_as(make_org(db, tier="starter", period="monthly"))
+    org = env.act_as(make_org(db, tier="basic", period="monthly"))
     bill = make_bill(db, org)
     pay = env.create_order(purpose="bill", bill_id=bill.id).json()
     assert env.verify(pay["order_id"], env.rp.pay(pay["order_id"])).status_code == 200
     resp = env.create_order(purpose="upgrade", tier="growth", period="monthly", accept_blocking_tos=True)
     assert resp.status_code == 200
-    assert resp.json()["amount"] == GROWTH_M - STARTER_M
+    assert resp.json()["amount"] == GROWTH_M - BASIC_M
 
 
 def test_tier_upgrade_keeps_the_next_bill_date(env, db):
-    org = env.act_as(make_org(db, tier="starter", period="monthly", next_bill=date(2031, 3, 1)))
+    org = env.act_as(make_org(db, tier="basic", period="monthly", next_bill=date(2031, 3, 1)))
     before = db.get(Organization, org.id).next_billing_date
     order = env.create_order(purpose="upgrade", tier="growth", period="monthly", accept_blocking_tos=True).json()
     assert env.verify(order["order_id"], env.rp.pay(order["order_id"])).status_code == 200
@@ -387,11 +387,11 @@ def test_tier_upgrade_keeps_the_next_bill_date(env, db):
 
 
 def test_upgrade_with_nothing_open_charges_the_difference(env, db):
-    org = env.act_as(make_org(db, tier="starter", period="monthly"))
+    org = env.act_as(make_org(db, tier="basic", period="monthly"))
     resp = env.create_order(purpose="upgrade", tier="growth", period="monthly", accept_blocking_tos=True)
     assert resp.status_code == 200
     order = resp.json()
-    assert order["amount"] == GROWTH_M - STARTER_M
+    assert order["amount"] == GROWTH_M - BASIC_M
     rz_id = env.rp.pay(order["order_id"])
     assert env.verify(order["order_id"], rz_id).status_code == 200
     db.expire_all()
@@ -402,19 +402,19 @@ def test_upgrade_with_nothing_open_charges_the_difference(env, db):
 
 
 def test_monthly_to_annual_charges_the_full_annual_price(env, db):
-    org = env.act_as(make_org(db, tier="starter", period="monthly"))
-    order = env.create_order(purpose="upgrade", tier="starter", period="annual", accept_blocking_tos=True,
+    org = env.act_as(make_org(db, tier="basic", period="monthly"))
+    order = env.create_order(purpose="upgrade", tier="basic", period="annual", accept_blocking_tos=True,
                              accept_annual_nonrefundable=True).json()
-    assert order["amount"] == STARTER_A
+    assert order["amount"] == BASIC_A
     rz_id = env.rp.pay(order["order_id"])
     assert env.verify(order["order_id"], rz_id).status_code == 200
     db.expire_all()
     org = db.get(Organization, org.id)
-    assert (org.tier, org.billing_period) == ("starter", "annual")
+    assert (org.tier, org.billing_period) == ("basic", "annual")
 
 
 def test_annual_to_a_higher_annual_tier_charges_the_full_price_and_starts_a_new_year(env, db):
-    org = env.act_as(make_org(db, tier="starter", period="annual", next_bill=date(2031, 3, 1)))
+    org = env.act_as(make_org(db, tier="basic", period="annual", next_bill=date(2031, 3, 1)))
     before = db.get(Organization, org.id).next_billing_date
     order = env.create_order(purpose="upgrade", tier="growth", period="annual", accept_blocking_tos=True,
                              accept_annual_nonrefundable=True).json()
@@ -428,14 +428,14 @@ def test_annual_to_a_higher_annual_tier_charges_the_full_price_and_starts_a_new_
 
 def test_upgrade_rejects_downgrades_and_double_changes(env, db):
     env.act_as(make_org(db, tier="growth", period="monthly"))
-    assert env.create_order(purpose="upgrade", tier="starter", period="monthly",
+    assert env.create_order(purpose="upgrade", tier="basic", period="monthly",
                             accept_blocking_tos=True).status_code == 400
     assert env.create_order(purpose="upgrade", tier="pro", period="annual",
                             accept_blocking_tos=True, accept_annual_nonrefundable=True).status_code == 400
 
 
 def test_an_upgrade_payment_for_a_stale_plan_leaves_the_org_alone(env, db):
-    org = env.act_as(make_org(db, tier="starter", period="monthly"))
+    org = env.act_as(make_org(db, tier="basic", period="monthly"))
     order = env.create_order(purpose="upgrade", tier="growth", period="monthly", accept_blocking_tos=True).json()
     org.tier = "pro"  # changed between order and capture
     db.commit()
@@ -447,7 +447,7 @@ def test_an_upgrade_payment_for_a_stale_plan_leaves_the_org_alone(env, db):
 
 
 def test_pay_a_bill_marks_it_paid(env, db):
-    org = env.act_as(make_org(db, tier="starter", period="monthly"))
+    org = env.act_as(make_org(db, tier="basic", period="monthly"))
     bill = make_bill(db, org)
     resp = env.create_order(purpose="bill", bill_id=bill.id)
     assert resp.status_code == 200
@@ -462,8 +462,8 @@ def test_pay_a_bill_marks_it_paid(env, db):
 
 
 def test_pay_a_bill_needs_a_real_open_bill_of_this_org(env, db):
-    org = env.act_as(make_org(db, tier="starter", period="monthly"))
-    other = make_org(db, tier="starter", period="monthly", name="Other")
+    org = env.act_as(make_org(db, tier="basic", period="monthly"))
+    other = make_org(db, tier="basic", period="monthly", name="Other")
     theirs = make_bill(db, other)
     assert env.create_order(purpose="bill").status_code == 400
     assert env.create_order(purpose="bill", bill_id=theirs.id).status_code == 404
@@ -472,26 +472,26 @@ def test_pay_a_bill_needs_a_real_open_bill_of_this_org(env, db):
 
 
 def test_bill_payment_blocked_on_a_cancelled_plan(env, db):
-    org = env.act_as(make_org(db, tier="free", period=None, nonpayment_downgraded_at=datetime.now(timezone.utc)))
+    org = env.act_as(make_org(db, tier="starter", period=None, nonpayment_downgraded_at=datetime.now(timezone.utc)))
     bill = make_bill(db, org)
     assert env.create_order(purpose="bill", bill_id=bill.id).status_code == 409
 
 
 def test_restore_pays_open_bills_plus_a_new_period(env, db):
     org = env.act_as(make_org(
-        db, tier="free", period=None,
+        db, tier="starter", period=None,
         nonpayment_downgraded_at=datetime.now(timezone.utc) - timedelta(days=3),
         retention_grace_tier="growth",
         retention_grace_until=datetime.now(timezone.utc) + timedelta(days=27),
     ))
     bill = make_bill(db, org, tier="growth", amount=GROWTH_M)
-    order = env.create_order(purpose="restore", tier="starter", period="monthly", accept_blocking_tos=True).json()
-    assert order["amount"] == restore_amount_paise([bill], "starter", "monthly", currency="INR") == GROWTH_M + STARTER_M
+    order = env.create_order(purpose="restore", tier="basic", period="monthly", accept_blocking_tos=True).json()
+    assert order["amount"] == restore_amount_paise([bill], "basic", "monthly", currency="INR") == GROWTH_M + BASIC_M
     rz_id = env.rp.pay(order["order_id"])
     assert env.verify(order["order_id"], rz_id).status_code == 200
     db.expire_all()
     org = db.get(Organization, org.id)
-    assert (org.tier, org.billing_period) == ("starter", "monthly")
+    assert (org.tier, org.billing_period) == ("basic", "monthly")
     assert org.nonpayment_downgraded_at is None
     assert org.retention_grace_until is None and org.retention_grace_tier is None
     assert db.get(Bill, bill.id).status == "paid"
@@ -499,35 +499,35 @@ def test_restore_pays_open_bills_plus_a_new_period(env, db):
 
 
 def test_restore_only_after_a_nonpayment_downgrade(env, db):
-    env.act_as(make_org(db, tier="free", period=None))
-    assert env.create_order(purpose="restore", tier="starter", period="monthly",
+    env.act_as(make_org(db, tier="starter", period=None))
+    assert env.create_order(purpose="restore", tier="basic", period="monthly",
                             accept_blocking_tos=True).status_code == 409
 
 
 # --- refund ----------------------------------------------------------------
 
 def test_refund_within_the_window_refunds_in_full_and_downgrades(env, db):
-    org = env.act_as(make_org(db, tier="free", period=None))
+    org = env.act_as(make_org(db, tier="starter", period=None))
     order, rz_id, _ = _buy(env, org)
     elig = env.client.post("/billing/refund-eligibility").json()
     assert elig["eligible"] is True and elig["reason"] == "remorse_window"
 
     resp = env.client.post("/billing/refund")
     assert resp.status_code == 200, resp.text
-    assert resp.json() == {"status": "refunded", "refunded_paise": STARTER_M, "failed_payments": 0}
+    assert resp.json() == {"status": "refunded", "refunded_paise": BASIC_M, "failed_payments": 0}
     assert env.rp.refund_calls[0][0] == rz_id
-    assert env.rp.refund_calls[0][1]["amount"] == STARTER_M
+    assert env.rp.refund_calls[0][1]["amount"] == BASIC_M
     db.expire_all()
     org = db.get(Organization, org.id)
-    assert org.tier == "free" and org.billing_period is None
+    assert org.tier == "starter" and org.billing_period is None
     assert org.nonpayment_downgraded_at is None
     payment = db.get(Payment, order["payment_id"])
     assert payment.status == "refunded" and payment.refunded_at is not None
     [event] = _events(db, org, "refunded")
-    assert event.amount_paise == STARTER_M
+    assert event.amount_paise == BASIC_M
 
     # The refund.processed webhook that follows finds it already refunded.
-    hook = {"event": "refund.processed", "payload": {"refund": {"entity": {"payment_id": rz_id, "amount": STARTER_M}}}}
+    hook = {"event": "refund.processed", "payload": {"refund": {"entity": {"payment_id": rz_id, "amount": BASIC_M}}}}
     assert env.webhook(hook).status_code == 200
     # And a second refund is refused.
     assert env.client.post("/billing/refund").status_code == 409
@@ -536,7 +536,7 @@ def test_refund_within_the_window_refunds_in_full_and_downgrades(env, db):
 
 
 def test_refund_after_the_window_is_refused(env, db):
-    org = env.act_as(make_org(db, tier="free", period=None))
+    org = env.act_as(make_org(db, tier="starter", period=None))
     order, _, _ = _buy(env, org)
     payment = db.get(Payment, order["payment_id"])
     payment.captured_at = datetime.now(timezone.utc) - timedelta(hours=72, seconds=1)
@@ -544,11 +544,11 @@ def test_refund_after_the_window_is_refused(env, db):
     assert env.client.post("/billing/refund").status_code == 409
     assert env.rp.refund_calls == []
     db.expire_all()
-    assert db.get(Organization, org.id).tier == "starter"
+    assert db.get(Organization, org.id).tier == "basic"
 
 
 def test_refund_just_inside_the_window_is_allowed(env, db):
-    org = env.act_as(make_org(db, tier="free", period=None))
+    org = env.act_as(make_org(db, tier="starter", period=None))
     order, _, _ = _buy(env, org)
     payment = db.get(Payment, order["payment_id"])
     payment.captured_at = datetime.now(timezone.utc) - timedelta(hours=71, minutes=59)
@@ -557,17 +557,17 @@ def test_refund_just_inside_the_window_is_allowed(env, db):
 
 
 def test_refund_failure_changes_nothing(env, db):
-    org = env.act_as(make_org(db, tier="free", period=None))
+    org = env.act_as(make_org(db, tier="starter", period=None))
     order, _, _ = _buy(env, org)
     env.rp.fail_refunds = True
     assert env.client.post("/billing/refund").status_code == 502
     db.expire_all()
-    assert db.get(Organization, org.id).tier == "starter"
+    assert db.get(Organization, org.id).tier == "basic"
     assert db.get(Payment, order["payment_id"]).status == "captured"
 
 
 def test_refund_without_any_payment_is_refused(env, db):
-    env.act_as(make_org(db, tier="free", period=None))
+    env.act_as(make_org(db, tier="starter", period=None))
     resp = env.client.post("/billing/refund")
     assert resp.status_code == 409
     assert env.client.post("/billing/refund-eligibility").json() == {
@@ -579,7 +579,7 @@ def test_refund_without_any_payment_is_refused(env, db):
 
 def test_cancel_sets_cancel_at_period_end(env, db):
     org = env.act_as(make_org(db, tier="growth", period="monthly"))
-    org.pending_tier, org.pending_period = "starter", "monthly"
+    org.pending_tier, org.pending_period = "basic", "monthly"
     db.commit()
     resp = env.client.post("/billing/cancel")
     assert resp.status_code == 200
@@ -591,9 +591,9 @@ def test_cancel_sets_cancel_at_period_end(env, db):
 
 
 def test_cancel_needs_a_paid_plan_and_owner_role(env, db):
-    org = env.act_as(make_org(db, tier="free", period=None))
+    org = env.act_as(make_org(db, tier="starter", period=None))
     assert env.client.post("/billing/cancel").status_code == 400
-    org.tier, org.billing_period = "starter", "monthly"
+    org.tier, org.billing_period = "basic", "monthly"
     db.commit()
     env.act_as(org, role="viewer")
     assert env.client.post("/billing/cancel").status_code == 403
@@ -601,25 +601,25 @@ def test_cancel_needs_a_paid_plan_and_owner_role(env, db):
 
 def test_schedule_downgrade_sets_pending_fields(env, db):
     org = env.act_as(make_org(db, tier="growth", period="monthly", cancel_at_period_end=True))
-    resp = env.client.post("/billing/schedule-downgrade", json={"tier": "starter", "period": "monthly"})
+    resp = env.client.post("/billing/schedule-downgrade", json={"tier": "basic", "period": "monthly"})
     assert resp.status_code == 200
     db.expire_all()
     org = db.get(Organization, org.id)
-    assert (org.pending_tier, org.pending_period) == ("starter", "monthly")
+    assert (org.pending_tier, org.pending_period) == ("basic", "monthly")
     assert org.cancel_at_period_end is False
     assert org.tier == "growth"
 
 
 def test_schedule_downgrade_annual_to_monthly(env, db):
-    org = env.act_as(make_org(db, tier="starter", period="annual"))
+    org = env.act_as(make_org(db, tier="basic", period="annual"))
     assert env.client.post("/billing/schedule-downgrade",
-                           json={"tier": "starter", "period": "monthly"}).status_code == 200
+                           json={"tier": "basic", "period": "monthly"}).status_code == 200
 
 
 @pytest.mark.parametrize("body", [
     {"tier": "pro", "period": "monthly"},       # upgrade
     {"tier": "growth", "period": "monthly"},    # same plan
-    {"tier": "starter", "period": "annual"},    # tier and period both change
+    {"tier": "basic", "period": "annual"},    # tier and period both change
     {"tier": "enterprise", "period": "monthly"},
 ])
 def test_schedule_downgrade_rejects_anything_else(env, db, body):
@@ -628,12 +628,12 @@ def test_schedule_downgrade_rejects_anything_else(env, db, body):
 
 
 def test_stripe_orgs_cannot_cancel_through_razorpay_routes(env, db):
-    env.act_as(make_org(db, tier="starter", period="monthly", billing_provider="stripe"))
+    env.act_as(make_org(db, tier="basic", period="monthly", billing_provider="stripe"))
     assert env.client.post("/billing/cancel").status_code == 409
 
 
 def test_update_billing_details(env, db):
-    org = env.act_as(make_org(db, tier="free", period=None))
+    org = env.act_as(make_org(db, tier="starter", period=None))
     resp = env.client.put("/billing/details", json={"legal_name": " Acme Pvt Ltd ", "address": "1 Road, Pune"})
     assert resp.status_code == 200
     assert resp.json() == {"legal_name": "Acme Pvt Ltd", "address": "1 Road, Pune", "gstin": None, "billing_country": "IN"}
@@ -650,19 +650,19 @@ def test_update_billing_details(env, db):
 # --- status and banner -----------------------------------------------------
 
 def test_status_is_owner_only_and_banner_is_open_to_viewers(env, db):
-    org = env.act_as(make_org(db, tier="starter", period="monthly"), role="viewer")
+    org = env.act_as(make_org(db, tier="basic", period="monthly"), role="viewer")
     assert env.client.get("/billing/status").status_code == 403
     resp = env.client.get("/billing/banner")
     assert resp.status_code == 200
-    assert resp.json()["tier"] == "starter"
+    assert resp.json()["tier"] == "basic"
 
 
 def test_status_lists_bills_payments_and_details(env, db):
-    org = env.act_as(make_org(db, tier="free", period=None))
+    org = env.act_as(make_org(db, tier="starter", period=None))
     _buy(env, org)
     bill = make_bill(db, org)
     data = env.client.get("/billing/status").json()
-    assert data["tier"] == "starter" and data["billing_period"] == "monthly"
+    assert data["tier"] == "basic" and data["billing_period"] == "monthly"
     assert [b["id"] for b in data["open_bills"]] == [bill.id]
     assert [p["status"] for p in data["payments"]] == ["captured"]
     assert data["refund"]["eligible"] is True
@@ -673,7 +673,7 @@ def test_status_lists_bills_payments_and_details(env, db):
 # --- accept-blocking-tos gate ----------------------------------------------
 
 def test_accept_blocking_tos_is_refused_for_a_free_org(env, db):
-    org = env.act_as(make_org(db, tier="free", period=None))
+    org = env.act_as(make_org(db, tier="starter", period=None))
     assert env.client.post("/clients/me/accept-blocking-tos").status_code == 403
     db.expire_all()
     assert db.get(Organization, org.id).blocking_tos_accepted_at is None

@@ -1,18 +1,19 @@
 "use client";
 
-import { useState, Suspense } from "react";
+import { useState, useRef, useEffect, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { AuthLayout, inputStyle, labelStyle, primaryBtnStyle } from "@/components/auth/AuthLayout";
 import { Turnstile } from "@/components/auth/Turnstile";
 import { API_URL } from "@/lib/api";
 import { SITE_URL } from "@/lib/urls";
+import { track } from "@/lib/analytics";
 import { passwordStrength, passwordStrengthLabel } from "@/lib/passwordStrength";
 
-// Phase 4b: plans that can actually be checked out self-serve. Never "free"
+// Phase 4b: plans that can actually be checked out self-serve. Never "starter"
 // (that's the no-plan default, not a chosen upgrade) and never "enterprise"
 // (contact-only, no self-serve checkout exists for it).
-const PURCHASABLE_PLANS = ["starter", "growth", "pro"];
+const PURCHASABLE_PLANS = ["basic", "growth", "pro"];
 
 function RegisterForm() {
   const router = useRouter();
@@ -32,6 +33,42 @@ function RegisterForm() {
   const [error,       setError]       = useState("");
   const [loading,     setLoading]     = useState(false);
   const [registered,  setRegistered]  = useState(false);
+  // Phase 12: advice only, the server checks the code again at registration.
+  const [codeCheck, setCodeCheck] = useState<{ code: string; valid: boolean; kind: string | null } | null>(null);
+  const startedRef = useRef(false);
+
+  async function checkCode(raw: string) {
+    const code = raw.trim();
+    if (!code) return;
+    try {
+      const res = await fetch(`${API_URL}/auth/validate-code?code=${encodeURIComponent(code)}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      setCodeCheck({ code, valid: !!data.valid, kind: data.kind ?? null });
+    } catch {
+      /* the check is optional, registration validates the code itself */
+    }
+  }
+
+  useEffect(() => {
+    const prefilled = (searchParams.get("ref") ?? "").trim();
+    if (!prefilled) return;
+    let cancelled = false;
+    fetch(`${API_URL}/auth/validate-code?code=${encodeURIComponent(prefilled)}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!cancelled && data) setCodeCheck({ code: prefilled, valid: !!data.valid, kind: data.kind ?? null });
+      })
+      .catch(() => { /* the check is optional, registration validates the code itself */ });
+    return () => { cancelled = true; };
+  }, [searchParams]);
+
+  // Funnel step "registration started": the first time any field is touched.
+  function handleFormFocus() {
+    if (startedRef.current) return;
+    startedRef.current = true;
+    track("registration_started", { plan: validPlan });
+  }
 
   const strength = passwordStrength(password);
 
@@ -72,6 +109,7 @@ function RegisterForm() {
       if (validPlan) {
         try { sessionStorage.setItem("clew_plan", validPlan); } catch { /* storage unavailable, plan is skipped */ }
       }
+      track("registration_completed", { plan: validPlan, has_referral: pilotCode !== "" });
       setRegistered(true);
     } catch {
       setError("Could not connect to the server. Try again.");
@@ -99,7 +137,7 @@ function RegisterForm() {
 
   return (
     <AuthLayout title="Create your account">
-      <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+      <form onSubmit={handleSubmit} onFocusCapture={handleFormFocus} style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
         <div>
           <label htmlFor="fullName" style={labelStyle}>Full name</label>
           <input
@@ -158,8 +196,18 @@ function RegisterForm() {
           <input
             id="pilotCode" type="text" autoComplete="off"
             value={pilotCode} onChange={(e) => setPilotCode(e.target.value)}
+            onBlur={() => { void checkCode(pilotCode); }}
             style={inputStyle}
           />
+          {codeCheck && codeCheck.code === pilotCode.trim() && (
+            <p style={{ fontSize: "12px", color: codeCheck.valid ? "var(--color-text-muted)" : "#E53E3E", margin: "4px 0 0" }}>
+              {!codeCheck.valid
+                ? "This code is not valid."
+                : codeCheck.kind === "referral"
+                  ? "Code accepted. You get one month free on your second bill."
+                  : "Code accepted."}
+            </p>
+          )}
         </div>
 
         <Turnstile onToken={setCaptchaToken} />

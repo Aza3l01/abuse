@@ -30,7 +30,6 @@ from pathlib import Path
 
 import ipaddress
 
-import httpx
 import redis as redis_lib
 
 from sqlalchemy.exc import IntegrityError
@@ -54,6 +53,7 @@ for _p in [str(_REPO_ROOT), str(_ENGINE_ROOT)]:
 
 from db.models import AlertSent, IpMemory, Organization, ScanRun, Verdict
 from db.session import SessionLocal
+from api import analytics
 from api.aws import aws_session_for_org
 from api.billing_rules import effective_retention_tier
 from api.detection_config import DEFAULT_BLOCK_CONFIDENCE_THRESHOLD, effective_detection_config, endpoint_minimum
@@ -68,6 +68,7 @@ from engine.intel.abuseipdb import AbuseIpdbClient
 from engine.llm.cache import ExplanationCache
 from engine.pipeline.cluster import detect_distributed_cluster
 from engine.pipeline.run import _severity as _verdict_severity
+from workers.heartbeat import ping as ping_heartbeat
 from engine.pipeline.run import PipelineRunner, run_pipeline
 
 _FORMAT_DISPLAY_NAMES = {"apigw": "API Gateway", "alb": "ALB"}
@@ -209,8 +210,8 @@ def poll_all_clients() -> dict:
     Before this, an org whose Growth-pilot trial had ended unpaid was
     excluded here entirely (trial_ends_at in the past, billing_provider
     still pilot/null). Section 4 replaced that lockout with a revert to the
-    permanent free Starter tier (tier = "free"), which must keep scanning
-    within CALL_VOLUME_CAPS["free"] (enforced in-band by this task's own
+    permanent free Starter tier (tier = "starter"), which must keep scanning
+    within CALL_VOLUME_CAPS["starter"] (enforced in-band by this task's own
     metering, not by this dispatcher). A self-serve free-tier org never had
     a trial_ends_at at all and was never excluded either way. So there is no
     remaining trial/tier state that should skip a poll here, only s3
@@ -236,6 +237,9 @@ def poll_all_clients() -> dict:
             dispatched.append(o.id)
 
         logger.info("poll_all_clients: dispatched %d process_logs tasks", len(dispatched))
+        # Better Stack heartbeat: proves Beat fired and the dispatcher ran, so it
+        # still pings with zero configured orgs. Never fails the task.
+        ping_heartbeat("HEARTBEAT_URL")
         return {"dispatched": len(dispatched)}
     finally:
         db.close()
@@ -547,6 +551,13 @@ def process_logs(self, org_id: str) -> dict:
             org_id, total_records, len(batches), len(verdicts_written),
         )
         _mark_scan_success(db, org)
+        if total_records > 0:
+            # Phase 11: activation is the first scan that processed a record.
+            # Sent once per org (Redis NX), never fails the scan.
+            analytics.capture_org_event_once(
+                db, org_id, "org_activated", f"org_activated:{org_id}",
+                {"tier": org.tier, "records": total_records},
+            )
         return {"status": "ok", "records": total_records, "verdicts": len(verdicts_written)}
 
     except Exception as exc:
@@ -562,13 +573,6 @@ def process_logs(self, org_id: str) -> dict:
     finally:
         db.close()
         redis_conn.delete(lock_key)
-        # Item 50 Layer 2: Cronitor beat heartbeat, must never fail the scan.
-        cronitor_url = os.environ.get("CRONITOR_URL", "")
-        if cronitor_url:
-            try:
-                httpx.get(cronitor_url, timeout=3)
-            except Exception:
-                pass
 
 
 # ---------------------------------------------------------------------------

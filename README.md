@@ -350,7 +350,7 @@ signup creates one org and stays there.
 | `waf_ip_set_id` / `cloudflare_zone_id` / `cloudflare_token` / `blocking_tos_accepted_at` | | Blocking config. `cloudflare_token` is Fernet-encrypted at rest |
 | `onboarding_completed_at` / `onboarding_dismissed_at` | timestamptz | Guided onboarding state, per organization not per user |
 | `alert_email` / `alert_severity_threshold` | varchar | `all` or `high_critical_only` |
-| `tier` | varchar | `free` / `starter` / `growth` / `pro` / `enterprise` |
+| `tier` | varchar | `starter` (free) / `basic` / `growth` / `pro` / `enterprise` |
 | `trial_source` / `trial_ends_at` / `pilot_code_used` / `trial_reminder_{5,2}d_sent` | | Promo-code Growth trial only; self-serve signups get no trial |
 | `billing_provider` | varchar | `stripe` / `razorpay` / `pilot` |
 | `stripe_customer_id` / `stripe_subscription_id` | varchar | Pending live keys |
@@ -690,7 +690,7 @@ of Celery's working directory.
 | Task | Schedule | Purpose |
 |---|---|---|
 | `poll_all_clients` | every 15 min | Fans out one `process_logs` per org with S3 configured (skips soft-deleted orgs). Free-tier orgs **are** scanned: the old expired-unpaid-trial exclusion was removed when Starter became permanently free |
-| `send_trial_reminders` | daily 09:00 UTC | 5-day and 2-day trial-ending emails; reverts tier to `free` on actual expiry. Only promo-code Growth trials exist |
+| `send_trial_reminders` | daily 09:00 UTC | 5-day and 2-day trial-ending emails; reverts tier to `starter` on actual expiry. Only promo-code Growth trials exist |
 | `purge_deleted_accounts` | daily 03:00 UTC | Hard-deletes orgs/clients soft-deleted 30+ days ago, plus `processed_webhook_events` rows older than 30 days |
 | `purge_expired_data` | daily 04:00 UTC | Tiered retention purge across `alerts_sent`, `verdicts`, `scan_runs`, `ip_memory`, per `RETENTION_DAYS`. Enterprise is skipped entirely |
 | `reset_monthly_counters` | 1st of month 00:00 UTC | Zeroes `monthly_requests_processed` and clears both quota-email flags |
@@ -713,7 +713,9 @@ of Celery's working directory.
    skipping any row whose `source_key` already exists (idempotent re-processing)
 8. Advance `last_processed_key` only after a successful commit
 9. Enqueue `send_alerts` for the org's threshold, `push_block` for Growth/Pro high-confidence verdicts
-10. Ping `CRONITOR_URL` in the `finally` block if set (never fails the scan)
+10. On the first scan that processes at least one record, send the `org_activated` analytics event (once per org, Redis-deduplicated, never fails the scan)
+
+The logs heartbeat (`HEARTBEAT_URL`) is pinged by `poll_all_clients` after it dispatches, not by `process_logs`.
 
 **`send_alerts`**: Resend email, respects `alert_severity_threshold`. Deduplicates via
 `alerts_sent`. Skipped entirely for the free tier (gated on `MANUAL_BLOCK_TIERS`).
@@ -891,7 +893,7 @@ is subscription based and would need adapting to the bill-then-pay rules).
 
 **Trials & promo codes:** every signup gets a trial (7 days self-serve, 30
 days with a valid promo code from the `promo_codes` table). A daily Beat task
-reverts the tier to `free` once an unpaid trial's `trial_ends_at` passes.
+reverts the tier to `starter` once an unpaid trial's `trial_ends_at` passes.
 
 **Currency:** auto-detected from browser timezone (Kolkata/India → INR, else USD).
 Toggle available on the pricing page.
@@ -1341,21 +1343,21 @@ Takes 1–2 minutes. Any error here is almost always a missing env var.
 
 Do this once the environment above is live and reachable over HTTPS.
 
-**Layer 1 (HTTP uptime, UptimeRobot, free):**
-1. [uptimerobot.com](https://uptimerobot.com) → Add New Monitor → HTTP(s)
+**Layer 1 (HTTP uptime, Better Stack):**
+1. Better Stack → Uptime → Monitors → Create monitor → HTTP(s)
 2. URL: `https://api.clewsec.com/health`
-3. Interval: 5 minutes
+3. Check every 5 minutes or faster
 4. Add your email as an alert contact
 
-**Layer 2 (Beat task heartbeat, Cronitor, free tier):**
-1. [cronitor.io](https://cronitor.io) → Add Monitor → Heartbeat
-2. Set the expected window to 25 minutes (slightly over the 15-minute poll interval): if no ping arrives within the window, Cronitor emails you
-3. Copy the monitor's Ping URL into `CRONITOR_URL` in `/home/ubuntu/abuse/.env`
-4. `pm2 restart clew-worker` so the new env var is picked up
+**Layer 2 (Beat task heartbeats, Better Stack):**
+1. Better Stack → Uptime → Heartbeats → Create heartbeat
+2. Logs heartbeat: period 15 minutes, grace 5 to 10 minutes. Copy its URL into `HEARTBEAT_URL` in `/home/ubuntu/abuse/.env`
+3. Billing heartbeat (once there is a paying customer): period 1 day, grace 2 hours. Copy its URL into `BILLING_HEARTBEAT_URL`
+4. `pm2 restart` the Beat and worker processes so the new env vars are picked up
 
-`process_logs` already pings `CRONITOR_URL` at the end of every run (success or failure) if the variable is set, no further code changes needed. Leave `CRONITOR_URL` blank in any non-production `.env`.
+`poll_all_clients` pings `HEARTBEAT_URL` after every run, even when no org is configured. The `billing_cycle` task pings `BILLING_HEARTBEAT_URL` on a clean run and `/fail` when any org errored or the run crashed. Both are no-ops when the variable is blank, so leave them blank in any non-production `.env`.
 
-Layer 3 (Sentry exception tracking) is post-MVP, see item 46 in the project TODO.
+Exceptions: the API (`CorrelationIdMiddleware`), Celery task failures and the frontend report to PostHog error tracking when `POSTHOG_API_KEY` and `NEXT_PUBLIC_POSTHOG_KEY` are set. Sentry stays cut.
 
 ---
 
@@ -1871,8 +1873,8 @@ priced by the server from `api/tiers.py`.
    ```
    STRIPE_SECRET_KEY=sk_live_...
    STRIPE_WEBHOOK_SECRET=whsec_...
-   STRIPE_PRICE_STARTER_INR=price_...
-   STRIPE_PRICE_STARTER_USD=price_...
+   STRIPE_PRICE_BASIC_INR=price_...
+   STRIPE_PRICE_BASIC_USD=price_...
    # ... (see .env.example for full list)
    ```
 5. `pm2 restart clew-api`

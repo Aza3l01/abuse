@@ -170,7 +170,7 @@ def env(db, session_factory, monkeypatch):
         app.dependency_overrides.clear()
 
 
-def make_bill(db, org: Organization, *, tier: str = "starter", period: str = "monthly",
+def make_bill(db, org: Organization, *, tier: str = "basic", period: str = "monthly",
               amount: int = 199_900, start: date | None = None, status: str = "open",
               currency: str = "INR") -> Bill:
     """An open bill whose period covers today (IST) unless `start` says otherwise."""

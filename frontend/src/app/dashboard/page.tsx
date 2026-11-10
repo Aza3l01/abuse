@@ -354,7 +354,7 @@ export default function DashboardOverview() {
           <div style={{ display: "flex", gap: "4px" }}>
             {[7, 30].map(d => {
               // The free tier (Starter) keeps 7 days of history, so 30d is a Basic feature.
-              const locked = d === 30 && s.tier === "free";
+              const locked = d === 30 && s.tier === "starter";
               return (
                 <div
                   key={d}
@@ -388,7 +388,7 @@ export default function DashboardOverview() {
                       padding: "4px 8px", fontSize: "11px", whiteSpace: "nowrap",
                       border: "1px solid var(--color-border)", background: "var(--color-surface)", color: "var(--color-text)",
                     }}>
-                      Available in {tierDisplayName("starter")}
+                      Available in {tierDisplayName("basic")}
                     </div>
                   )}
                 </div>

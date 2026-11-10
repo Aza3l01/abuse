@@ -255,7 +255,7 @@ export function OnboardingModal() {
     ? "Saved, not yet tested"
     : "Not configured yet";
   const countryDone = !!config?.home_country;
-  const isFree = config?.tier === "free";
+  const isFree = config?.tier === "starter";
   const alertsDone = !!config?.alert_email;
   const blockingDone = !!(config?.waf_ip_set_id || config?.cloudflare_zone_id);
 

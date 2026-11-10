@@ -100,7 +100,7 @@ class VerdictDetailOut(VerdictOut):
     # tier. Sourced here (not a separate /clients/me call, which 403s for
     # viewers) so a viewer at a Pro-tier org still sees the real AI analysis
     # per item 19's spec — only the Block button is role-gated, not tier info.
-    org_tier:         str = "free"
+    org_tier:         str = "starter"
     # The actual block/unblock push happens asynchronously in
     # workers/tasks/push_blocks.py, so `blocked` can stay False even after a
     # successful POST /verdicts/{id}/block if the push itself failed (e.g. a

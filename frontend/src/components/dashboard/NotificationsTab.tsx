@@ -82,7 +82,7 @@ export function NotificationsTab({ role, alertEmail, tier }: { role: string | nu
           settings visibility, so alertEmail is never resolvable for them). */}
       {canManageAlerts && (
       <>
-      {tier === "free" && (
+      {tier === "starter" && (
         <p style={{ fontSize: "12px", color: "var(--color-text-muted)", marginBottom: "12px" }}>
           Email alerts require an active paid plan. A test send will not
           succeed, and a real threat will never trigger one either.

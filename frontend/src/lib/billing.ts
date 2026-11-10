@@ -19,6 +19,8 @@ export interface BillSummary {
   period_start: string;
   period_end: string;
   amount_paise: number;
+  /** Referral credit already taken off this bill; amount_paise is what is still owed. */
+  credit_applied_paise: number;
   currency: Currency;
   due_date: string;
   cancel_on: string;
@@ -171,10 +173,10 @@ export function displayPrice(
 }
 
 export const PURCHASABLE_TIERS: PricingTier[] = PRICING_TIERS.filter(
-  (t) => t.tier === "starter" || t.tier === "growth" || t.tier === "pro",
+  (t) => t.tier === "basic" || t.tier === "growth" || t.tier === "pro",
 );
 
-const TIER_RANK: Record<string, number> = { free: 0, starter: 1, growth: 2, pro: 3, enterprise: 4 };
+const TIER_RANK: Record<string, number> = { starter: 0, basic: 1, growth: 2, pro: 3, enterprise: 4 };
 
 export function tierRank(tier: string | null | undefined): number {
   return tier ? (TIER_RANK[tier] ?? 0) : 0;

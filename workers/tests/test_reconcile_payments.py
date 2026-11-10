@@ -54,7 +54,7 @@ def _run(monkeypatch, session_factory, remote):
 
 
 def test_a_dropped_webhook_is_reported(db, session_factory, monkeypatch):
-    org = make_org(db, tier="free", period=None)
+    org = make_org(db, tier="starter", period=None)
     # Razorpay captured the payment, the webhook never arrived and the browser
     # never called verify-payment: the local row is still "created".
     _local(db, org, "order_dropped", status="created")
@@ -72,7 +72,7 @@ def test_a_dropped_webhook_is_reported(db, session_factory, monkeypatch):
 
 
 def test_clean_books_report_nothing(db, session_factory, monkeypatch):
-    org = make_org(db, tier="free", period=None)
+    org = make_org(db, tier="starter", period=None)
     _local(db, org, "order_a", status="captured", payment_id="pay_a")
     _local(db, org, "order_b", status="refunded", payment_id="pay_b")
 
@@ -85,7 +85,7 @@ def test_clean_books_report_nothing(db, session_factory, monkeypatch):
 
 
 def test_unknown_order_amount_mismatch_and_missing_remote(db, session_factory, monkeypatch):
-    org = make_org(db, tier="free", period=None)
+    org = make_org(db, tier="starter", period=None)
     _local(db, org, "order_amount", status="captured", payment_id="pay_amount", amount=199_900)
     _local(db, org, "order_ghost", status="captured", payment_id="pay_ghost")
 
@@ -103,7 +103,7 @@ def test_unknown_order_amount_mismatch_and_missing_remote(db, session_factory, m
 
 
 def test_recent_payments_and_uncaptured_ones_are_skipped(db, session_factory, monkeypatch):
-    org = make_org(db, tier="free", period=None)
+    org = make_org(db, tier="starter", period=None)
     _local(db, org, "order_new", status="created", age_hours=0.05)
     _local(db, org, "order_auth", status="created")
 

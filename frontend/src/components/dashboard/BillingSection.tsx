@@ -303,8 +303,8 @@ export function BillingSection({
   const stripeBilled = s.billing_provider === "stripe";
   const enterprise = s.tier === "enterprise";
   const onPaidPlan = !!s.billing_period && PURCHASABLE_TIERS.some(t => t.tier === s.tier);
-  const pilot = !onPaidPlan && !stripeBilled && s.tier !== "free" && !!s.trial_ends_at;
-  const cancelled = s.tier === "free" && !!s.nonpayment_downgraded_at;
+  const pilot = !onPaidPlan && !stripeBilled && s.tier !== "starter" && !!s.trial_ends_at;
+  const cancelled = s.tier === "starter" && !!s.nonpayment_downgraded_at;
   const latestBill: BillSummary | undefined = s.open_bills[s.open_bills.length - 1];
   const currency: Currency = s.billing_country
     ? s.billing_currency
@@ -404,7 +404,7 @@ export function BillingSection({
             Growth pilot{s.trial_ends_at ? `, trial ends ${formatDate(s.trial_ends_at)}` : ""}. Paying for a plan ends the trial.
           </p>
         )}
-        {s.tier === "free" && !cancelled && (
+        {s.tier === "starter" && !cancelled && (
           <p style={{ ...mutedStyle, marginBottom: "14px" }}>
             You are on the free Starter plan. Choose a plan to unlock longer threat history, email alerts and blocking.
           </p>
@@ -508,6 +508,11 @@ export function BillingSection({
                 <p style={mutedStyle}>
                   Due {formatDate(b.due_date)}. Your plan is cancelled on {formatDate(b.cancel_on)} if it is not paid.
                 </p>
+                {b.credit_applied_paise > 0 && (
+                  <p style={mutedStyle}>
+                    Referral credit applied: <span style={monoStyle}>{formatMoney(b.credit_applied_paise, b.currency)}</span>
+                  </p>
+                )}
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: "14px" }}>
                 <span style={{ ...monoStyle, fontSize: "15px" }}>{formatMoney(b.amount_paise, b.currency)}</span>

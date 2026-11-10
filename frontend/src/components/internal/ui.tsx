@@ -147,7 +147,8 @@ export function ActionForm({
 }: {
   title: string;
   help?: string;
-  path: string;
+  /** A fixed path, or one built from the form values (an id picked in a select). */
+  path: string | ((values: Record<string, string>) => string);
   fields: FieldDef[];
   onDone?: () => void;
 }) {
@@ -168,7 +169,7 @@ export function ActionForm({
     for (const f of all) body[f.name] = f.kind === "number" ? Number(values[f.name]) : values[f.name];
     setBusy(true);
     try {
-      await staffPost(path, body);
+      await staffPost(typeof path === "function" ? path(values) : path, body);
       setResult("Done.");
       onDone?.();
     } catch (e) {

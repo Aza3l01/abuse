@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
+import { captureError } from "@/lib/analytics";
 
 export default function GlobalError({
   error,
@@ -10,7 +11,8 @@ export default function GlobalError({
   reset: () => void;
 }) {
   useEffect(() => {
-    // Log to your error tracking service here if you add one later
+    // Phase 11: PostHog error tracking (a no-op without analytics consent).
+    captureError(error);
     console.error(error);
   }, [error]);
 

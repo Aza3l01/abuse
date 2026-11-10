@@ -5,7 +5,7 @@ import { apiFetch } from "@/lib/api";
 import { PurchaseDialog } from "@/components/dashboard/PurchaseDialog";
 import { tierDisplayName } from "@/lib/pricing";
 
-const PURCHASABLE_PLANS = ["starter", "growth", "pro"];
+const PURCHASABLE_PLANS = ["basic", "growth", "pro"];
 
 interface OrgConfigForCheckout {
   role: string;
@@ -51,7 +51,7 @@ export function PlanCheckoutTrigger() {
       apiFetch(`/billing/status`).then(r => r.ok ? r.json() : null),
     ])
       .then(([c, b]: [OrgConfigForCheckout | null, { billing_country: string | null; billing_details: { gstin: string | null } } | null]) => {
-        if (!c || !b || c.role !== "owner" || c.tier !== "free") return;
+        if (!c || !b || c.role !== "owner" || c.tier !== "starter") return;
         setCtx({
           plan,
           lockedCountry: b.billing_country,

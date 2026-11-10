@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException
 
+from api import analytics
 from api.billing_rules import (
     as_utc,
     classify_change,
@@ -46,7 +47,7 @@ REFUND_WINDOW = timedelta(hours=72)
 
 _COUNTRY_RE = re.compile(r"[A-Z]{2}")
 
-_TIER_LABELS = {"starter": "Basic", "growth": "Growth", "pro": "Pro"}
+_TIER_LABELS = {"basic": "Basic", "growth": "Growth", "pro": "Pro"}
 
 
 def plan_label(tier: str, period: str) -> str:
@@ -74,6 +75,7 @@ def bill_summary(bill: Bill) -> dict:
         "period_start": bill.period_start.isoformat(),
         "period_end": bill.period_end.isoformat(),
         "amount_paise": bill.amount_paise,
+        "credit_applied_paise": bill.credit_applied_paise or 0,
         "currency": bill.currency,
         "due_date": bill.due_date.isoformat(),
         "cancel_on": bill.cancel_on.isoformat(),
@@ -200,7 +202,7 @@ def plan_for_order(
         )
 
     if purpose == "restore":
-        if org.tier != "free" or org.nonpayment_downgraded_at is None:
+        if org.tier != "starter" or org.nonpayment_downgraded_at is None:
             raise HTTPException(409, "Restore is only available after a plan was cancelled for non-payment.")
         return OrderPlan(
             restore_amount_paise(bills, tier, period, currency=currency),
@@ -221,7 +223,7 @@ def plan_for_order(
 def _plan_bill(org: Organization, bill_id: str | None, bills: list[Bill]) -> OrderPlan:
     if not bill_id:
         raise HTTPException(400, "bill_id is required to pay a bill.")
-    if org.tier == "free":
+    if org.tier == "starter":
         raise HTTPException(409, "This plan was cancelled. Use restore to pay open bills and continue.")
     bill = next((b for b in bills if b.id == bill_id), None)
     if bill is None:
@@ -343,12 +345,24 @@ def _apply_plan_purchase(db, org, payment, items: dict, now: datetime, restore: 
     org.pending_period = None
     if first:
         org.first_charged_at = now
-        confirm_first_payment(org, db)
+        confirm_first_payment(org, db, payment, now)
     if restore:
         _mark_bills_paid(db, org, items.get("bill_ids", []), payment, now)
     _event(
         db, org, "first_paid" if first and not restore else "restored",
         old_tier, tier, period, payment.amount_paise, now,
+    )
+    # Phase 11: queued on the session, sent only after the caller commits.
+    analytics.queue_org_event(
+        db, org.id, "subscription_started",
+        {
+            "tier": tier,
+            "period": period,
+            "amount": analytics.major_units(payment.amount_paise),
+            "currency": org.billing_currency,
+            "first_payment": first,
+            "restore": restore,
+        },
     )
 
 
@@ -421,6 +435,16 @@ def apply_captured_payment(
         return True
 
     items = locked.line_items or {}
+    analytics.queue_org_event(
+        db, org.id, "payment_captured",
+        {
+            "purpose": locked.purpose,
+            "tier": items.get("tier"),
+            "period": items.get("period"),
+            "amount": analytics.major_units(locked.amount_paise),
+            "currency": locked.currency,
+        },
+    )
     if locked.currency != org.billing_currency:
         logger.error(
             "billing: payment %s is in %s but org %s bills in %s, org left unchanged, "

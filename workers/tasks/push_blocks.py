@@ -13,7 +13,7 @@ Design decisions:
     succeeding is sufficient to mark the verdict blocked.
 
 Tier gate:
-  Only Growth and Pro clients trigger this task. Free/Starter clients have
+  Only Growth and Pro clients trigger this task. Starter (free) and Basic clients have
   detection + dashboard, but auto-blocking requires an upgrade.
 
 Confidence threshold:
@@ -85,8 +85,8 @@ def push_block(self, verdict_id: str, org_id: str, confidence_threshold: float |
         # AUTO_BLOCK_TIERS for the automatic pipeline path, verdicts.py checks
         # the wider MANUAL_BLOCK_TIERS for the two manual-block endpoints). A
         # gate here checking only AUTO_BLOCK_TIERS used to silently no-op
-        # every Basic/Starter manual block, since AUTO_BLOCK_TIERS excludes
-        # "starter" but MANUAL_BLOCK_TIERS includes it.
+        # every Basic manual block, since AUTO_BLOCK_TIERS excludes
+        # "basic" but MANUAL_BLOCK_TIERS includes it.
 
         # --- Blocking Subscription Agreement gate ---
         # verdicts.py's manual-block routes and checkout both already check

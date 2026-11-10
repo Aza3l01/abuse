@@ -11,7 +11,7 @@ from api.tests.billing_testkit import make_org
 from api.tiers import CALL_VOLUME_CAPS
 from workers.tests.test_phase8_gate import RECORDS, FakeReader, FakeRedis
 
-CAP = CALL_VOLUME_CAPS["free"]
+CAP = CALL_VOLUME_CAPS["starter"]
 
 
 class CountingRunner:
@@ -54,7 +54,7 @@ def run_task(db, session_factory, monkeypatch):
 
 
 def _org(db, **extra):
-    fields = {"tier": "free", "s3_bucket": "b", "log_format": "apigw", "last_processed_key": "logs/old"}
+    fields = {"tier": "starter", "s3_bucket": "b", "log_format": "apigw", "last_processed_key": "logs/old"}
     fields.update(extra)
     return make_org(db, **fields)
 
@@ -93,7 +93,7 @@ def test_enterprise_has_no_cap(db, run_task):
 
 
 def test_upgrading_lifts_the_cap(db, run_task):
-    org = _org(db, tier="starter", monthly_requests_processed=CAP)
+    org = _org(db, tier="basic", monthly_requests_processed=CAP)
     run_task(org)
     assert sum(CountingRunner.batches) == len(RECORDS)
     assert org.last_scan_status == "success"

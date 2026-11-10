@@ -20,6 +20,7 @@ import uuid
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from api import analytics
 from api.auth_utils import decode_access_token
 
 logger = logging.getLogger("clew.api")
@@ -67,13 +68,26 @@ class CorrelationIdMiddleware:
 
         try:
             await self.app(scope, receive, send_with_id)
-        except Exception:
+        except Exception as exc:
             logger.exception(
                 "unhandled error corr=%s %s %s org=%s",
                 correlation_id,
                 scope.get("method"),
                 scope.get("path"),
                 _org_id_from_scope(scope),
+            )
+            # Phase 11: error tracking. The route template (never the raw path,
+            # which can hold an id or token) and the correlation id are the only
+            # request details sent.
+            route = scope.get("route")
+            analytics.capture_exception(
+                exc,
+                {
+                    "source": "api",
+                    "method": scope.get("method"),
+                    "route": getattr(route, "path", None) or "unmatched",
+                    "correlation_id": correlation_id,
+                },
             )
             if started:
                 raise

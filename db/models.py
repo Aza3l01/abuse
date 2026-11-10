@@ -150,8 +150,8 @@ class Organization(Base):
     alert_severity_threshold   = Column(String(20), nullable=False, default="all")
 
     # Subscription tier
-    tier                        = Column(String(20), nullable=False, default="free")
-    # free | starter | growth | pro
+    tier                        = Column(String(20), nullable=False, default="starter")
+    # starter (free) | basic | growth | pro | enterprise
 
     # Item 11: trial billing — set once at registration, never recalculated
     trial_source                 = Column(String(20), nullable=True)   # self_serve | manual_outreach
@@ -161,10 +161,8 @@ class Organization(Base):
     trial_reminder_2d_sent        = Column(Boolean, nullable=False, default=False)
 
     # TODO.md priority item 5: set when this org signed up using someone
-    # else's referral code (never an admin pilot code). Drives this org's
-    # own flat "referred" discount (api/referrals.py), computed as a
-    # percentage against frontend/src/lib/pricing.ts's PRICING_TIERS at
-    # checkout time, never stored as an absolute amount.
+    # else's referral code (never an admin pilot code). Phase 12: the org's
+    # first generated bill is free and the referrer earns a credit (Credit).
     referred_by_promo_code_id     = Column(UUID(as_uuid=False), ForeignKey("promo_codes.id", ondelete="SET NULL"), nullable=True)
 
     # Billing
@@ -274,7 +272,7 @@ class OrganizationMember(Base):
 # 100 single-use launch codes, redeemed at registration (not at checkout),
 # rows never deleted, only marked redeemed via redeemed_at/redeemed_by_org_id
 # so usage can always be audited. kind="referral" is a code auto-generated
-# for a regular org (owner_org_id set, max_redemptions=5) that any other org
+# for a regular org (owner_org_id set, no redemption cap) that any other org
 # can redeem, tracked via the separate PromoCodeRedemption table below since
 # a referral code is reused by up to max_redemptions different orgs, unlike
 # an admin code's single redeemed_at/redeemed_by_org_id pair.
@@ -290,10 +288,13 @@ class PromoCode(Base):
     # redeemed_by_org_id below; referral codes use PromoCodeRedemption.
     kind                         = Column(String(20), nullable=False, default="admin")
     # Set only for kind="referral": the org this code belongs to and shares.
-    # NULL for kind="admin" (founder-owned, not tied to any one org).
-    owner_org_id                 = Column(UUID(as_uuid=False), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=True, index=True)
-    # 1 for admin codes (single-use). 5 for referral codes (TODO.md priority
-    # item 5's fixed slot cap).
+    # NULL for kind="admin" (founder-owned, not tied to any one org). Phase 12:
+    # SET NULL, not CASCADE, so purging a referrer keeps the code row and its
+    # redemptions (the referees keep their attribution). A referral code whose
+    # owner is NULL or deleted refuses new signups (api/referrals.py).
+    owner_org_id                 = Column(UUID(as_uuid=False), ForeignKey("organizations.id", ondelete="SET NULL"), nullable=True, index=True)
+    # 1 for admin codes (single-use). Phase 12: referral codes have no cap, the
+    # column is only enforced for admin codes.
     max_redemptions              = Column(Integer, nullable=False, default=1)
     # Linked Stripe coupon / Razorpay offer, applied at eventual checkout so
     # the discount still lands on the org's first invoice. Filled in by the
@@ -315,12 +316,8 @@ class PromoCode(Base):
 # redeemed a referral-kind PromoCode (an admin code's single redemption
 # still goes through PromoCode.redeemed_at/redeemed_by_org_id above, not
 # here). first_payment_confirmed_at is set only once the redeeming org's
-# first invoice is genuinely paid, never at redemption/signup time, that is
-# what makes a slot "live". A slot's liveness is always re-derived at
-# calculation time (first_payment_confirmed_at set AND the redeeming org's
-# current tier is not "free"), never a stored boolean, so a churned
-# referral's slot frees up the instant that org's tier reverts to free,
-# with no separate write needed anywhere.
+# first payment is genuinely captured, never at redemption/signup time. It is
+# the marker the referral credit ledger (Credit, api/referrals.py) keys on.
 # ---------------------------------------------------------------------------
 
 class PromoCodeRedemption(Base):
@@ -594,7 +591,11 @@ class Bill(Base):
     period                   = Column(String(10), nullable=False)   # monthly | annual
     period_start             = Column(Date, nullable=False)
     period_end               = Column(Date, nullable=False)
+    # What the customer owes: the plan price minus credit_applied_paise.
     amount_paise             = Column(Integer, nullable=False)
+    # Phase 12: referral credit applied when the bill was issued. The plan
+    # price is amount_paise + credit_applied_paise.
+    credit_applied_paise     = Column(Integer, nullable=False, default=0, server_default="0")
     currency                 = Column(String(3), nullable=False)   # INR | USD, always the org's billing_currency
     status                   = Column(String(10), nullable=False, default="open")  # open | paid | void
     issued_at                = Column(DateTime(timezone=True), nullable=False, default=_now)
@@ -606,6 +607,47 @@ class Bill(Base):
     ready_notified_at        = Column(DateTime(timezone=True), nullable=True)
     due_reminder_sent_at     = Column(DateTime(timezone=True), nullable=True)
     cancel_reminder_sent_at  = Column(DateTime(timezone=True), nullable=True)
+
+
+class Credit(Base):
+    """Phase 12 referral credit ledger. A credit only ever reduces the earning
+    org's own bills, it is never paid out. Rows are append-only apart from the
+    status moves below and the split of a partly used credit.
+
+    kind referrer_reward: earned by the referrer when the referee first pays.
+    Starts pending, vests when the referee has paid a third period for real
+    (held when the referrer vests too fast, until staff approves), then
+    available until a bill uses it.
+    kind referee_free_bill: the referee's free first bill. Written directly as
+    applied, in the same transaction that issues the bill.
+
+    status: pending | held | available | applied | revoked. amount_paise is in
+    minor units of currency. A partly used credit is split: the used part
+    becomes the applied row, the rest a new available row.
+    """
+    __tablename__ = "credits"
+
+    id              = Column(UUID(as_uuid=False), primary_key=True, default=_uuid)
+    org_id          = Column(UUID(as_uuid=False), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    kind            = Column(String(20), nullable=False)
+    status          = Column(String(10), nullable=False, default="pending", index=True)
+    amount_paise    = Column(Integer, nullable=False)
+    currency        = Column(String(3), nullable=False)
+    # The referee's plan, so the credit can be re-valued at list price in
+    # another currency (no FX rate is ever used).
+    basis_tier      = Column(String(20), nullable=True)
+    basis_period    = Column(String(10), nullable=True)
+    # The referee org behind a referrer_reward. SET NULL so a purge keeps the ledger.
+    source_org_id   = Column(UUID(as_uuid=False), ForeignKey("organizations.id", ondelete="SET NULL"), nullable=True, index=True)
+    redemption_id   = Column(UUID(as_uuid=False), ForeignKey("promo_code_redemptions.id", ondelete="SET NULL"), nullable=True)
+    earned_at       = Column(DateTime(timezone=True), nullable=False, default=_now)
+    vests_at        = Column(DateTime(timezone=True), nullable=True)
+    held_reason     = Column(String(200), nullable=True)
+    applied_at      = Column(DateTime(timezone=True), nullable=True)
+    applied_bill_id = Column(UUID(as_uuid=False), ForeignKey("bills.id", ondelete="SET NULL"), nullable=True)
+    revoked_at      = Column(DateTime(timezone=True), nullable=True)
+    revoked_reason  = Column(String(200), nullable=True)
+    created_at      = Column(DateTime(timezone=True), nullable=False, default=_now)
 
 
 class BillingEvent(Base):
@@ -696,7 +738,7 @@ class MetricsDaily(Base):
     pilots_expired_unpaid = Column(Integer, nullable=False, default=0)
 
     paying_orgs           = Column(Integer, nullable=False, default=0)
-    paying_starter        = Column(Integer, nullable=False, default=0)
+    paying_basic          = Column(Integer, nullable=False, default=0)
     paying_growth         = Column(Integer, nullable=False, default=0)
     paying_pro            = Column(Integer, nullable=False, default=0)
     mrr_minor             = Column(BigInteger, nullable=False, default=0)

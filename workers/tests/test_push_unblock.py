@@ -31,7 +31,7 @@ def _setup(monkeypatch, session_factory, remove_result=(True, None)):
 
 def test_unblock_with_no_integration_is_reported_as_no_integration(db, session_factory, monkeypatch):
     _setup(monkeypatch, session_factory)
-    org = make_org(db, tier="starter")
+    org = make_org(db, tier="basic")
     verdict = _blocked_verdict(db, org)
 
     result = push_blocks.push_unblock(verdict.id, org.id)

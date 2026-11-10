@@ -17,7 +17,7 @@ from api.tiers import plan_price
 from db.models import BillingEvent, Organization, Payment
 from workers.tasks.billing_cycle import downgrade_org
 
-STARTER_M = plan_price("INR", "starter", "monthly")
+BASIC_M = plan_price("INR", "basic", "monthly")
 NOW = datetime(2026, 11, 10, 12, 0, tzinfo=timezone.utc)
 
 
@@ -27,11 +27,11 @@ def _payment(db, org, *, captured_at=None, status="captured", rz_id=None, purpos
         org_name_snapshot=org.company_name,
         razorpay_order_id=f"order_{uuid.uuid4().hex[:12]}",
         razorpay_payment_id=rz_id or f"pay_{uuid.uuid4().hex[:12]}",
-        amount_paise=STARTER_M,
+        amount_paise=BASIC_M,
         currency="INR",
         purpose=purpose,
         status=status,
-        line_items={"tier": "starter", "period": "monthly", "description": "Basic monthly"},
+        line_items={"tier": "basic", "period": "monthly", "description": "Basic monthly"},
         tos_accepted=True,
         captured_at=captured_at,
     )
@@ -43,7 +43,7 @@ def _payment(db, org, *, captured_at=None, status="captured", rz_id=None, purpos
 # --- refund window edges ---------------------------------------------------
 
 def test_refund_window_is_strict_at_72_hours(db):
-    org = make_org(db, tier="starter")
+    org = make_org(db, tier="basic")
     first = NOW - timedelta(hours=10)
     _payment(db, org, captured_at=first)
     expires = first + timedelta(hours=72)
@@ -60,7 +60,7 @@ def test_refund_window_is_strict_at_72_hours(db):
 
 
 def test_refund_window_runs_from_the_first_payment_not_the_latest(db):
-    org = make_org(db, tier="starter")
+    org = make_org(db, tier="basic")
     first = NOW - timedelta(hours=80)
     _payment(db, org, captured_at=first)
     _payment(db, org, captured_at=NOW - timedelta(hours=1), purpose="bill")
@@ -68,7 +68,7 @@ def test_refund_window_runs_from_the_first_payment_not_the_latest(db):
 
 
 def test_refund_window_covers_every_payment_captured_inside_it(db):
-    org = make_org(db, tier="starter")
+    org = make_org(db, tier="basic")
     first = NOW - timedelta(hours=20)
     a = _payment(db, org, captured_at=first)
     b = _payment(db, org, captured_at=first + timedelta(hours=5), purpose="upgrade")
@@ -80,7 +80,7 @@ def test_refund_window_covers_every_payment_captured_inside_it(db):
 
 
 def test_refund_window_states_without_a_refundable_payment(db):
-    org = make_org(db, tier="free", period=None)
+    org = make_org(db, tier="starter", period=None)
     assert refund_window(org.id, db, now=NOW).reason == "no_payment"
     p = _payment(db, org, captured_at=NOW - timedelta(hours=1), status="refunded")
     assert refund_window(org.id, db, now=NOW).reason == "already_refunded"
@@ -93,7 +93,7 @@ def test_refund_window_states_without_a_refundable_payment(db):
 # --- apply_captured_payment ------------------------------------------------
 
 def test_apply_captured_payment_is_idempotent(db):
-    org = make_org(db, tier="free", period=None)
+    org = make_org(db, tier="starter", period=None)
     p = _payment(db, org, status="created")
     assert apply_captured_payment(p, db, razorpay_payment_id=p.razorpay_payment_id, now=NOW) is True
     db.commit()
@@ -103,20 +103,20 @@ def test_apply_captured_payment_is_idempotent(db):
 
 
 def test_apply_captured_payment_ignores_a_refunded_payment(db):
-    org = make_org(db, tier="free", period=None)
+    org = make_org(db, tier="starter", period=None)
     p = _payment(db, org, status="refunded", captured_at=NOW)
     assert apply_captured_payment(p, db, now=NOW) is False
     db.refresh(org)
-    assert org.tier == "free"
+    assert org.tier == "starter"
 
 
 def test_apply_captured_payment_for_a_deleted_org_changes_nothing(db):
-    org = make_org(db, tier="free", period=None, deleted_at=NOW)
+    org = make_org(db, tier="starter", period=None, deleted_at=NOW)
     p = _payment(db, org, status="created")
     assert apply_captured_payment(p, db, now=NOW) is True
     db.commit()
     db.refresh(org)
-    assert org.tier == "free"
+    assert org.tier == "starter"
     assert db.get(Payment, p.id).status == "captured"
 
 
@@ -132,23 +132,23 @@ def test_initial_payment_on_an_org_that_already_has_a_plan_leaves_it_unchanged(d
 # --- downgrade_org with the refund reason ----------------------------------
 
 def test_downgrade_org_refund_reason_records_the_refunded_amount(db):
-    org = make_org(db, tier="starter", period="monthly", cancel_at_period_end=True)
-    assert downgrade_org(org, db, "refund", NOW, amount_paise=STARTER_M) is True
+    org = make_org(db, tier="basic", period="monthly", cancel_at_period_end=True)
+    assert downgrade_org(org, db, "refund", NOW, amount_paise=BASIC_M) is True
     db.commit()
-    assert (org.tier, org.billing_period, org.next_billing_date) == ("free", None, None)
+    assert (org.tier, org.billing_period, org.next_billing_date) == ("starter", None, None)
     assert org.nonpayment_downgraded_at is None
-    assert org.retention_grace_tier == "starter"
+    assert org.retention_grace_tier == "basic"
     assert org.cancel_at_period_end is False
     [event] = db.query(BillingEvent).filter(BillingEvent.org_id == org.id).all()
-    assert (event.event, event.from_tier, event.to_tier, event.amount_paise) == ("refunded", "starter", "free", STARTER_M)
+    assert (event.event, event.from_tier, event.to_tier, event.amount_paise) == ("refunded", "basic", "starter", BASIC_M)
     assert event.currency == "INR"
     assert downgrade_org(org, db, "refund", NOW) is False
 
 
 def test_billing_event_currency_follows_the_org_and_is_null_without_an_amount(db):
-    usd = make_org(db, tier="starter", period="monthly", billing_country=None, billing_currency="USD")
+    usd = make_org(db, tier="basic", period="monthly", billing_country=None, billing_currency="USD")
     assert downgrade_org(usd, db, "refund", NOW, amount_paise=1900) is True
-    cancelled = make_org(db, tier="starter", period="monthly", billing_country=None, billing_currency="USD")
+    cancelled = make_org(db, tier="basic", period="monthly", billing_country=None, billing_currency="USD")
     assert downgrade_org(cancelled, db, "cancel", NOW) is True
     db.commit()
     refunded = db.query(BillingEvent).filter(BillingEvent.org_id == usd.id).one()
@@ -193,7 +193,7 @@ def postgres_factory():
 @pytest.mark.parametrize("callers", [2, 12])
 def test_concurrent_applies_credit_once(postgres_factory, callers):
     setup = postgres_factory()
-    org = make_org(setup, tier="free", period=None)
+    org = make_org(setup, tier="starter", period=None)
     payment = _payment(setup, org, status="created")
     org_id, payment_id = org.id, payment.id
     setup.close()
@@ -226,7 +226,7 @@ def test_concurrent_applies_credit_once(postgres_factory, callers):
     assert sorted(results) == [False] * (callers - 1) + [True]
     check = postgres_factory()
     try:
-        assert check.get(Organization, org_id).tier == "starter"
+        assert check.get(Organization, org_id).tier == "basic"
         assert check.query(BillingEvent).filter(BillingEvent.org_id == org_id).count() == 1
         assert check.get(Payment, payment_id).status == "captured"
     finally:
@@ -237,10 +237,10 @@ def test_a_bill_payment_and_an_upgrade_payment_applied_together_both_land(postgr
     from api.tests.conftest import make_bill
 
     setup = postgres_factory()
-    org = make_org(setup, tier="starter", period="monthly")
+    org = make_org(setup, tier="basic", period="monthly")
     bill = make_bill(setup, org)
     upgrade = _payment(setup, org, status="created", purpose="upgrade")
-    upgrade.line_items = {"tier": "growth", "period": "monthly", "from_tier": "starter", "from_period": "monthly"}
+    upgrade.line_items = {"tier": "growth", "period": "monthly", "from_tier": "basic", "from_period": "monthly"}
     pay_bill = _payment(setup, org, status="created", purpose="bill")
     pay_bill.line_items = {"bill_ids": [bill.id]}
     setup.commit()

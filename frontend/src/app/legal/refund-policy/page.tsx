@@ -37,6 +37,11 @@ export default function RefundPolicyPage() {
         immediately. A bill you did not pay is not a charge, so there is
         nothing to refund; it stays open and payable.
       </p>
+      <p style={legalPStyle}>
+        Referral credits are never paid out in cash and are never refunded.
+        If you referred another customer and that customer is refunded
+        before your credit becomes available, your credit is cancelled.
+      </p>
 
       <h2 style={legalH2Style}>4. Annual billing</h2>
       <p style={legalPStyle}>

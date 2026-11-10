@@ -43,7 +43,7 @@ export function bannerView(d: BannerData): BannerView | null {
   const noun = bills.length === 1 ? "bill" : `${bills.length} bills`;
 
   // Cancelled for non-payment with the bills still unpaid.
-  if (d.tier === "free" && d.nonpayment_downgraded_at) {
+  if (d.tier === "starter" && d.nonpayment_downgraded_at) {
     return {
       level: "alert",
       label: "Plan cancelled",
@@ -51,7 +51,7 @@ export function bannerView(d: BannerData): BannerView | null {
       action: "Restore plan",
     };
   }
-  if (d.tier === "free") return null;
+  if (d.tier === "starter") return null;
 
   const untilDue = daysFromToday(d.today_ist, first.due_date);
   const untilCancel = daysFromToday(d.today_ist, first.cancel_on);

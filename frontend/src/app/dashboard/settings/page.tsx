@@ -5,6 +5,7 @@ import { useRouter }           from "next/navigation";
 import Link                    from "next/link";
 import { apiFetch }            from "@/lib/api";
 import { SITE_URL }            from "@/lib/urls";
+import { trackS3Connected }    from "@/lib/analytics";
 import { TeamMembersSection }  from "@/components/dashboard/TeamMembers";
 import { ReferralSection }     from "@/components/dashboard/ReferralSection";
 import { GuidedOnboardingButton } from "@/components/dashboard/GuidedOnboardingButton";
@@ -114,11 +115,9 @@ function FieldRow({ label, children }: { label: string; children: React.ReactNod
 // Mirrors api/tiers.py's MANUAL_BLOCK_TIERS (item 55/69): which tiers get
 // the manual block/unblock button and therefore need the Blocking
 // Subscription Agreement accepted before checkout.
-const MANUAL_BLOCK_TIERS = ["starter", "growth", "pro", "enterprise"];
+const MANUAL_BLOCK_TIERS = ["basic", "growth", "pro", "enterprise"];
 
-// The Referrals section is hidden for now. Set to true to show it again.
-const SHOW_REFERRALS = false;
-// Mirrors api/tiers.py's AUTO_BLOCK_TIERS: Basic (starter) can push a manual
+// Mirrors api/tiers.py's AUTO_BLOCK_TIERS: Basic can push a manual
 // block, but only Growth and above get the unattended pipeline-triggered
 // block, so the WAF/Cloudflare section copy needs to say which one a given
 // tier actually gets instead of describing automatic blocking to everyone.
@@ -683,6 +682,7 @@ export default function SettingsPage() {
         return;
       }
       const updated: ClientConfig = await r.json();
+      trackS3Connected(config?.s3_status, updated);
       setConfig(updated);
       setSaved(true);
       setTimeout(() => setSaved(false), 3000);
@@ -715,6 +715,7 @@ export default function SettingsPage() {
         return;
       }
       const updated: ClientConfig = await r.json();
+      trackS3Connected(config?.s3_status, updated);
       setConfig(updated);
       if (!updated.s3_bucket) {
         setRoleTestResult({ status: "saved", message: "Role saved. Set your S3 bucket below to test the connection." });
@@ -870,19 +871,20 @@ export default function SettingsPage() {
         />
       </section>
 
-      {/* ------------------------------------------------------------------ */}
-      {/* Referrals: hidden for now. ReferralSection and its API stay in the  */}
-      {/* codebase, flip SHOW_REFERRALS to bring the section back.            */}
-      {/* ------------------------------------------------------------------ */}
-      {SHOW_REFERRALS && (
+      {/* Referrals (Phase 12): the section renders for owners only, other roles */}
+      {/* get a one-line note instead.                                          */}
       <section id="referrals" style={{ marginBottom: "40px" }}>
         <SectionTitle
           title="Referrals"
-          sub="Invite other organisations and earn a recurring discount for every one that becomes a paying customer."
+          sub="Invite other organisations. They get one month free on their second bill, and you earn a credit on your own bill once their first payment is 72 hours old with no refund."
         />
         <ReferralSection myRole={config?.role ?? null} />
+        {config?.role && config.role !== "owner" && (
+          <p style={{ fontSize: "13px", color: "var(--color-text-muted)", margin: 0 }}>
+            Only the organisation owner can see referrals.
+          </p>
+        )}
       </section>
-      )}
 
       {/* Blocking Subscription Agreement modal for the automatic-blocking
           toggle, which needs the agreement accepted before it can be switched
@@ -1040,7 +1042,7 @@ export default function SettingsPage() {
             sub="Receive an email when a high or critical threat is detected."
           />
 
-          {config?.tier === "free" && (
+          {config?.tier === "starter" && (
             <p style={{ fontSize: "12px", color: "var(--color-text-muted)", marginBottom: "16px" }}>
               Email alerts require an active paid plan. You can set these up
               now, but no email will send until you upgrade.
@@ -1240,10 +1242,10 @@ export default function SettingsPage() {
       </section>
       )}
 
-      {/* Basic (internal tier "starter") can block manually but does not get
+      {/* Basic can block manually but does not get
           the unattended pipeline-triggered block, so show what it is missing
           and where to get it instead of hiding the section. */}
-      {config && config.tier === "starter" && (
+      {config && config.tier === "basic" && (
       <section id="auto-block" style={{ marginBottom: "40px" }}>
         <SectionTitle
           title="Automatic Blocking"
