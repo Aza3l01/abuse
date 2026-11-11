@@ -19,8 +19,14 @@ their existing AWS API Gateway or ALB logs. No code changes, no proxy, no SDK.
 Clew polls S3 every 15 minutes, runs the detection engine, and surfaces findings
 in a web dashboard.
 
-**Target customers:** Seed, Series A SaaS companies and SMBs with public APIs and no
-dedicated security team.
+**Target customers:** SaaS companies and SMBs with public APIs and no dedicated
+security team.
+
+**Status (2026-11-11):** deployed and live on one EC2 host (marketing site, dashboard,
+API and internal ops panel). Customer payments are not live yet: the Razorpay account
+is not approved for live charges and there is no live webhook. See `CONTEXT.md` for the
+why behind the design and for known limitations. The open work list is `TODO.md`
+(gitignored, private).
 
 ---
 
@@ -33,8 +39,22 @@ abuse/                         <- project root (repo: "abuse", product: Clew)
 │   ├── deps.py                <- get_db(), get_current_client(), get_current_org(), require_role()
 │   ├── auth_utils.py          <- hashing, JWT, cookies, OTP, Resend email, Turnstile verification
 │   ├── limiter.py             <- shared slowapi rate limiter (Redis-backed, shared across workers)
-│   ├── tiers.py               <- shared tier constants (blocking, volume caps, retention, LLM)
+│   ├── tiers.py               <- shared tier constants (blocking, volume caps, retention, LLM, PLAN_PRICES)
 │   ├── aws.py                 <- aws_session_for_org(): cross-account sts:AssumeRole sessions
+│   ├── validation.py          <- shared input checks (422 with a plain message)
+│   ├── correlation.py         <- correlation id middleware (x-correlation-id, JSON 500 handler)
+│   ├── analytics.py           <- PostHog (EU) server-side events and errors, best effort, no-op without a key
+│   ├── detection_config.py    <- validation of the per-org detection tuning JSON (Pro and Enterprise)
+│   ├── billing_rules.py       <- pure billing date and amount rules (IST calendar, bills, refunds)
+│   ├── billing_payments.py    <- apply_captured_payment(): the one idempotent payment path
+│   ├── billing_notify.py      <- notify(): validates a billing email kind and queues the Celery task
+│   ├── billing_emails.py      <- billing emails: recipients, content, sending
+│   ├── referrals.py           <- credit-ledger referrals (earn, vest, velocity hold, revoke)
+│   ├── metrics.py             <- business metrics and the combined INR view (METRICS_INR_PER_USD)
+│   ├── staff_auth.py          <- staff login, TOTP, clew_staff cookie, require_staff, audit()
+│   ├── staff_ops.py           <- ops panel write actions (go through the billing rule functions)
+│   ├── staff_views.py         <- ops panel read models (allow-listed fields, no secrets)
+│   ├── tests/                 <- pytest suite for the API (run from the repo root)
 │   └── routes/
 │       ├── auth.py            <- register/login/MFA/sessions/password/account deletion
 │       ├── clients.py         <- GET/PATCH /clients/me (org config), blocking ToS, onboarding state
@@ -43,7 +63,8 @@ abuse/                         <- project root (repo: "abuse", product: Clew)
 │       ├── ips.py             <- GET /ips, POST /ips/{ip}/unblock
 │       ├── billing.py         <- Razorpay Orders (payments, refunds, cancel, details); Stripe code kept but unused
 │       │                         (payment rules live in api/billing_payments.py + api/billing_rules.py)
-│       ├── org.py             <- create org, invites, team members, role changes, ownership transfer
+│       ├── org.py             <- org, scanning pause, invites, team members, billing contact, ownership transfer
+│       ├── internal.py        <- staff-only ops panel API, mounted at /internal
 │       ├── settings.py        <- POST /settings/test-waf, /settings/test-cloudflare
 │       ├── newsletter.py      <- POST /newsletter/subscribe, /newsletter/confirm (Resend Audiences)
 │       └── alerts.py          <- GET /alerts (delivery log), POST /alerts/test
@@ -51,19 +72,24 @@ abuse/                         <- project root (repo: "abuse", product: Clew)
 ├── db/
 │   ├── models.py              <- all SQLAlchemy ORM models (Client, Organization, ...)
 │   ├── session.py             <- engine + SessionLocal factory
-│   └── migrations/versions/   <- 18 revisions, see `alembic history` for the current chain
+│   └── migrations/versions/   <- 31 revisions, single head a8d4f1c6b293 (check with `alembic heads`)
 │
 ├── detection/                 <- AI detection engine
-│   ├── schemas/models.py      <- LogRecord pydantic model
-│   ├── datasets/               <- CICIDS2017 eval data + GeoLite2 .mmdb files
+│   ├── schemas/models.py      <- LogRecord dataclass, FusionVerdict, ThreatType
+│   ├── datasets/               <- CICIDS2017 eval data + GeoLite2 .mmdb files (the .mmdb files are gitignored)
 │   ├── evaluate.py             <- offline eval harness (F1/precision/recall vs. CICIDS ground truth)
+│   ├── evaluation/evaluator.py <- Evaluator: precision/recall/F1, per-threat breakdown, ablation helpers
 │   └── engine/                <- engine package; `from engine.xxx` imports resolve here
 │       ├── agents/            <- 6 active detection agents + 1 passive (KnowledgeAgent)
 │       ├── coordinator/       <- MetaAgentOrchestrator (fusion + XGB)
+│       ├── llm/               <- Groq client, prompts, cache, per-org monthly budget (explanations only)
+│       ├── intel/             <- abuseipdb.py: optional live IP reputation lookup
+│       ├── tools/             <- registry.py: tool functions agents call by name during investigation
 │       ├── memory/
 │       │   ├── shared_memory.py       <- in-process STM + LTM base class
 │       │   └── product_memory.py      <- Redis-backed LTM for production
 │       ├── pipeline/run.py            <- run_pipeline(), Celery entry point
+│       ├── pipeline/cluster.py        <- Pass C cross-IP clustering (Pro and Enterprise)
 │       ├── ingestion/
 │       │   ├── s3_reader.py           <- list + download S3 log objects
 │       │   ├── apigw_parser.py        <- AWS API Gateway log parser
@@ -74,12 +100,18 @@ abuse/                         <- project root (repo: "abuse", product: Clew)
 ├── workers/
 │   ├── celery_app.py          <- Celery app instance + config
 │   ├── beat.py                <- 8-entry schedule, see the Celery Pipeline section
-│   ├── tests/                 <- test_process_logs.py (custom runner, not pytest)
+│   ├── heartbeat.py           <- Better Stack heartbeat pings (HEARTBEAT_URL, BILLING_HEARTBEAT_URL)
+│   ├── task_runs.py           <- records when each Celery task last ran (Redis), for the ops panel health page
+│   ├── tests/                 <- pytest suite for the workers (run from the repo root)
 │   └── tasks/
 │       ├── process_logs.py            <- S3 -> detect -> verdicts + ip_memory (the main task)
+│       ├── billing_cycle.py           <- daily bill engine (issue, enforce, downgrade)
+│       ├── billing_emails.py          <- Celery task that sends one billing email
+│       ├── metrics_snapshot.py        <- daily business metrics into metrics_daily
+│       ├── reconcile_payments.py      <- compares Razorpay with local payments, report only
 │       ├── send_alerts.py             <- Resend email alerts, severity-threshold gated
 │       ├── push_blocks.py             <- WAF / Cloudflare IP block tasks
-│       ├── trial_reminders.py         <- 5d/2d trial-ending emails + expired-trial tier revert
+│       ├── trial_reminders.py         <- 5d/2d pilot-ending emails + expired-pilot tier revert
 │       ├── reset_usage_counters.py    <- monthly call-volume counter reset (1st of month)
 │       ├── purge_expired_data.py      <- tiered retention purge (daily)
 │       └── purge_deleted_accounts.py  <- hard-deletes orgs/clients 30 days after soft-delete
@@ -94,6 +126,7 @@ abuse/                         <- project root (repo: "abuse", product: Clew)
 │       │   ├── layout.tsx             <- root layout, fonts, OG metadata
 │       │   ├── page.tsx               <- homepage (marketing)
 │       │   ├── pricing/page.tsx       <- standalone /pricing route
+│       │   ├── internal/              <- ops panel pages (login, orgs/[id], pilots, referrals, metrics, health, audit)
 │       │   ├── docs/page.tsx          <- public documentation (LegalLayout scroll-spy TOC)
 │       │   ├── login/, register/      <- sign in, create account (Turnstile-gated)
 │       │   ├── verify-email/          <- OTP confirmation
@@ -107,29 +140,43 @@ abuse/                         <- project root (repo: "abuse", product: Clew)
 │       │       ├── alerts/page.tsx    <- Verdicts + Notifications tabs
 │       │       ├── ips/page.tsx       <- All IPs + Blocked tabs
 │       │       ├── verdicts/[id]/     <- verdict detail (agent scores, raw logs, AI analysis)
-│       │       └── settings/page.tsx  <- S3/WAF/Cloudflare config, MFA, team, billing
+│       │       ├── billing/receipt/[id]/ <- printable payment receipt
+│       │       └── settings/page.tsx  <- S3/WAF/Cloudflare config, MFA, team, billing, scanning pause,
+│       │                                 detection tuning, referrals
 │       ├── components/
 │       │   ├── home/                  <- Hero, CostCalculator, HowItWorks, AgentsSection, Pricing
 │       │   ├── layout/                <- Navbar, Footer (LinkedIn + Maps icons, NewsletterForm)
 │       │   ├── legal/                 <- LegalLayout (scroll-spy TOC sidebar, reused by /docs)
 │       │   ├── dashboard/             <- Sidebar, StatusHeader, TeamMembers, tab components,
 │       │   │                             OnboardingModal, GuidedOnboardingButton, LogSourceWizard,
-│       │   │                             PlanCheckoutTrigger, Trial/Usage/MfaNudge banners
+│       │   │                             PlanCheckoutTrigger, PurchaseDialog, BillingSection, ReferralSection,
+│       │   │                             ScanningSection, DetectionTuningSection, WouldHaveBlockedTable,
+│       │   │                             Trial/Usage/Billing/MfaNudge banners, charts/
+│       │   ├── internal/              <- InternalShell and shared ops panel UI
 │       │   ├── auth/                  <- AuthLayout, Turnstile widget wrapper
 │       │   └── providers/             <- ThemeProvider (next-themes)
-│       ├── lib/                       <- api.ts (apiFetch w/ silent refresh), pricing.ts,
-│       │                                 onboarding.ts, razorpay.ts, passwordStrength.ts
-│       └── proxy.ts                   <- Edge auth gatekeeper (Next.js 16's middleware.ts)
+│       ├── lib/                       <- api.ts (apiFetch w/ silent refresh), staffApi.ts (ops panel),
+│       │                                 pricing.ts, billing.ts, razorpay.ts, urls.ts, analytics.ts (PostHog +
+│       │                                 consent), useDetectedCurrency.ts, onboarding.ts, awsRegions.ts,
+│       │                                 countries.ts, passwordStrength.ts, small hooks
+│       └── proxy.ts                   <- host-aware Edge gatekeeper and CSP (Next.js 16's middleware.ts)
 │
 ├── docker/
 │   ├── docker-compose.yml     <- local Postgres + Redis
-│   ├── nginx.conf             <- production Nginx config (CSP, security headers)
-│   └── ecosystem.config.js    <- PM2 process config, copy to repo root when deploying
+│   ├── nginx.conf             <- reference Nginx config, HTTP only (production nginx is edited by hand + certbot)
+│   ├── ecosystem.config.js    <- PM2 process config (the server keeps its own untracked copy at the repo root)
+│   ├── nginx.staging.conf, ecosystem.staging.config.js, staging.env.example
+│   │                             <- staging templates (no staging environment exists yet)
 │
 ├── scripts/
 │   ├── download_geoip.sh      <- fetches GeoLite2-City + GeoLite2-ASN .mmdb files
-│   └── create_staff_user.py   <- creates a staff user + TOTP for the internal ops panel (CLI only)
+│   ├── create_staff_user.py   <- creates a staff user + TOTP for the internal ops panel (CLI only)
+│   ├── backup_postgres.sh     <- pg_dump to S3 (see Backups)
+│   └── restore_postgres.sh    <- restore from an S3 dump
 │
+├── legal/                     <- mutual-nda-template.md (sales use)
+├── .github/copilot-instructions.md <- working rules for AI agents in this repo
+├── CONTEXT.md                 <- product context and design reasoning
 ├── .env.example               <- all env vars with descriptions
 ├── requirements.txt           <- Python dependencies
 └── alembic.ini                <- Alembic config
@@ -141,23 +188,26 @@ abuse/                         <- project root (repo: "abuse", product: Clew)
 
 | Layer | Technology | Notes |
 |---|---|---|
-| Backend API | FastAPI + Python 3.11 | Async, Pydantic validation, auto-docs |
+| Backend API | FastAPI + Python (3.11 in the local venv, 3.12 on the server) | Pydantic validation, auto-docs |
 | Database | PostgreSQL 16 | JSONB for agent arrays, TIMESTAMPTZ everywhere |
 | Cache / queue | Redis 7 | Celery broker, rate-limit counters, LTM state |
 | Background jobs | Celery + Celery Beat | S3 polling every 15 min, alerts, blocking |
 | Frontend | Next.js 16 (App Router) | Server components, Edge middleware |
 | Styling | Tailwind + CSS variables | No component library, custom design system |
-| Auth | httpOnly JWTs + bcrypt | Cookies unreadable by JS — no XSS token theft |
-| Email | AWS SES (via Resend) | Transactional verification + alert emails |
-| Billing | Razorpay (USD default, INR for India) | Stripe is not used; the old Stripe code is kept for a possible later provider |
-| Detection | Custom multi-agent engine | Validated on CICIDS2017, CTU-13, CSIC |
-| Blocking | AWS WAF v2 + Cloudflare | Growth/Pro tiers |
+| Auth | httpOnly JWTs + bcrypt | Cookies unreadable by JS, no XSS token theft |
+| Email | Resend | Transactional verification, alert, billing emails and the newsletter |
+| Billing | Razorpay Orders (INR for billing country India, USD otherwise) | Stripe is not used; the old Stripe code is kept for a possible later provider |
+| LLM | Groq (`openai/gpt-oss-20b`) | Writes explanations only; never decides a verdict |
+| Analytics / errors | PostHog (EU) | Consent gated; also captures API, Celery and frontend exceptions |
+| Uptime | Better Stack | Monitors and heartbeats; public status page |
+| Detection | Custom multi-agent engine | Evaluated offline on CICIDS2017 (`detection/evaluate.py`) |
+| Blocking | AWS WAF v2 + Cloudflare | Manual: Basic and above. Automatic: Growth and above |
 | Process manager | PM2 | Manages all 4 server processes |
 | Web server | Nginx | Reverse proxy + static cache |
 
 ---
 
-## Running Locally — Quick Start
+## Running Locally: Quick Start
 
 ### 1. Prerequisites
 - Docker + Docker Compose
@@ -183,7 +233,7 @@ Set `DATABASE_URL=postgresql://clew:password@localhost:5432/clew`,
 `REDIS_URL=redis://localhost:6379/0`, and the two generated secrets.
 
 Add `LOG_EMAILS=1` to print all outbound emails to terminal instead of sending
-via Resend — required for local development unless you have a Resend API key.
+via Resend, required for local development unless you have a Resend API key.
 
 Registration and forgot-password require a Cloudflare Turnstile CAPTCHA to
 pass. Set `TURNSTILE_SECRET_KEY=1x0000000000000000000000000000000AA` in
@@ -268,9 +318,11 @@ The browser calls the API same-origin at `/api/*`. In dev a Next.js rewrite
 | `clewsec.com` | 301 to `https://www.clewsec.com` |
 | `dashboard.clewsec.com` | The app at the root path (no `/dashboard` prefix), `/api/` proxied by nginx |
 | `api.clewsec.com` | FastAPI directly, for webhooks and the external API only |
+| `internal.clewsec.com` | Staff ops panel. nginx proxies only `/api/internal/` here (to FastAPI `/internal/`); `/api/internal/` returns 404 on the www and dashboard hosts and `/internal/` returns 404 on the api host |
 
-The dashboard host is the same Next.js process: `src/proxy.ts` looks at the
-Host header and rewrites dashboard-host paths to the `app/dashboard/*` folder.
+The dashboard and internal hosts are the same Next.js process: `src/proxy.ts` looks at the
+Host header (`DASHBOARD_HOST`, `INTERNAL_HOST`) and rewrites dashboard-host paths to the
+`app/dashboard/*` folder.
 
 | Variable | Where | Meaning |
 |---|---|---|
@@ -282,7 +334,15 @@ Host header and rewrites dashboard-host paths to the `app/dashboard/*` folder.
 | `NEXT_PUBLIC_SITE_URL` | Next.js build | Absolute marketing URL (links, robots, sitemap, metadata) |
 | `NEXT_PUBLIC_DASHBOARD_URL` | Next.js build | Absolute dashboard URL (marketing CTAs, redirects) |
 | `DASHBOARD_HOST` | Next.js server | Host header value that selects the dashboard (`dashboard.clewsec.com`) |
+| `INTERNAL_HOST` | Next.js server | Host header value that selects the ops panel (`internal.clewsec.com`) |
 | `API_INTERNAL_URL` | Next.js server | FastAPI address for the proxy's token refresh and the dev rewrite |
+| `NEXT_PUBLIC_COOKIE_DOMAIN` | Next.js build | `.clewsec.com` in production. Domain of the `clew_consent` cookie only (auth cookies stay host-only) |
+| `NEXT_PUBLIC_POSTHOG_KEY`, `NEXT_PUBLIC_POSTHOG_HOST` | Next.js build | PostHog project key and host (`https://eu.i.posthog.com`). Blank key means no analytics |
+| `POSTHOG_API_KEY`, `POSTHOG_HOST` | backend `.env` | Server-side PostHog. Blank key makes every analytics call a no-op |
+| `HEARTBEAT_URL`, `BILLING_HEARTBEAT_URL` | backend `.env` | Better Stack heartbeat URLs pinged by `poll_all_clients` and `billing_cycle`. Blank means no ping |
+| `METRICS_INR_PER_USD` | backend `.env` | Fixed reporting rate (INR per 1 USD) for the ops panel's combined metrics. Read by `api/metrics.py` and `workers/tasks/metrics_snapshot.py`. Currently missing from `.env.example`, see `TODO.md` Part 1 |
+
+Any `NEXT_PUBLIC_*` value is baked in at `npm run build`; change it, then rebuild.
 
 ---
 
@@ -345,18 +405,27 @@ signup creates one org and stays there.
 | `s3_status` / `s3_status_message` | varchar / text | Set on log-format auto-detect mismatch |
 | `calibration_status` | varchar | `running` / `done` / `failed`, first-connection LTM warmup |
 | `last_scan_started_at` / `last_scan_completed_at` / `last_scan_status` / `last_scan_error` | timestamptz / timestamptz / varchar / text | `started_at` also powers the stuck-`in_progress` self-heal sweep |
+| `scanning_paused_at` / `scanning_paused_by` / `scanning_resumed_at` | timestamptz / UUID (clients.id) / timestamptz | Team scanning pause. While `scanning_paused_at` is set, polling skips the org; manual block and unblock and the retention purge still run |
 | `home_country` | varchar(2) | Feeds `GeoIPAgent`'s off-country baseline |
 | `aws_role_arn` / `aws_external_id` | varchar | Cross-account `sts:AssumeRole` config. `external_id` is server-generated, read-only, never customer-chosen |
 | `waf_ip_set_id` / `cloudflare_zone_id` / `cloudflare_token` / `blocking_tos_accepted_at` | | Blocking config. `cloudflare_token` is Fernet-encrypted at rest |
+| `auto_block_enabled` / `auto_block_dry_run` | bool | Automatic blocking opt-in (cannot be turned on until `blocking_tos_accepted_at` is set; Growth and above). Dry run records `verdicts.would_have_blocked_at` and blocks nothing |
+| `detection_config` | JSON | Per-org detection tuning (thresholds, per-agent and per-endpoint minimums), Pro and Enterprise only. Validated by `api/detection_config.py` |
 | `onboarding_completed_at` / `onboarding_dismissed_at` | timestamptz | Guided onboarding state, per organization not per user |
 | `alert_email` / `alert_severity_threshold` | varchar | `all` or `high_critical_only` |
 | `tier` | varchar | `starter` (free) / `basic` / `growth` / `pro` / `enterprise` |
-| `trial_source` / `trial_ends_at` / `pilot_code_used` / `trial_reminder_{5,2}d_sent` | | Promo-code Growth trial only; self-serve signups get no trial |
+| `trial_source` / `trial_ends_at` / `pilot_code_used` / `trial_reminder_{5,2}d_sent` | | Pilot (promo-code Growth, 30 days) state only; self-serve signups get no trial |
+| `referred_by_promo_code_id` / `signup_source` / `signup_source_detail` | | Referral attribution and the optional "how did you hear about us" answer |
 | `billing_provider` | varchar | `stripe` / `razorpay` / `pilot` |
-| `stripe_customer_id` / `stripe_subscription_id` | varchar | Pending live keys |
-| `razorpay_customer_id` / `razorpay_subscription_id` / `next_billing_date` / `first_charged_at` | | Billing state. `razorpay_subscription_id` and `razorpay_customer_id` are legacy columns, unused since Phase 4 (Orders have no subscription), kept so no migration is needed |
-| `gstin` | varchar | Optional, India only |
-| `monthly_requests_processed` / `monthly_requests_reset_at` | int / timestamptz | Live call-volume metering, enforced against `CALL_VOLUME_CAPS` |
+| `stripe_customer_id` / `stripe_subscription_id` | varchar | Unused (Stripe is not live) |
+| `tier_expires_at` / `pilot_tier` / `payment_method_display` | | Tier expiry and pilot tier markers, and the payment method label (see the comments in `db/models.py`) |
+| `billing_period` / `next_billing_date` / `first_charged_at` | | `monthly` or `annual`; the next bill date; the first payment time (also the 72 hour refund window anchor) |
+| `cancel_at_period_end` / `pending_tier` / `pending_period` | | A scheduled cancel or downgrade, applied at the next bill |
+| `nonpayment_downgraded_at` / `retention_grace_tier` / `retention_grace_until` | | Set when an unpaid bill downgrades the org; the old tier's retention is kept for 30 days |
+| `billing_emails_mode` / `billing_reminders_enabled` | | Who gets billing emails (owners, selected members, all) and whether routine reminders are on |
+| `billing_legal_name` / `billing_address` / `billing_country` / `gstin` | | Billing details printed on the receipt. `gstin` is optional, India only |
+| `billing_currency` | varchar(3) | `INR` or `USD` (default `USD`); locked when the first payment is captured |
+| `monthly_requests_processed` / `monthly_llm_calls` / `monthly_requests_reset_at` | int / int / timestamptz | Live call-volume metering (`CALL_VOLUME_CAPS`) and the per-org LLM explanation count (`LLM_CALL_CAPS`) |
 | `quota_warning_sent_at` / `quota_exceeded_sent_at` | timestamptz | 80% and 100% soft-limit email idempotency, cleared monthly |
 | `deleted_at` | timestamptz | Owner-deletes-account cascades here |
 
@@ -364,7 +433,23 @@ signup creates one org and stays there.
 
 **`org_invites`**: single-use directed invite tokens: `invited_email`, `role`, `token_hash`, `expires_at`, `accepted_at`
 
-**`promo_codes`**: launch codes: `code` (unique), linked Stripe coupon / Razorpay offer ID (nullable, filled in later), `redeemed_at`, `redeemed_by_org_id`. A redeemed code grants a 30-day **Growth** trial.
+**`promo_codes`**: `code` (unique), `kind` (`admin` pilot code or `referral`), `owner_org_id` (referral owner), `max_redemptions` (1 for admin codes), nullable provider coupon ids, `redeemed_at`, `redeemed_by_org_id`. A redeemed admin code grants a 30-day **Growth** pilot.
+
+**`promo_code_redemptions`**: one row per org that redeemed a code (unique per org): `promo_code_id`, `redeemed_by_org_id`, `redeemed_at`, `first_payment_confirmed_at`. Referral credits point at it.
+
+**`payments`**: one Razorpay order and, once captured, its payment. `razorpay_order_id` and `razorpay_payment_id` are unique; `amount_paise` is in minor units of `currency` (`INR` or `USD`); `purpose` is `initial`, `upgrade`, `bill` or `restore`; `status` is `created`, `captured`, `failed` or `refunded`; `line_items` JSON says what it pays for; billing details are snapshotted for the receipt. Only `apply_captured_payment` moves a row to `captured`.
+
+**`bills`**: one bill per org per period (unique on `org_id, period_start`): `tier`, `period`, `period_start` (issue date), `period_end`, `amount_paise` (what is owed, after `credit_applied_paise`), `currency`, `status` (`open` / `paid` / `void`), `due_date` (the 20th), `cancel_on` (the 1st of the next month), `payment_id`, and three reminder idempotency timestamps.
+
+**`credits`**: the referral credit ledger (`kind` `referrer_reward` or `referee_free_bill`; `status` `pending` / `held` / `available` / `applied` / `revoked`). A credit only reduces the earning org's own bills.
+
+**`billing_events`**: append-only tier change history (`first_paid`, `upgraded`, `downgraded`, `cancelled`, `nonpayment_downgrade`, `trial_end`, `restored`, `refunded`, `account_deleted`, `payment_auto_refunded`). Churn cannot be rebuilt later, so each change writes a row in the same transaction.
+
+`payments`, `bills` and `billing_events` are financial records: they survive account deletion (`org_id` becomes NULL; `org_name_snapshot` keeps who it was).
+
+**`staff_users`** / **`staff_audit_log`**: the ops panel's own accounts (`email`, bcrypt `password_hash`, Fernet-encrypted `totp_secret`, `totp_active`, `last_totp_step`, `is_active`) and an append-only log of every staff action (`action`, `org_id`, `reason`, `details`, `ip`). Separate from `clients` on purpose: a customer account can never become staff.
+
+**`metrics_daily`**: one row per `(snapshot_date, currency)` written by `metrics_snapshot` (users, orgs, pilots, paying counts, MRR, ARR, churn, refunds, overdue bills, and the `inr_per_usd` rate used that day).
 
 **`processed_webhook_events`**: webhook replay guard: `provider` (`stripe` / `razorpay`) + `event_id`, unique on the pair. Inserted before dispatch; a unique violation returns 200 without re-running side effects. Rows older than 30 days are cleared by the daily purge task.
 
@@ -375,9 +460,9 @@ signup creates one org and stays there.
 **`verdicts`**: one row per detection result, unique on `(org_id, source_key)` for dedup
 
 Key columns: `ip`, `method`, `endpoint`, `threat_type`, `severity` (critical/high/medium/low),
-`confidence` (0–1), `agents_triggered` (JSON, only the triggered subset), `agent_scores`
+`confidence` (0-1), `agents_triggered` (JSON, only the triggered subset), `agent_scores`
 (JSON, full 6-agent score breakdown incl. non-triggered), `sample_logs` (JSON, up to 5 raw
-lines), `explanation`, `blocked`, `cost_prevented`, `source_key` (dedup key).
+lines), `explanation`, `blocked`, `would_have_blocked_at` (set by auto-block dry run), `cost_prevented`, `source_key` (dedup key).
 
 **`ip_memory`**: one row per `(org_id, ip)` pair (LTM profile)
 
@@ -421,6 +506,7 @@ require an active org context (`get_current_org`, re-derived from a live
 
 ```
 POST /auth/register                 Create account + org (Turnstile-gated, promo code optional)
+GET  /auth/validate-code            Check a promo, pilot or referral code before registering
 POST /auth/verify-email             Submit OTP from email
 POST /auth/resend-verification      Re-send OTP
 POST /auth/login                    Credentials login, sets cookies, or returns mfa_required
@@ -459,12 +545,15 @@ POST  /clients/me/onboarding/complete    Mark guided onboarding finished (owner/
 ### Team & invites: `api/routes/org.py`
 ```
 POST   /org                                   Create/join an org (general-purpose)
+POST   /org/scanning/pause                    Pause scanning for the org (owner/admin)
+POST   /org/scanning/resume                   Resume scanning (owner/admin)
 POST   /org/invite                            Invite a member (owner/admin, admin capped at viewer role)
 GET    /org/invites                           List pending invites
 POST   /org/invites/{id}/resend               Resend an invite email
 DELETE /org/invites/{id}                      Cancel a pending invite
 GET    /org/members                           List team members
 PATCH  /org/members/{id}                      Change a member's role (owner only)
+PATCH  /org/members/{id}/billing-contact      Mark a member as a billing email recipient (owner only)
 DELETE /org/members/{id}                      Remove a member (owner only)
 POST   /org/members/{id}/transfer-ownership   Hand off ownership (target must already be admin)
 GET    /org/invite/{token}                    Public: look up an invite by token
@@ -475,6 +564,7 @@ POST   /org/invite/{token}/accept             Public: accept (new account or exi
 ```
 GET  /verdicts                    Paginated, multi-select severity + threat-type + date-range filters
 GET  /verdicts/threat-types       Distinct threat_type values for the filter dropdown
+GET  /verdicts/would-have-blocked Verdicts the auto-block dry run would have blocked
 GET  /verdicts/{id}               Full detail: agent scores, sample logs, org tier, ip_memory context
 POST /verdicts/manual-block       Manually block an IP (creates a "manual" verdict + ip_memory row)
 POST /verdicts/{id}/block         Enqueue WAF/Cloudflare block (paid tiers, owner/admin, ToS-gated)
@@ -515,24 +605,68 @@ POST /newsletter/confirm     Public, confirms the opt-in token and adds the cont
 ```
 GET  /billing/status                          Plan, period, open bills, payment history, billing details, refund eligibility (owner)
 GET  /billing/banner                          Small subset for the dashboard banner (any member, viewers included)
+GET  /billing/referral-status                 The org's referral code and credit balance
+GET  /billing/payments/{payment_id}           One payment, for the receipt page
+GET  /billing/notifications                   Billing email recipients and reminder settings
+PUT  /billing/notifications                   Update them
 PUT  /billing/details                         Billing legal name, address, GSTIN (owner)
-POST /billing/checkout                        Stripe Checkout Session (pending live keys)
-POST /billing/portal                          Stripe Customer Portal Session
-POST /billing/webhook                         Stripe webhook (verify signature + update tier)
+POST /billing/quote                           Price a purchase without creating an order
+POST /billing/checkout                        Stripe Checkout Session (unused, Stripe is not live)
+POST /billing/portal                          Stripe Customer Portal Session (unused)
+POST /billing/webhook                         Stripe webhook (unused)
 
 POST /billing/razorpay/create-order           Price a purchase server-side (initial, upgrade, bill, restore), create a Payment + Razorpay order
 POST /billing/razorpay/verify-payment         Check the checkout.js HMAC, fetch the payment, apply it (idempotent)
 POST /billing/razorpay/webhook                payment.captured / payment.failed / refund.processed (HMAC verified)
 
 POST /billing/refund-eligibility              72h window from the first captured payment
-POST /billing/refund                          Full refund of the payments inside that window, org drops to free
+POST /billing/refund                          Full refund of the payments inside that window, org drops to Starter
 POST /billing/schedule-downgrade              Lower tier or annual to monthly, applied at the next bill
 POST /billing/cancel                          Cancel at the end of the paid period
+POST /billing/undo-pending                    Withdraw a scheduled cancel or downgrade (owner)
 ```
+
+### Internal ops panel: `api/routes/internal.py`
+
+Mounted at `/internal`, staff only. In production it is reachable only on
+`internal.clewsec.com` as `/api/internal/*` (nginx 404s it on every other host).
+Every route except login depends on `require_staff`, which reads only the
+`clew_staff` cookie. Write actions take a `reason` (up to 500 characters) and are recorded in `staff_audit_log`.
+```
+POST /internal/auth/login                     Email + password + TOTP, sets clew_staff (60 minute session)
+POST /internal/auth/logout
+GET  /internal/auth/me
+
+GET  /internal/orgs/search                    Find an org by email, org name or exact org id
+GET  /internal/orgs/{org_id}                  Account metadata only: no raw IPs, endpoints or log lines
+POST /internal/orgs/{org_id}/raw              Read raw customer data (needs a reason, audited)
+POST /internal/orgs/{org_id}/bills/mark-paid  Record a manual payment through apply_captured_payment
+POST /internal/orgs/{org_id}/bills/void       Void an open bill
+POST /internal/orgs/{org_id}/extend-period    Extend a paid period
+POST /internal/orgs/{org_id}/pause-downgrade  Pause a pending non-payment downgrade
+POST /internal/orgs/{org_id}/reinstate        Reinstate a downgraded org
+POST /internal/orgs/{org_id}/extend-pilot     Extend a pilot
+POST /internal/pilot-codes                    Generate 1 to 50 single-use pilot codes
+
+GET  /internal/referrals                      Referral credits
+POST /internal/referrals/credits/{id}/approve Release a held credit
+POST /internal/referrals/credits/{id}/revoke  Revoke a credit
+
+GET  /internal/health                         System health, including when each Celery task last ran
+GET  /internal/metrics                        Business metrics (per currency and combined INR)
+GET  /internal/metrics/export.csv             CSV export
+GET  /internal/audit                          The staff audit log
+```
+
+Staff sign in with a password plus a TOTP code. The signing key is derived from
+`JWT_SECRET` and the token type is `staff_access`, so a customer token never works here
+and a staff token never works on a customer route. Login is rate limited per IP and per
+email plus IP, and fails closed if Redis is down. Staff users are created only with
+`scripts/create_staff_user.py`.
 
 ---
 
-## Authentication — How It Works
+## Authentication: How It Works
 
 **Two-token system, both httpOnly cookies:**
 
@@ -579,6 +713,9 @@ attempt is rejected. See "Running Locally" for the dummy test keys.
 (`clew:login_fail:{sha256(email)}` in Redis), separate from the general
 per-request rate limiter. Lockout emails are only sent for accounts that
 actually exist, so lockout timing can't be used to enumerate valid emails.
+If Redis is unreachable these checks fail closed (the request is refused), never open.
+Staff logins use their own counters keyed on email plus source IP, so someone guessing
+from another address cannot lock the real staff user out.
 
 **Account deletion (item 40, DPDP):** `POST /auth/delete-account` soft-deletes
 the `Client` (email anonymized immediately, login blocked on the very next
@@ -617,7 +754,7 @@ Docs (including older versions of this one) sometimes say "seven agents":
    rule-based weighted vote during cold-start)
 3. Conflict resolution rules
 
-Output: `FusionVerdict`, 0–1 confidence score + explanation + per-agent findings
+Output: `FusionVerdict`, 0 to 1 confidence score + explanation + per-agent findings
 (all 6, including ones that didn't fire, each with a placeholder finding).
 
 ### Severity bands
@@ -689,8 +826,8 @@ of Celery's working directory.
 
 | Task | Schedule | Purpose |
 |---|---|---|
-| `poll_all_clients` | every 15 min | Fans out one `process_logs` per org with S3 configured (skips soft-deleted orgs). Free-tier orgs **are** scanned: the old expired-unpaid-trial exclusion was removed when Starter became permanently free |
-| `send_trial_reminders` | daily 09:00 UTC | 5-day and 2-day trial-ending emails; reverts tier to `starter` on actual expiry. Only promo-code Growth trials exist |
+| `poll_all_clients` | every 15 min | Fans out one `process_logs` per org with S3 configured (skips soft-deleted and paused orgs). Free-tier orgs **are** scanned: the old expired-unpaid-trial exclusion was removed when Starter became permanently free |
+| `send_trial_reminders` | daily 09:00 UTC | 5-day and 2-day pilot-ending emails; reverts tier to `starter` on actual expiry. Only promo-code Growth pilots exist |
 | `purge_deleted_accounts` | daily 03:00 UTC | Hard-deletes orgs/clients soft-deleted 30+ days ago, plus `processed_webhook_events` rows older than 30 days |
 | `purge_expired_data` | daily 04:00 UTC | Tiered retention purge across `alerts_sent`, `verdicts`, `scan_runs`, `ip_memory`, per `RETENTION_DAYS`. Enterprise is skipped entirely |
 | `reset_monthly_counters` | 1st of month 00:00 UTC | Zeroes `monthly_requests_processed` and clears both quota-email flags |
@@ -711,12 +848,15 @@ of Celery's working directory.
 5. **Pass A**: mixed-IP window batches through the full engine, writes LTM
 6. **Pass B**: a restricted per-IP focus pass for IPs with ≥20 requests this
    poll (catches attackers whose traffic would otherwise be diluted across
-   window boundaries); reads LTM, never writes it
+   window boundaries); reads LTM, never writes it.
+   **Pass C** (Pro and Enterprise only): cross-IP clustering of low-volume IPs, alert only
 7. Persist `verdicts` (or a `scan_runs` row if the batch was clean) + upsert `ip_memory`,
    skipping any row whose `source_key` already exists (idempotent re-processing)
 8. Advance `last_processed_key` only after a successful commit
-9. Enqueue `send_alerts` for the org's threshold, `push_block` for Growth/Pro high-confidence verdicts
+9. Enqueue `send_alerts` for the org's threshold. Enqueue `push_block` only for an org that is on an `AUTO_BLOCK_TIERS` tier, has an integration configured, has accepted the Blocking Agreement and has `auto_block_enabled` on. With `auto_block_dry_run` on, record `would_have_blocked_at` instead of blocking
 10. On the first scan that processes at least one record, send the `org_activated` analytics event (once per org, Redis-deduplicated, never fails the scan)
+
+A paused org (`scanning_paused_at` set) returns before any of this runs.
 
 The logs heartbeat (`HEARTBEAT_URL`) is pinged by `poll_all_clients` after it dispatches, not by `process_logs`.
 
@@ -730,10 +870,9 @@ the two callers rather than inside the task, because they use different tier set
 `process_logs.py` checks `AUTO_BLOCK_TIERS` for the unattended path, `verdicts.py` checks
 the wider `MANUAL_BLOCK_TIERS` for the dashboard buttons.
 
-> **Known gap:** the automatic path does **not** currently check
-> `blocking_tos_accepted_at`, and there is no per-org on/off switch for automatic
-> blocking. Only the two manual routes enforce the agreement. See TODO2.md,
-> "Blocking", for the fix.
+The automatic path requires both `blocking_tos_accepted_at` and the org's own
+`auto_block_enabled` opt-in. `PATCH /clients/me` refuses to switch `auto_block_enabled`
+on until the agreement has been accepted. Both manual routes enforce the agreement too.
 
 ---
 
@@ -742,7 +881,7 @@ the wider `MANUAL_BLOCK_TIERS` for the dashboard buttons.
 ### Design system
 
 No component library. All styling via CSS variables in `globals.css`. The
-aesthetic is monospace and terminal-inspired — no rounded corners, no gradients.
+aesthetic is monospace and terminal-inspired, no rounded corners, no gradients.
 The full design system is documented in `DESIGN_SYSTEM.md`. Always read that
 before touching any CSS.
 
@@ -754,9 +893,9 @@ Key variables:
 --color-text       /* primary text */
 --color-text-muted /* secondary text */
 --color-critical / --color-high / --color-medium / --color-low
---font-brand       /* Courier Prime — used for "Clew" wordmark only */
---font-sans        /* Geist — body text */
---font-mono        /* Geist Mono — code + data */
+--font-brand       /* Courier Prime, used for "Clew" wordmark only */
+--font-sans        /* Geist, body text */
+--font-mono        /* Geist Mono, code + data */
 ```
 
 ### Pages
@@ -778,7 +917,13 @@ Key variables:
 | `/dashboard/alerts` | Client | "Verdicts" + "Notifications" tabs (delivery log, test-alert button) |
 | `/dashboard/ips` | Client | "All IPs" + "Blocked" tabs, manual block form |
 | `/dashboard/verdicts/[id]` | Client | Agent-score table, raw log sample, AI analysis (tier-gated), block/unblock |
-| `/dashboard/settings` | Client | AWS access (IAM role), WAF/Cloudflare, MFA, team, billing, change password, delete account |
+| `/dashboard/settings` | Client | AWS access (IAM role), WAF/Cloudflare, auto-block and dry run, detection tuning (Pro+), MFA, team, scanning pause, billing and checkout, referrals, change password, delete account |
+| `/dashboard/billing/receipt/[id]` | Client | Printable payment receipt (also served as `/billing/receipt/[id]` on the dashboard host) |
+
+On the dashboard host the `/dashboard` prefix is dropped (`dashboard.clewsec.com/alerts`),
+and the old prefixed URLs get a 308. The ops panel pages live under `app/internal/*` and are
+reachable only on the internal host (`/login`, `/`, `/orgs/[id]`, `/pilots`, `/referrals`,
+`/metrics`, `/health`, `/audit`).
 
 Guided onboarding is a modal (`OnboardingModal.tsx`) that auto-opens on first
 dashboard load for owners and admins, is dismissible, and is re-openable from
@@ -791,10 +936,16 @@ cannot call `/clients/me`) still render correctly.
 
 This is Next.js 16's renamed `middleware.ts`, same edge-middleware mechanism,
 new filename. Runs at the Edge (Web Crypto API, no Node.js) on every request
-before React:
-- `/dashboard/*`: verify `access_token` JWT with `jose`. If expired, call
-  `POST /auth/refresh` silently. If refresh fails, redirect to `/login?next=<path>`.
-- Auth pages: if already authenticated, redirect to `/dashboard`.
+before React, and is host-aware:
+- **Every response** gets a Content-Security-Policy with a fresh per-request nonce (the internal
+  host gets a strict variant with no third party at all).
+- **Marketing host:** auth pages and `/accept-invite` redirect to the dashboard host; `/internal`
+  returns 404.
+- **Dashboard host:** verify the `access_token` JWT with `jose`. If expired, call
+  `POST /auth/refresh` silently. If refresh fails, redirect to `/login?next=<path>`. Authenticated
+  users on an auth page go to the app. Paths are rewritten to `app/dashboard/*`.
+- **Internal host:** verify the `clew_staff` token (signed with a key derived from `JWT_SECRET`,
+  type `staff_access`); otherwise redirect to `/login`. FastAPI re-checks every call.
 
 ### Data fetching pattern
 
@@ -818,7 +969,7 @@ delete the old `.clewsec.com` cookies during the transition.
 
 Two separate tier gates, defined in `api/tiers.py`:
 
-- `MANUAL_BLOCK_TIERS` (`starter`, `growth`, `pro`, `enterprise`): the dashboard
+- `MANUAL_BLOCK_TIERS` (`basic`, `growth`, `pro`, `enterprise`): the dashboard
   block button. Basic and up can block an IP by hand.
 - `AUTO_BLOCK_TIERS` (`growth`, `pro`, `enterprise`): the unattended,
   pipeline-triggered block. Basic does **not** get this.
@@ -847,17 +998,31 @@ Both can be configured simultaneously, high-confidence threats are blocked on
 all configured integrations, and each tracks its own `*_blocked` / `*_block_error`
 state independently in `ip_memory` (one can fail while the other succeeds).
 
-> **Known gap:** the automatic path does not check `blocking_tos_accepted_at`,
-> and there is no per-org toggle to turn automatic blocking on or off. See
-> TODO2.md, "Blocking".
+> **Automatic blocking is opt-in.** It needs an eligible tier, the accepted
+> agreement, a configured integration and the org's own `auto_block_enabled` switch.
+> A downgrade switches it off but leaves existing blocks in place and removable.
 
 ---
 
 ## Billing
 
-Razorpay is the only live provider. Orgs are billed in USD by default and in
-INR when the billing country is India. The Stripe code is kept but unused (it
-is subscription based and would need adapting to the bill-then-pay rules).
+Razorpay is the only payment provider in use, but it is **not live yet** (see "What Is
+Not Yet Active"). Orgs are billed in INR when the billing country is India and in USD
+otherwise; the currency locks when the first payment is captured. The Stripe code is kept
+but unused (it is subscription based and would need adapting to the bill-then-pay rules).
+
+**The rules in one place** (`api/billing_rules.py`; calendar dates are evaluated in IST):
+- First purchase: pay the full plan price now, service starts at once. Paid on day 1 to 15,
+  the next bill is issued on the 1st of the next month; day 16 or later, the 1st of the month
+  after. No prorating.
+- Every later period: a bill is issued on the 1st, due the 20th, and the plan stays active
+  until the 1st of the next month. Unpaid by then: the org drops to Starter, the bill stays
+  open, and a restore checkout pays all open bills plus the new period.
+- Upgrade: pay the price difference now (same period type) or the full annual price when
+  switching to annual. Downgrade and cancel take effect at the next bill.
+- Refund: full, within 72 hours of the first captured payment.
+- Emails (from `billing@email.clewsec.com`): bill ready, due in 3 days (the 17th), cancel
+  warning, plan cancelled. There is no emailed invoice; the dashboard receipt is the record.
 
 **Razorpay flow (Orders, bill then pay; no Razorpay subscriptions or Plans):**
 1. The customer picks a plan, a bill to pay, an upgrade or a restore. The
@@ -884,7 +1049,7 @@ is subscription based and would need adapting to the bill-then-pay rules).
    bills, applies scheduled downgrades, cancels at period end and downgrades
    orgs whose bill is unpaid past its cancel date.
 6. Refund: `POST /billing/refund` refunds every payment captured within 72
-   hours of the first one, in full, and drops the org to free.
+   hours of the first one, in full, and drops the org to Starter.
    `POST /billing/refund-eligibility` reports the window. `POST /billing/cancel`
    and `POST /billing/schedule-downgrade` only record intent for the next bill.
 
@@ -894,15 +1059,19 @@ is subscription based and would need adapting to the bill-then-pay rules).
 2. Stripe sends `checkout.session.completed` to `POST /billing/webhook`
 3. Webhook verifies the Stripe signature, sets `org.tier` + subscription IDs
 
-**Trials & promo codes:** every signup gets a trial (7 days self-serve, 30
-days with a valid promo code from the `promo_codes` table). A daily Beat task
-reverts the tier to `starter` once an unpaid trial's `trial_ends_at` passes.
+**Pilots & promo codes:** a self-serve signup lands on the permanent free Starter plan, with
+no trial. A valid admin pilot code from the `promo_codes` table gives 30 days of Growth
+(`trial_ends_at`). A daily Beat task reverts the tier to `starter` once an unpaid pilot
+expires. Referral codes (`REF-...`) feed the credit ledger in `api/referrals.py`: the referee's
+first bill after its first payment is covered by a free-month credit, and the referrer earns a
+credit against its own bills once the referee's payment has stood for the 72 hour refund
+window.
 
 **Currency:** auto-detected from browser timezone (Kolkata/India → INR, else USD).
 Toggle available on the pricing page.
 
-**What to do when Stripe keys arrive:** see the "Adding Stripe Later" section
-further down this file.
+**Stripe:** unused. Adding it later means adapting it to the bill-then-pay rules (the
+routes and columns exist; see "Stripe (unused, not planned)" at the end of this file).
 
 ---
 
@@ -944,15 +1113,17 @@ curl http://localhost:8000/auth/me -b cookies.txt
 ### Add a new frontend page
 
 1. Create `frontend/src/app/<route>/page.tsx`
-2. `/dashboard/*` routes are automatically protected by middleware — no extra config
+2. `/dashboard/*` routes are automatically protected by middleware, no extra config
 3. For public pages with SEO: export `metadata` from the page file (if server
    component) or a co-located `layout.tsx` (if client component)
 
-### Run the integration tests
+### Run the tests
 
 ```bash
 source .venv/bin/activate
-python -m pytest detection/engine/tests/ -v
+python -m pytest api/tests workers/tests -q          # API and worker suites (629 passed on 2026-11-11)
+python detection/engine/tests/run_tests.py          # detection engine unit tests (46/46 on 2026-11-11)
+cd frontend && npx tsc --noEmit && npm run lint     # frontend type check and lint, both silent when clean
 ```
 
 ### Inspect Redis
@@ -1009,7 +1180,7 @@ sending via Resend. Do not set this in production.
 `RESEND_API_KEY`: get from [resend.com](https://resend.com) dashboard → API Keys.
 For S3/WAF, use `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` + `AWS_DEFAULT_REGION`.
 For Razorpay billing, `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET` /
-`RAZORPAY_WEBHOOK_SECRET` (no Plan IDs are needed, see "Adding Razorpay Later").
+`RAZORPAY_WEBHOOK_SECRET` (no Plan IDs are needed, see "Going live with Razorpay").
 
 ---
 
@@ -1017,20 +1188,21 @@ For Razorpay billing, `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET` /
 
 - **Stripe billing**: not used. The code is kept and the DB columns exist, but
   the decision is to stay on Razorpay only (it handles USD and INR). Adding
-  Stripe later means adapting it to the bill-then-pay rules; see "Adding Stripe
-  Later".
+  Stripe later means adapting it to the bill-then-pay rules.
 - **Razorpay is not live yet**: the Orders integration is code complete and
-  tested against a fake client, but the live `RAZORPAY_*` env vars are blank,
-  pending bank and KYC approval. Every code path degrades to a clean 503 with
-  blank keys. Test-mode keys work from `.env.local`. Live mode also needs
-  auto-capture switched on in the Razorpay dashboard and the webhook URL
-  pointed at `/billing/razorpay/webhook`.
-- **Automatic blocking has no on/off switch and does not check the blocking
-  agreement.** Configuring a WAF IP set on Growth or above turns unattended
-  blocking on implicitly. See TODO2.md, "Blocking".
+  tested against a fake client, but the live account is not approved (KYC) and
+  there is no live webhook, so the live `RAZORPAY_*` env vars are not usable. Every code
+  path degrades to a clean 503 with blank keys. Test-mode keys work from `.env.local`. Live
+  mode also needs auto-capture switched on in the Razorpay dashboard and the webhook URL
+  pointed at `https://api.clewsec.com/billing/razorpay/webhook`. Until then no real charge,
+  refund or webhook has been seen, and the first real runs of `billing_cycle`,
+  `metrics_snapshot` and `reconcile_payments` are unverified.
+- **GST tax invoices**: not issued. Prices are "plus GST", billing details and GSTIN are
+  stored and printed on the receipt, but no tax is collected until there is a GST
+  registration.
 - **Pro's "lower detection confidence threshold" and "custom thresholds"** are
   built (Phase 8) and gated to Pro and Enterprise by `CUSTOM_THRESHOLD_TIERS`
-  in `api/tiers.py`. Settings live in `Client.detection_config`, validated by
+  in `api/tiers.py`. Settings live in `Organization.detection_config`, validated by
   `api/detection_config.py` (attack 0.40 to 0.90, default 0.60; block 0.50 to
   0.95, default 0.75; per-agent minimums; up to 20 endpoint minimums). The
   block threshold applies to the automatic path only; manual blocks keep 0.75.
@@ -1046,16 +1218,20 @@ For Razorpay billing, `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET` /
   calls after 3 consecutive failures. Offline CICIDS runs with stubbed
   reputation showed no regression (F1 0.8500 with none, 0.8502 with attackers
   flagged), so the gain is unproven until real traffic.
-- **Sentry / exception tracking, a public status page, an internal ops panel,
-  and a staging environment**: all post-MVP. None block onboarding a first real
-  client; revisit when there is an actual client or audience to justify them.
+- **A public status page and PostHog error tracking are live** (Better Stack and PostHog, see
+  `.env.example`). Sentry is not used.
+- **A staging environment**: not provisioned. The templates in `docker/` exist, but the
+  2026-11-11 release went straight to production. Test risky changes locally first.
 - **Webhook/Slack/PagerDuty alert channels and a public customer-facing API +
   API keys**: post-MVP, no customer has asked for either yet.
-- **Database backups and uptime monitoring**: the runbook exists in this file
-  but the cron job and monitors are not set up yet.
+- **Database backups**: the scripts exist (`scripts/backup_postgres.sh`,
+  `restore_postgres.sh`, see "Backups") but the cron job is not installed on the server and
+  no restore drill has been run yet.
+- **GeoIP refresh**: there is no cron. The `.mmdb` files are refreshed by hand about monthly
+  (`bash scripts/download_geoip.sh`, then restart `clew-worker`, and `clew-api`, which also reads the City file).
 
-For the full forward-looking list, see `TODO2.md`. `TODO.md` holds the build
-history and the Razorpay go-live checklist.
+For the forward-looking list, see `TODO.md` (gitignored). For design reasoning and known
+limitations, see `CONTEXT.md`.
 
 ---
 
@@ -1071,18 +1247,23 @@ When it says "on your laptop" it means a terminal on your local machine, not the
 - `https://www.clewsec.com`: Next.js marketing site (`clewsec.com` redirects here)
 - `https://dashboard.clewsec.com`: the app (same Next.js process)
 - `https://api.clewsec.com`: FastAPI backend (webhooks and external API; the browser uses `/api` on the two hosts above)
+- `https://internal.clewsec.com`: the staff ops panel (same Next.js process; only `/api/internal/` is proxied to FastAPI there)
 - Four PM2-managed background processes: `clew-api`, `clew-frontend`, `clew-worker`, `clew-beat`
 - PostgreSQL + Redis, both localhost-only
 
+This walkthrough is how production was built. Production went live on 2026-11-11, and
+the live server differs from the committed templates in a few places that are called out below
+(its own `ecosystem.config.js`, a hand-edited nginx after certbot, no cron jobs yet).
+
 ---
 
-### Phase 1 — AWS Setup
+### Phase 1: AWS Setup
 
 #### 1.1 Create an IAM user for Clew
 
 Your server needs to call WAF to block IPs. Create a dedicated machine user `clew-server`.
 
-**Step A — Create the WAF policy:**
+**Step A: Create the WAF policy:**
 1. IAM → Policies → Create policy → JSON tab → paste:
    ```json
    {
@@ -1096,7 +1277,7 @@ Your server needs to call WAF to block IPs. Create a dedicated machine user `cle
    ```
 2. Name it `ClewWAFBlockingPolicy` → Create policy
 
-**Step B — Create the user:**
+**Step B: Create the user:**
 1. IAM → Users → Create user → Username: `clew-server`
 2. Leave console access unticked (machine user, not a person)
 3. Attach policies directly → search `ClewWAFBlockingPolicy` → tick it → Create user
@@ -1104,7 +1285,7 @@ Your server needs to call WAF to block IPs. Create a dedicated machine user `cle
 **Get access keys:**
 1. Click the new user → Security credentials tab → Create access key
 2. Use case: "Application running outside AWS"
-3. Copy both values into a password manager immediately — the secret is shown once only
+3. Copy both values into a password manager immediately, the secret is shown once only
 4. These go in `.env` as `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`
 
 ---
@@ -1135,7 +1316,7 @@ closed without this, there's no way to skip it in production.
 
 ---
 
-### Phase 2 — EC2 Server
+### Phase 2: EC2 Server
 
 #### 2.1 Launch the instance
 
@@ -1162,7 +1343,7 @@ AWS Console → EC2 → Launch instances:
 #### 2.2 Elastic IP (permanent IP address)
 
 EC2 → Elastic IPs → Allocate → Actions → Associate → select `clew-production`.
-Write down the IP — it goes in every SSH command and DNS record.
+Write down the IP, it goes in every SSH command and DNS record.
 
 #### 2.3 DNS
 
@@ -1171,11 +1352,14 @@ In your registrar, add:
 | Type | Name | Value | TTL |
 |---|---|---|---|
 | A | @ | Elastic IP | 300 |
+| A | www | Elastic IP | 300 |
+| A | dashboard | Elastic IP | 300 |
 | A | api | Elastic IP | 300 |
+| A | internal | Elastic IP | 300 |
 
 ---
 
-### Phase 3 — Server Setup
+### Phase 3: Server Setup
 
 #### 3.1 SSH in
 
@@ -1226,7 +1410,7 @@ GRANT ALL PRIVILEGES ON DATABASE clew TO clew;
 EOF
 ```
 
-Use 20+ random characters for the password. Save it — it goes in `DATABASE_URL`.
+Use 20+ random characters for the password. Save it, it goes in `DATABASE_URL`.
 Postgres listens on localhost only. Never open port 5432 in your security group.
 
 #### 3.4 Lock Redis to localhost
@@ -1242,7 +1426,7 @@ sudo systemctl enable redis-server
 
 ---
 
-### Phase 4 — Deploy the Code
+### Phase 4: Deploy the Code
 
 #### 4.1 Clone the repository
 
@@ -1258,9 +1442,9 @@ cd abuse
 MAXMIND_LICENSE_KEY=YOUR_MAXMIND_LICENSE_KEY ./scripts/download_geoip.sh
 ```
 
-Expected output shows both `GeoLite2-ASN.mmdb` (12 MB) and `GeoLite2-City.mmdb` (63 MB) written to `detection/datasets/`.
+Expected output shows both `GeoLite2-ASN.mmdb` (about 9 MB) and `GeoLite2-City.mmdb` (about 49 MB) written to `detection/datasets/`. The `.mmdb` files are gitignored, so every server downloads its own.
 
-**Monthly auto-update (add after server is stable):**
+**Monthly update (manual today).** MaxMind refreshes the files monthly. There is no cron on the live server: rerun the script above by hand about once a month, then `pm2 restart clew-worker clew-api`. To automate it later:
 ```bash
 crontab -e
 # Add this line:
@@ -1295,16 +1479,21 @@ python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().
 ```
 
 Key values to fill in:
-- `DATABASE_URL` — use the password from step 3.3
-- `JWT_SECRET` — paste the openssl output
-- `TOTP_ENCRYPTION_KEY` — paste the Fernet key
+- `DATABASE_URL`: use the password from step 3.3
+- `JWT_SECRET`: paste the openssl output
+- `TOTP_ENCRYPTION_KEY`: paste the Fernet key
 - `DASHBOARD_URL=https://dashboard.clewsec.com`
 - `HOME_URL=https://www.clewsec.com`
 - `COOKIE_DOMAIN`: leave blank (host-only cookies)
 - `TURNSTILE_SECRET_KEY`: from step 1.3
-- `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` — from step 1.1
-- `RESEND_API_KEY` — from step 1.2
-- `MAXMIND_LICENSE_KEY` — your MaxMind key
+- `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`: from step 1.1
+- `RESEND_API_KEY`: from step 1.2
+- `MAXMIND_LICENSE_KEY`: your MaxMind key
+- `METRICS_INR_PER_USD`: the fixed INR per 1 USD reporting rate for the ops panel's combined metrics (not in `.env.example` at the moment, add it yourself)
+- `POSTHOG_API_KEY`, `HEARTBEAT_URL`, `BILLING_HEARTBEAT_URL`: optional, see 4.8
+- `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET` / `RAZORPAY_WEBHOOK_SECRET`: only when the Razorpay account is approved
+
+The backend `.env` is `/home/ubuntu/abuse/.env`. Never upload the repo-root `.env.local` from a laptop: `db/session.py` loads `.env` then `.env.local` with `override=True`, so it would silently override production values.
 
 #### 4.5 Run database migrations
 
@@ -1314,12 +1503,14 @@ source .venv/bin/activate
 alembic upgrade head
 ```
 
-Expected:
+Expected: one line per revision, the last one ending `-> a8d4f1c6b293` (31 revisions in total, a single head).
 ```
 INFO  [alembic.runtime.migration] Running upgrade  -> c957d12130b9, initial schema
 INFO  [alembic.runtime.migration] Running upgrade c957d12130b9 -> b4e8f2a1c953, add stripe billing columns
-INFO  [alembic.runtime.migration] Running upgrade b4e8f2a1c953 -> e3c1a7f920d4, add mfa backup codes
+...
+INFO  [alembic.runtime.migration] Running upgrade ... -> a8d4f1c6b293, ...
 ```
+Check with `alembic current` (must print `a8d4f1c6b293 (head)`) and `alembic heads` (must print exactly one head).
 
 #### 4.6 Create the frontend .env.local file
 
@@ -1329,12 +1520,18 @@ NEXT_PUBLIC_API_URL=/api
 NEXT_PUBLIC_SITE_URL=https://www.clewsec.com
 NEXT_PUBLIC_DASHBOARD_URL=https://dashboard.clewsec.com
 DASHBOARD_HOST=dashboard.clewsec.com
+INTERNAL_HOST=internal.clewsec.com
 HOME_URL=https://www.clewsec.com
 API_INTERNAL_URL=http://127.0.0.1:8000
 JWT_SECRET=PASTE_SAME_JWT_SECRET_AS_BACKEND_ENV
 NEXT_PUBLIC_TURNSTILE_SITE_KEY=PASTE_SITE_KEY_FROM_STEP_1.3
+NEXT_PUBLIC_COOKIE_DOMAIN=.clewsec.com
+NEXT_PUBLIC_POSTHOG_KEY=PASTE_POSTHOG_PROJECT_KEY_OR_LEAVE_BLANK
+NEXT_PUBLIC_POSTHOG_HOST=https://eu.i.posthog.com
 EOF
 ```
+
+`NEXT_PUBLIC_*` values are baked in at build time, so rebuild (4.7) after changing any of them.
 
 `JWT_SECRET` must be identical to the value in `/home/ubuntu/abuse/.env`.
 
@@ -1346,7 +1543,7 @@ npm install
 npm run build
 ```
 
-Takes 1–2 minutes. Any error here is almost always a missing env var.
+Takes 1 to 2 minutes. Any error here is almost always a missing env var.
 
 #### 4.8 Monitoring setup
 
@@ -1370,7 +1567,7 @@ Exceptions: the API (`CorrelationIdMiddleware`), Celery task failures and the fr
 
 ---
 
-### Phase 5 — Nginx
+### Phase 5: Nginx
 
 The committed config is `docker/nginx.conf`. Copy it rather than hand-writing a second copy:
 
@@ -1378,12 +1575,17 @@ The committed config is `docker/nginx.conf`. Copy it rather than hand-writing a 
 sudo cp /home/ubuntu/abuse/docker/nginx.conf /etc/nginx/sites-available/clew
 ```
 
-It defines four hosts: `clewsec.com` (301 to `www`), `www.clewsec.com`
+It defines five hosts: `clewsec.com` (301 to `www`), `www.clewsec.com`
 (Next.js), `dashboard.clewsec.com` (Next.js, `noindex`, `robots.txt` disallows
-all) and `api.clewsec.com` (FastAPI). `www` and `dashboard` each have a
+all), `internal.clewsec.com` (the ops panel, only `/api/internal/` is proxied, to FastAPI
+`/internal/`) and `api.clewsec.com` (FastAPI, `/internal/` blocked). `www` and `dashboard` each have a
 `location /api/` that strips the prefix and proxies to FastAPI on `:8000` with
-the forwarded headers. Keep that in nginx: a Next.js rewrite would hide the
-client IP from the rate limiter.
+the forwarded headers, and return 404 for `/api/internal/`. Keep that in nginx: a Next.js
+rewrite would hide the client IP from the rate limiter.
+
+The committed file is **HTTP only**. On a server that already has certbot's HTTPS blocks,
+never copy it over the live file (that removes HTTPS until certbot is re-run); edit
+`/etc/nginx/sites-available/clew` by hand and keep a dated backup first.
 
 ```bash
 sudo ln -s /etc/nginx/sites-available/clew /etc/nginx/sites-enabled/
@@ -1394,7 +1596,7 @@ sudo systemctl reload nginx
 
 ---
 
-### Phase 6 — HTTPS
+### Phase 6: HTTPS
 
 DNS must be pointing at your server first:
 ```bash
@@ -1402,20 +1604,24 @@ ping clewsec.com             # must show YOUR Elastic IP
 ping www.clewsec.com         # must show YOUR Elastic IP
 ping dashboard.clewsec.com   # must show YOUR Elastic IP
 ping api.clewsec.com         # must show YOUR Elastic IP
+ping internal.clewsec.com    # must show YOUR Elastic IP
 ```
 
 ```bash
-sudo certbot --nginx -d clewsec.com -d www.clewsec.com -d dashboard.clewsec.com -d api.clewsec.com
-sudo certbot renew --dry-run    # verify auto-renewal works
+sudo certbot --nginx -d clewsec.com -d www.clewsec.com -d dashboard.clewsec.com -d api.clewsec.com -d internal.clewsec.com
+# Adding a name to an existing certificate: rerun the same command with every name and --expand
+sudo certbot renew --dry-run    # verify auto-renewal works (run it on its own, never with --nginx)
 ```
+
+On the live server the certificate lineage is `clewsec.com` with these five names.
 
 ---
 
-### Phase 7 — PM2
+### Phase 7: PM2
 
-#### 7.1 Copy the committed ecosystem.config.js
+#### 7.1 The ecosystem.config.js
 
-The process config is already committed at `docker/ecosystem.config.js`, copy it to the repo root on the server rather than hand-writing a second, divergent copy:
+The template is committed at `docker/ecosystem.config.js`. Copy it to the repo root on the server and treat that copy as **server-owned**: it is untracked there, and the live one runs `clew-api` with `--workers 1` where the template has 2. `git pull` never touches it.
 
 ```bash
 cp /home/ubuntu/abuse/docker/ecosystem.config.js /home/ubuntu/abuse/ecosystem.config.js
@@ -1496,7 +1702,7 @@ pm2 logs clew-worker --lines 50
 
 ---
 
-### Phase 8 — Firewall
+### Phase 8: Firewall
 
 ```bash
 sudo ufw default deny incoming
@@ -1511,7 +1717,7 @@ Do NOT open 5432 (Postgres) or 6379 (Redis).
 
 ---
 
-### Phase 9 — Verification Checklist
+### Phase 9: Verification Checklist
 
 ```bash
 # API health (bypasses Nginx)
@@ -1566,17 +1772,20 @@ source .venv/bin/activate && alembic upgrade head
 # If frontend changed:
 cd frontend && npm run build && cd ..
 
-# Refresh GeoIP databases manually (monthly cron handles this normally):
+# Refresh GeoIP databases by hand about monthly (there is no cron on the live server):
 MAXMIND_LICENSE_KEY=$(grep MAXMIND_LICENSE_KEY .env | cut -d= -f2) ./scripts/download_geoip.sh
 
-# Restart what changed:
-pm2 restart clew-api               # API or worker code
+# Restart what changed, always by name:
+pm2 restart clew-api               # API code
 pm2 restart clew-frontend          # frontend (after npm run build)
 pm2 restart clew-worker clew-beat  # Celery tasks
 
-# When in doubt:
-pm2 restart all
+# A changed ecosystem.config.js or a new env var in it is NOT picked up by restart.
+# Use: pm2 delete <name> && pm2 start ecosystem.config.js --only <name> && pm2 save
+# Changes to .env are only read at process start, so restart the process that needs them.
 ```
+
+Check the deploy: `pm2 status` (all four online), `curl -s http://127.0.0.1:8000/health`, `alembic current` (same revision as `alembic heads`), then watch `pm2 logs clew-worker --err --lines 50` (Celery task lines go to stderr).
 
 #### Database Backups
 
@@ -1635,7 +1844,7 @@ python -c "from workers.tasks.purge_deleted_accounts import purge_deleted_accoun
 
 **Redis is not backed up.** Accepted: the agents re-learn each customer in about 15 batches.
 
-**Status:** the scripts are built and tested locally. Installing the cron line on the server, taking the first real backup and running the restore drill there are done at go-live (TODO.md Phase 15).
+**Status:** the scripts are built and tested locally. The cron line is not installed on the server yet, no real backup has been taken and no restore drill has been run (open items in `TODO.md` Part 1).
 
 **When to upgrade:** once monthly recurring revenue justifies it, migrate Postgres to RDS with automated daily snapshots and point-in-time recovery. On a t3.small with fewer than 10 customers, pg_dump to S3 is sufficient and costs nothing.
 
@@ -1666,12 +1875,15 @@ psql postgresql://clew:YOUR_DB_PASSWORD@localhost/clew
 ```
 
 ```sql
-SELECT email, tier FROM clients WHERE email = 'your@email.com';
-UPDATE clients SET tier = 'growth' WHERE email = 'your@email.com';
+SELECT o.id, o.tier FROM organizations o
+JOIN organization_members m ON m.org_id = o.id
+JOIN clients c ON c.id = m.client_id
+WHERE c.email = 'your@email.com';
+UPDATE organizations SET tier = 'growth' WHERE id = '...';
 \q
 ```
 
-Valid values: `starter`, `growth`, `pro`
+Valid values: `starter`, `basic`, `growth`, `pro`, `enterprise`. This is for local and test databases only. On production, change a tier through the ops panel or a pilot code (see Billing).
 
 ---
 
@@ -1722,7 +1934,7 @@ pm2 status                                    # every clew-stg-* process online
 ```
 Then in a browser: register on `https://stg-dashboard.clewsec.com` (Turnstile test key always passes), run one test-mode Razorpay payment with a Razorpay test card, and confirm the bill turns paid, the receipt opens and the webhook shows as delivered in the Razorpay dashboard.
 
-**Status:** the templates are written and checked for syntax only. Provisioning and "a staging deploy works end to end" are not done (TODO.md Phase 10).
+**Status:** not provisioned. The templates are written and checked for syntax only, and the 2026-11-11 release went straight to production without a staging run. Provisioning it and proving "a staging deploy works end to end" are open (`TODO.md` Part 2).
 
 ---
 
@@ -1738,7 +1950,7 @@ What the code does today, because the runbook has to work inside it:
 - If `last_processed_key` names an object that no longer exists, the reader starts from the **oldest** object (`S3Reader.list_new_objects`). The runbook relies on this to reach history older than 7 days
 - At the plan's monthly call volume scanning stops. The audit organization therefore needs a tier with enough volume
 
-**Procedure (run it on the STAGING stack, never on production, so a prospect's history never touches customer data, quotas or the production Redis):**
+**Procedure (run it on a STAGING stack, never on production, so a prospect's history never touches customer data, quotas or the production Redis; staging is not provisioned yet, so provision it first or use a throwaway local stack):**
 1. Agree the window and the bucket with the prospect, and send them the normal read-only trust policy (Customer Onboarding, below). Read access only, no write, no delete
 2. On staging, register an organization for the prospect (`Audit - <company>`), complete the S3 settings with their role ARN, bucket, prefix and region
 3. Lift the cap for the run (staging database only): `UPDATE organizations SET tier = 'pro' WHERE id = '...';`. If the history is larger than 200M calls, split it by prefix and run it in parts
@@ -1758,7 +1970,7 @@ very large histories take days at 500 objects per 15 minutes.
 
 ---
 
-### Customer Onboarding — S3 Access
+### Customer Onboarding: S3 Access
 
 Clew reads a customer's logs by assuming an IAM role in their own AWS
 account (`sts:AssumeRole`, phase 2), not by holding a shared long-lived
@@ -1820,6 +2032,12 @@ Any org that has not configured `aws_role_arn` falls back to Clew's shared
 IAM user (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` on the API/worker
 host), the pre-phase-2 behavior. See `api/aws.py`'s `aws_session_for_org`.
 
+**Known risk (open, `TODO.md` Part 1.2):** that fallback is a confused deputy. Every new
+signup starts without a role, and the bucket name is only format-checked, so a tenant could
+name another customer's bucket that still uses the legacy bucket policy and have Clew read it.
+The fix is to remove the fallback (and shrink `clew-server` to `sts:AssumeRole` plus backup
+`PutObject`). Until then, do not onboard a customer on the legacy bucket policy below.
+
 **Legacy path (bucket policy, no role).** Before phase 2, a customer
 granted access by attaching a bucket policy naming Clew's shared IAM user
 as principal, with no External ID and no per-customer revocation. This
@@ -1843,10 +2061,12 @@ only until that fallback is retired:
 
 ---
 
-### Adding Razorpay Later (INR — build first)
+### Going live with Razorpay (INR and USD)
 
 No Plans are created in the Razorpay dashboard: billing uses one-time Orders
-priced by the server from `api/tiers.py`.
+priced by the server from `api/tiers.py`. Prerequisite: the Razorpay account
+has passed KYC and been approved for live payments (not yet as of 2026-11-12).
+Try the whole flow with test-mode keys first, from `.env.local` on a laptop.
 
 1. Dashboard → Account & Settings → API keys → generate the live key pair
 2. Settings → Payment capture → set to **automatic** (the server requires a
@@ -1860,32 +2080,15 @@ priced by the server from `api/tiers.py`.
    RAZORPAY_KEY_SECRET=...
    RAZORPAY_WEBHOOK_SECRET=...
    ```
-5. `pm2 restart clew-api`
+5. `pm2 restart clew-api`, then make one real small payment, check the bill turns
+   paid and the receipt opens, and refund it from the Razorpay dashboard
 
 ---
 
-### Adding Stripe Later (optional, not planned)
+### Stripe (unused, not planned)
 
-1. Stripe Dashboard → Developers → API keys → copy Secret key (`sk_live_...`)
-2. Products → create one product per tier, two prices each (monthly INR + USD):
-
-   | Tier | USD | INR |
-   |---|---|---|
-   | Starter | $49/mo | ₹1,999/mo |
-   | Growth | $129/mo | ₹4,999/mo |
-   | Pro | $249/mo | ₹9,999/mo |
-
-3. Developers → Webhooks → Add endpoint: `https://api.clewsec.com/billing/webhook`
-   Events: `checkout.session.completed`, `customer.subscription.updated`, `customer.subscription.deleted`
-   Copy the signing secret (`whsec_...`)
-4. Add to `.env`:
-   ```
-   STRIPE_SECRET_KEY=sk_live_...
-   STRIPE_WEBHOOK_SECRET=whsec_...
-   STRIPE_PRICE_BASIC_INR=price_...
-   STRIPE_PRICE_BASIC_USD=price_...
-   # ... (see .env.example for full list)
-   ```
-5. `pm2 restart clew-api`
-
-Test with `sk_test_...` first. Test card: `4242 4242 4242 4242`, any future expiry, any CVC.
+Stripe is not used: Razorpay handles both INR and USD. The routes and DB columns from the
+old subscription design still exist, and `.env.example` still lists `STRIPE_*` variables, but
+nothing in the live billing flow reads them. If Stripe is ever added, it must be rebuilt
+around the bill-then-pay rules (prices from `api/tiers.py`, a `Payment` and `Bill` per
+charge, the reconcile task), not the old subscription checkout.

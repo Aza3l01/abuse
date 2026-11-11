@@ -2,482 +2,318 @@
 
 > **Product name:** Clew
 > **Codename (repo):** abuse
+> **Last verified against the code:** 2026-11-11 (the day it went live), Alembic head `a8d4f1c6b293`
 
-This file is the narrative companion to [README.md](README.md). README is the
-reference doc: what exists, how to run it, the exact schema/routes/architecture
-as built today. This file is the "why": product reasoning, history, judgment
-calls made along the way, known gaps, and design decisions worth remembering.
-If the two ever disagree on a factual claim (a route, a column, a file path),
-trust README, it's the one meant to be kept in lockstep with the code.
+This file is the narrative companion to [README.md](README.md). README is the reference doc: how the code is
+organised, the schema, the routes, how to run and deploy it. This file is the "why": what the product is, how the
+pieces fit, the judgment calls made along the way, the traps already hit, and the known gaps. It is written to be
+read on its own (for example pasted into a chat with an AI assistant) so it repeats the essential facts. If the two
+files ever disagree on a factual claim (a route, a column, a file path), trust README and the code.
 
 ---
 
 ## What Clew Is
 
-Clew is a B2B SaaS product that monitors a company's own API traffic for abuse
-and attack patterns using a multi-agent AI detection engine, and can
-automatically block malicious IPs via AWS WAF or Cloudflare.
+Clew is a B2B SaaS product that monitors a company's own API traffic for abuse and attack patterns using a
+multi-agent detection engine, explains what it found in plain language, and can block malicious IPs through AWS WAF
+or Cloudflare.
 
-**Zero-integration positioning:** the customer gives Clew read-only S3 access
-to their existing AWS API Gateway or ALB access logs. No code changes, no
-proxy sitting in the request path, no SDK to install. Clew polls S3 every 15
-minutes, runs detection, and surfaces findings in a web dashboard. This
-positioning is deliberate and non-negotiable: anything that requires the
-customer to change their own code or add a runtime dependency is a much
-harder sell to a CTO who is already stretched thin, and kills deals before
-they start.
+**Zero-integration positioning:** the customer gives Clew read-only access to the S3 bucket that already holds their
+AWS API Gateway or ALB access logs. No code changes, no proxy in the request path, no SDK. Clew polls S3 every 15
+minutes, runs detection, and shows findings in a web dashboard. This is deliberate and not negotiable for the core
+product: anything that makes the customer change their own code or add a runtime dependency is a much harder sell to
+a CTO who is already stretched thin.
 
-**Target customers:** Seed and Series A/B SaaS companies and SMBs with public
-APIs and no dedicated security team. The decision maker is a CTO or VP
-Engineering, not a security specialist, so the product needs to explain
-itself in business terms (cost prevented, not just "27 SQLi attempts
-blocked").
+**Target customers:** SaaS companies and SMBs with public APIs and no dedicated security team. The decision maker is
+a CTO or VP Engineering, not a security specialist, so the product explains itself in business terms (an estimated
+"cost prevented", not just "27 SQLi attempts").
 
 **Key differentiators:**
-- Zero integration burden (S3 access only, nothing touches the request path)
-- AI detection validated on published academic datasets (CICIDS2017 is the
-  one actually wired into the offline eval harness; CTU-13 and CSIC are
-  referenced in marketing copy but are not in this repo)
-- A cost-justified ROI metric shown in the dashboard ("$X prevented this
-  month"), because a CTO evaluating a security tool wants a number to put in
-  front of their own boss, not just a threat count
+- Zero integration burden (S3 read access only, nothing touches the request path).
+- Detection checked on published academic data. CICIDS2017 is the dataset wired into the offline evaluation harness
+  (`detection/evaluate.py`); CTU-13 and CSIC are mentioned in marketing copy but are not in the repo.
+- A cost-justified ROI figure in the dashboard, because a CTO wants a number to show their own manager.
 
-**Stack, briefly:** FastAPI (Python) backend, Next.js (App Router, TypeScript)
-frontend, PostgreSQL for relational data, Redis for the detection engine's own
-memory plus rate limiting and caching, Celery and Celery Beat for background
-and scheduled work (log ingestion, alerts, metering, purges). Deployed today
-as one EC2 instance with PM2 process management, no Kubernetes, no managed
-database, see Key Design Decisions below for why.
+**Current state (2026-11-11):** the MVP (Phases 1 to 15 of the build plan) is deployed and live on one EC2 host. The
+marketing site, the customer dashboard, the API and the internal ops panel are all served over HTTPS. Customer
+payments are not live yet: the Razorpay account is not approved for live charges and no live webhook exists, so the
+payment code is tested only against a fake client and Razorpay test mode. Database backups, the live payment test and
+the legal review are still open. The open work list is in `TODO.md` (gitignored, private).
 
-**The detection engine, briefly:** six agents run in parallel on every
-15-minute batch of ingested logs, each scoring a different signal: `VolumeAgent`
-(DoS/floods), `TemporalAgent` (bot timing patterns), `AuthAgent` (credential
-stuffing/brute force), `PayloadAgent` (SQLi/XSS/path traversal), `SequenceAgent`
-(endpoint enumeration), and `GeoIPAgent` (geographic anomalies). A seventh,
-`KnowledgeAgent`, runs passively, matching known threat signatures across a
-customer's history but emitting no score of its own, so docs sometimes call it
-"6 active + 1 passive." A `MetaAgentOrchestrator` fuses the 6 active scores into
-one confidence value and severity band (weighted vote, with an XGBoost
-stacking model that comes online once an organization has enough labeled
-verdict history). Full technical detail is in README.md under "The Detection
-Engine"; this paragraph exists so this file doesn't require README.md to
-answer a basic "what does the product actually detect" question.
+---
+
+## Stack and Architecture
+
+**Backend:** FastAPI (Python; 3.11 in the local venv, 3.12 on the server), SQLAlchemy 2, Alembic, PostgreSQL 16.
+**Background work:** Celery worker and Celery Beat on Redis 7 (log ingestion, alerts, blocking, billing, metering,
+purges, daily metrics). **Frontend:** Next.js 16 (App Router, TypeScript), Tailwind with CSS variables and no
+component library. **Auth:** httpOnly JWT cookies, bcrypt, TOTP MFA, Cloudflare Turnstile. **Email:** Resend.
+**Payments:** Razorpay Orders (USD and INR); Stripe code exists but is unused. **LLM:** Groq (OpenAI compatible API,
+default model `openai/gpt-oss-20b`), used only to write explanations. **Analytics and errors:** PostHog (EU).
+**Uptime:** Better Stack monitors and heartbeats. **GeoIP:** MaxMind GeoLite2 files, downloaded per server.
+
+**Deployment today:** one EC2 instance. PM2 runs four processes: `clew-api` (uvicorn, 127.0.0.1:8000),
+`clew-frontend` (`next start`, port 3000), `clew-worker` (Celery, concurrency 4) and `clew-beat` (Celery Beat, exactly
+one instance). Postgres and Redis are on the same machine. nginx terminates TLS (certbot) and is the only thing
+facing the internet. There is no staging environment, no Kubernetes and no managed database.
+
+**Hosts** (one Next.js process serves all front hosts; `frontend/src/proxy.ts` looks at the Host header):
+
+| Host | Serves |
+|---|---|
+| `www.clewsec.com` | Marketing site, canonical. `/api/` proxied by nginx |
+| `clewsec.com` | 301 to `www` |
+| `dashboard.clewsec.com` | The app at the root path (no `/dashboard` prefix; the code lives in `app/dashboard/*`, old `/dashboard/...` URLs get a 308). `/api/` proxied by nginx |
+| `api.clewsec.com` | FastAPI directly, for webhooks and the external API |
+| `internal.clewsec.com` | The staff ops panel. nginx proxies only `/api/internal/` here, and `/internal` routes return 404 on every other host |
+
+The browser calls the API same-origin at `/api/*`, which nginx maps to FastAPI. That mapping stays in nginx and is
+never a Next.js rewrite in production, because a rewrite hides the client IP from the rate limiter (which keys on the
+rightmost `X-Forwarded-For` entry). Auth cookies are host-only (`COOKIE_DOMAIN` blank); `LEGACY_COOKIE_DOMAIN` only
+deletes the old `.clewsec.com` cookies. The one cross-host cookie is `clew_consent` (analytics consent), via
+`NEXT_PUBLIC_COOKIE_DOMAIN=.clewsec.com`.
+
+**Scheduled tasks** (Celery Beat, UTC, `workers/beat.py`):
+
+| Task | When | What |
+|---|---|---|
+| `poll_all_clients` | every 15 min | One `process_logs` per org with S3 configured (skips deleted and paused orgs) |
+| `send_trial_reminders` | 09:00 | 5 day and 2 day pilot reminders; moves an unpaid expired pilot to Starter |
+| `purge_deleted_accounts` | 03:00 | Hard-deletes orgs and clients soft-deleted 30 or more days ago |
+| `purge_expired_data` | 04:00 | Tiered retention purge |
+| `reset_monthly_counters` | 00:00 on the 1st | Resets call-volume counters |
+| `billing_cycle` | 19:00 (00:30 IST) | Bill engine: issue bills, enforce cancels and downgrades |
+| `metrics_snapshot` | 19:30 | Daily business metrics for the ops panel |
+| `reconcile_payments` | 19:45 | Compares Razorpay payments with local rows, reports only |
+
+---
+
+## The Detection Engine
+
+Six agents run on every batch of ingested logs, each scoring a different signal: `VolumeAgent` (floods, Isolation
+Forest), `TemporalAgent` (bot timing, FFT and CUSUM), `AuthAgent` (credential stuffing and brute force),
+`PayloadAgent` (SQLi, XSS, path traversal), `SequenceAgent` (endpoint enumeration) and `GeoIPAgent` (geographic
+anomalies). A seventh, `KnowledgeAgent`, is passive: it matches known threat signatures against a customer's history
+and emits no score, so docs sometimes say "6 active + 1 passive". `MetaAgentOrchestrator` fuses the six scores into
+one confidence value and a severity band, using a weighted vote plus an XGBoost stacking model that comes online
+once an organization has enough labeled verdict history.
+
+`process_logs` (one task per org per poll) runs three passes: **Pass A** mixed-IP window batches through the full
+engine (writes the engine's long-term memory), **Pass B** a per-IP focus pass for IPs with at least 20 requests in the
+poll (reads memory, never writes it), and **Pass C** cross-IP clustering for low-volume distributed attacks (Pro and
+Enterprise only, alert only, never auto-blocks).
+
+- **The verdict is decided by rules, never by the LLM.** The LLM (`LLM_ENABLED` is the kill switch) only writes the 2
+  to 4 sentence customer-facing explanation afterwards, for Growth and above, with a template fallback on error,
+  kill switch or the per-org monthly cap (Growth 5,000, Pro 25,000).
+- **Optional reputation boost:** with `ABUSEIPDB_API_KEY` set, a hit for the busiest flagged IP adds 0.08 to the
+  confidence of a batch an agent already flagged. It never creates a detection alone. Off while the key is blank.
+- **Long-term memory lives in Redis** (`clew:ltm:{org_id}`), so deploys and worker restarts do not lose learned
+  baselines. Its TTL depends on the tier. Any new memory field must be added to both `_dump_ltm()` and `_load_ltm()`
+  in `detection/engine/memory/product_memory.py` with a round-trip test, because fields have been silently dropped
+  twice and the offline harness cannot catch it (it reuses one in-process object and never round-trips through Redis).
+- **Pro and Enterprise can tune detection** (attack and block confidence thresholds, per-agent and per-endpoint
+  minimums; validated by `api/detection_config.py`). Growth and above can run automatic blocking in dry run mode
+  (`auto_block_dry_run`), which records `would_have_blocked_at` on verdicts without touching WAF or Cloudflare.
+- **Log record schema.** The ingestion layer normalises API Gateway and ALB lines into `LogRecord`
+  (`detection/schemas/models.py`): `timestamp`, `ip`, `method`, `endpoint`, `status`, `response_size`, `latency`,
+  `user_agent`, plus `endpoint_template`, `session_id`, `geo_context`, `tenant_home_country` and `org_id`. The label
+  fields (`label`, `attack_category`, `is_attack`) are only filled in the offline research harness. Each production
+  line also carries a `source_key` used for verdict deduplication.
 
 ---
 
 ## Tiers and Pricing
 
-Rewritten 2026-09-20 after the tier-restructuring rollout shipped, prices
-updated 2026-10-01. Prices are marked **EARLY ACCESS**, valid until 2028.
-Annual billing is a flat 50% off the monthly price, paid upfront for the
-year, non-refundable beyond the standard 72-hour remorse window on the
-first charge (same rule as monthly, see "Refunds and cancellations" in the
-legal pages). This is a deliberate retention and cash-flow choice: an
-annual signup is a locked-in year of revenue even if the customer stops
-using the product, which matters more than usual while the company is
-pre-funding. Currency is auto-detected from the
-browser's timezone (India, Kolkata, gets INR; everywhere else gets USD), with
-a manual toggle on the pricing page and in the dashboard's billing section.
+Internal tier codes equal the marketing names: `starter` (the permanent free plan), `basic`, `growth`, `pro`,
+`enterprise`. They were renamed together (migration `f4b9d2a6c718`) so the two vocabularies cannot drift; do not
+invent a different internal name. Everything keys off the constants in `api/tiers.py`
+(`MANUAL_BLOCK_TIERS`, `AUTO_BLOCK_TIERS`, `CUSTOM_THRESHOLD_TIERS`, `CALL_VOLUME_CAPS`, `RETENTION_DAYS`,
+`LTM_TTL_DAYS`, `LLM_EXPLANATION_TIERS`, `LLM_CALL_CAPS`, `PLAN_PRICES`).
 
-| Tier | Marketing name | Internal tier code | Price | Blocking | Retention | Volume cap |
-|---|---|---|---|---|---|---|
-| Starter (free) | Starter | `starter` | $0, no card, no trial, no expiry | None | 7 days | 2M calls/mo |
-| Basic | Basic | `basic` | $49 / Rs.1,999 per month | Manual only (dashboard button) | 30 days | 10M calls/mo |
-| Growth | Growth | `growth` | $129 / Rs.4,999 per month | Manual + automatic (WAF/Cloudflare) | 3 months | 50M calls/mo |
-| Pro | Pro | `pro` | $249 / Rs.9,999 per month | Manual + automatic | 1 year | 200M calls/mo |
-| Enterprise | Enterprise | `enterprise` | Custom | Manual + automatic + inline proxy (future) | Unlimited | Beyond 200M calls/mo, uncapped |
-| Clew Audit | n/a | n/a | $599 / Rs.49,999 one-time | n/a | n/a | n/a |
+| Tier | Price (USD / INR, per month, plus GST in India) | Blocking | Retention | Volume cap |
+|---|---|---|---|---|
+| `starter` | $0, no card, no trial, no expiry | None | 7 days | 2M calls/mo |
+| `basic` | $49 / Rs.1,999 | Manual only (dashboard button) | 30 days | 10M |
+| `growth` | $129 / Rs.4,999 | Manual and automatic | 90 days | 50M |
+| `pro` | $249 / Rs.9,999 | Manual and automatic, custom detection thresholds, cross-IP clustering | 365 days | 200M |
+| `enterprise` | Custom | All of the above (inline proxy is a possible future option) | Unlimited | Uncapped |
 
-**Clew Audit** is not a subscription tier, it's a one-time, sales-assisted
-product: a full retrospective scan of a prospect's available log history,
-sold as a standalone way to show value before any subscription commitment.
-It isn't self-serve checkout, the pricing page routes it to a `mailto:`
-link, not Razorpay/Stripe.
-
-Internal tier codes equal the marketing names (`starter` is the permanent
-free plan, `basic` is the first paid plan). They were renamed on 2026-11-24
-(migration `f4b9d2a6c718`) so the two vocabularies never drift again. Do not
-introduce a different internal name for a tier. `api/tiers.py`'s
-`MANUAL_BLOCK_TIERS`/`AUTO_BLOCK_TIERS`/`CALL_VOLUME_CAPS`/`RETENTION_DAYS`/
-`LTM_TTL_DAYS`, `PLAN_PRICES_PAISE` and `PAID_TIER_ORDER` all key off these exact values.
-
-Free (Starter) is what every self-serve signup lands on directly: no trial,
-no countdown, no card ever. The only way onto a paid tier as a trial is a
-promo code, which grants a 30-day trial of Growth (not an extended free
-tier, since the free tier never expires anyway). If that trial ends unpaid,
-the org reverts to free Starter and keeps scanning within the free cap,
-it is not a lockout.
-
-Basic is the "you can see it and act on it yourself" tier: monitoring,
-email alerts, and manual one-click blocking, but no unattended automatic
-blocking. A threat is detected, the customer is alerted, and a human decides
-whether to block. Growth and Pro add automatic unattended blocking on top of
-that, gated behind a one-time Blocking Subscription Agreement acceptance
-since it's an active security action, not passive monitoring. Pro's
-differentiator over Growth is not blocking (both get it) but deeper control
-over the detection engine itself: custom confidence thresholds, per-agent
-minimums and per-endpoint minimums (Phase 8, built, Pro and Enterprise only,
-validated by `api/detection_config.py`). Growth and above also get
-Groq-generated threat explanations.
-
-**What's real as of 2026-11-09 (Phase 8), and what still isn't:** call-volume
-metering and tiered retention purge both run. The detection verdict is always
-decided by the rules (fusion of the six agents). The LLM only writes the 2 to
-4 sentence customer-facing explanation after that decision, for Growth, Pro
-and Enterprise, with a template fallback on error, kill switch
-(`LLM_ENABLED`), or the per-org cap. It never changes a verdict. Pro and
-Enterprise can set custom thresholds (`detection_config`: attack and block
-confidence, per-agent minimums, per-endpoint minimums). Growth and above can
-run automatic blocking in dry run mode (`auto_block_dry_run`), which records
-`would_have_blocked_at` on verdicts without touching the WAF or Cloudflare.
-Pro and Enterprise also get cross-IP clustering (Pass C), which is alert
-only and uses the template explanation. Unverified: Groq pricing for
-`openai/gpt-oss-20b` (the pricing page was blocked), and live AbuseIPDB
-lookups (wired 2026-11-11, off while `ABUSEIPDB_API_KEY` is blank). A hit adds
-0.08 confidence to an already flagged batch and never creates a detection.
-Offline tests could only use stubs, so the real benefit is unmeasured.
+- Annual billing is 6 times the monthly price (a 50 percent discount, paid upfront), non-refundable after the 72 hour
+  window that follows the first payment. USD annual: Basic 294, Growth 774, Pro 1,494. INR annual: 11,994, 29,994,
+  59,994.
+- **Currency:** the checkout picks INR for billing country India and USD otherwise. The pricing page default comes
+  from the browser timezone (Kolkata means INR), with a manual toggle. An organization's currency locks when its first
+  payment is captured.
+- **Clew Audit** (one-time retrospective scan, $599 / Rs.49,999) is sales-assisted, not self-serve, and its pricing
+  callout is hidden until it is ready to sell. README has the delivery runbook.
+- **Starter** is where every self-serve signup lands: no trial, no countdown, scanning continues within the free cap.
+  The only way to a paid tier without paying is a pilot code.
+- **Pilot codes** (admin generated in the ops panel, single use) give a 30 day Growth pilot with no card. At the end an
+  unpaid pilot drops to Starter. A pilot can pay for any plan at any time through the normal checkout.
+- Growth and above also get automatic unattended blocking, behind a one-time Blocking Subscription Agreement and a
+  per-org opt-in (`auto_block_enabled`, which cannot be switched on until the agreement is accepted).
+- **Soft limits:** call volume is metered per org per month; 80 percent and 100 percent emails and a dashboard banner
+  fire, but scanning never stops at the cap. A daily purge deletes data older than the tier's retention window.
 
 ---
 
-## Current Build Status (2026-10-01)
+## Billing Model
 
-The MVP is functionally complete. One planning document, `TODO.md`, holds
-everything still to do, grouped by topic rather than ordered, plus the
-Razorpay go-live checklist at the top. The phase-by-phase build history that
-used to live in a separate file has been folded into Product History below.
+Bill, then pay. Razorpay Orders only, no Razorpay subscriptions or Plans (UPI autopay caps below the annual prices,
+and the old subscription flow had upgrade-ordering and webhook-race bugs).
 
-What's live and working:
-- Registration, email verification, login, MFA (TOTP + backup codes),
-  password reset, session management, account deletion (DPDP-compliant
-  soft-delete then 30-day hard-purge)
-- Multi-tenant organizations with role-based access (owner/admin/viewer),
-  team invites, and ownership transfer
-- S3 log ingestion (API Gateway and ALB formats) via **cross-account
-  `sts:AssumeRole`** with a per-org External ID, the 6-agent detection engine,
-  verdict generation, IP intelligence, dashboard
-- Groq-backed threat explanations for Growth and above, fail-soft to the
-  rule-based template
-- Email alerts (severity-threshold gated, excluded on the free tier) and a
-  delivery log
-- WAF and Cloudflare IP blocking, through the same cross-account role,
-  verified end to end against real AWS resources
-- Call-volume metering with 80% and 100% soft-limit emails and a dashboard
-  banner, plus tiered data retention enforced by a daily purge task
-- Guided onboarding (per organization, dismissible, re-openable) and
-  plan selection carried from the landing page through registration into
-  checkout
-- A public `/docs` page, a newsletter double opt-in via Resend Audiences on a
-  separate sending subdomain, and legal pages carrying the real registered
-  entity details
-- Security hardening: CSP headers, Turnstile CAPTCHA, login lockout,
-  Redis-backed rate limiting shared across workers, webhook replay guards,
-  Fernet-encrypted Cloudflare tokens
-
-What's built but not switched on yet:
-- **Razorpay (Orders, bill then pay)** is code complete and covered by tests
-  against a fake client. A real test-mode Checkout payment has not yet been run
-  (the first set of test keys returned 401; see the dated note in `TODO.md`). There are no Razorpay
-  subscriptions or Plan objects: the server prices every purchase from
-  `PLAN_PRICES_PAISE`, creates an order, and `apply_captured_payment`
-  (`api/billing_payments.py`) applies the captured payment once, whether the
-  browser callback or the webhook arrives first. Live keys, the webhook URL
-  and secret, and auto-capture are still the founder's to set, pending bank
-  and KYC approval. Every code path degrades to a clean 503 with blank keys.
-- **Stripe billing (USD)**: all code written, migration applied, blocked on
-  live API keys which are themselves blocked on company registration. Non-INR
-  visitors see an India-only panel rather than a checkout that cannot
-  complete. India-first is a market strategy, not a stopgap.
-
-Known open items are no longer listed here. They live in `TODO.md`, grouped
-by topic, so this file does not drift out of sync with them again.
+- The server prices every purchase from `PLAN_PRICES` (currency, tier, period) and `api/billing_rules.py`; the client
+  never sends an amount or tier. `create-order` writes a `payments` row and a Razorpay order; the browser callback and
+  the webhook both call `apply_captured_payment` (`api/billing_payments.py`), which is row-locked and idempotent, so a
+  payment is applied exactly once whichever arrives first. Webhooks are HMAC verified and replay guarded.
+- **First purchase:** pay the full plan price at upgrade, service starts at once. Paid on day 1 to 15 of a month: the
+  next bill is issued on the 1st of the next month. Day 16 or later: the 1st of the month after. No prorating.
+- **Every later period:** a bill is issued on the 1st, due the 20th, and the plan stays active until the 1st of the
+  next month. Unpaid by then: the org drops to Starter, the unpaid bill stays open, and **Restore** lets the customer
+  pay all open bills plus the new period in one checkout. A 30 day retention grace follows any downgrade, and the
+  org's existing blocks stay in place and can be removed.
+- **Upgrade** pays the price difference now (same period type) or the full annual price for a switch to annual;
+  **downgrade** and **cancel** take effect at the next bill or the end of the paid period.
+- **Refund:** full, within 72 hours of the first captured payment; the org drops to Starter.
+- All calendar rules are evaluated in IST. `billing_cycle` runs at 19:00 UTC, which is 00:30 IST.
+- Emails come from `billing@email.clewsec.com`: bill ready, due in 3 days, cancel warning, plan cancelled. No emailed
+  invoice; the receipt page in the dashboard is the record. No GST tax invoices yet (needs a GST registration).
+- **Referrals** run on a credit ledger (`credits` table, `api/referrals.py`). A referred org gets its first bill after its
+  first payment covered by a free-month credit. Its referrer earns a credit that only ever reduces the referrer's own
+  bills (never cash), starts pending, becomes available once the referee's first payment has stood for the 72 hour
+  refund window, and is revoked by a refund inside it. A referrer who vests more than 3 credits in 30 days has the
+  extras held until staff approve them in the ops panel. `REFERRAL_CREDIT_PCT` (default 100) sets the credit size; no
+  exchange rate is ever used.
+- Payments and bills are financial records and survive account deletion (the org id becomes NULL with a name and email
+  snapshot on the row).
 
 ---
 
-## Product History
+## Product Areas Worth Knowing
 
-A condensed, phase-by-phase account of how the product got to its current
-state, including the judgment calls and reversals along the way. This is
-the kind of context that doesn't belong in README (which describes the
-current state, not how it was arrived at) but matters if you're ever
-wondering "why is this built this way instead of the more obvious way."
+- **Accounts and tenancy.** A `Client` is a login identity only; an `Organization` owns everything else (S3, blocking,
+  billing, detection data), joined through `OrganizationMember` (owner, admin, viewer). The org is re-derived from a
+  live membership row on every request, never trusted from the JWT. Registration creates the login, org and
+  membership in one transaction. A login can belong to several orgs (the schema supports it; the signup flow creates
+  one). Account deletion is a DPDP style soft delete, hard-purged 30 days later; an owner's deletion deletes the whole
+  organization.
+- **Customer AWS access.** Each org gets a server-generated External ID; the customer creates an IAM role that trusts
+  Clew's account with that External ID condition, and Clew calls `sts:AssumeRole` for one hour credentials. The same
+  role carries S3 read and, if wanted, WAF permissions. An org with no role falls back to Clew's own AWS key; this
+  fallback is a known risk (see Known Limitations).
+- **Scanning pause.** An organization's team can pause scanning; polling skips it, manual block and unblock and the
+  retention purge continue.
+- **Internal ops panel** (`internal.clewsec.com`, `/api/internal/*`, `api/routes/internal.py`, `api/staff_*.py`).
+  Staff only: its own table (`staff_users`), cookie (`clew_staff`), signing key, password plus TOTP login, 60 minute
+  absolute session, and every action is written to an audit log with a reason. It can search accounts, read raw data,
+  mark or void bills, extend a period or a pilot, pause a downgrade, reinstate, generate pilot codes, manage referral
+  credits, and shows system health, the audit log and the business metrics (`metrics_daily`, with an INR combined view
+  using `METRICS_INR_PER_USD`). Staff users are created only on the server with `scripts/create_staff_user.py`.
+- **Analytics and monitoring.** PostHog (EU) for product events, with a consent banner and `clew_consent` cookie, and for
+  exceptions from the API, Celery and the frontend. Better Stack for uptime and two heartbeats (`HEARTBEAT_URL` pinged by
+  `poll_all_clients`, `BILLING_HEARTBEAT_URL` by `billing_cycle`). API errors return a `correlation_id` (also sent as the
+  `x-correlation-id` response header) so support can find the log line.
+- **Newsletter and legal.** Double opt-in newsletter through Resend Audiences on a separate sending subdomain. Legal
+  pages (terms, privacy, DPA, subscription agreement, refund policy) carry the registered entity details. A public
+  `/docs` page explains the product.
+- **Security basics.** CSP with nonces, Turnstile on register, login and forgot-password, login lockout
+  per email and IP, Redis-backed rate limiting shared across workers, webhook replay guards, Fernet-encrypted Cloudflare
+  tokens and TOTP secrets.
 
-**Phase 1, foundation.** Distributed locking so Beat firing again mid-run
-doesn't double-process a backlog; source-key based verdict deduplication so
-re-processing the same S3 object never creates a duplicate detection; a
-7-day historical window on first connection instead of reading a customer's
-entire log history; automatic log-format detection (API Gateway vs ALB) with
-a clean abort if the wrong format is configured; a login brute-force lockout
-separate from the general rate limiter; a `scan_runs` table so a clean batch
-has evidence it was actually scanned, instead of writing a fake
-"severity=none" verdict row. An independent review after this phase found
-and fixed 6 real bugs, most notably that two engine memory fields were never
-being persisted to Redis at all, silently making an entire adaptive-threshold
-feature dead code in production while an offline test harness masked the gap
-by reusing one in-process object across calls.
+---
 
-**Phase 2, multi-tenancy.** The original schema was purely per-login: one
-`Client` row held both the login and all the S3/billing/blocking config.
-This phase split that into `Client` (login identity only) and `Organization`
-(the tenant, owning everything else), connected by `OrganizationMember` for
-role-based team access. This was a full rekey of every foreign key in the
-system (`client_id` to `org_id` across verdicts, ip_memory, alerts_sent,
-scan_runs, and the entire detection engine's own internal parameter naming).
-OAuth/social sign-in, which had existed in the codebase from before any of
-this work began, was removed entirely once it became clear it was never an
-actually-wanted feature, not a design decision made during this project.
+## Product History (condensed)
 
-**Phase 3, onboarding.** The registration flow's shape was genuinely
-reconsidered three times in the same day before landing on its final form:
-collect company name at signup and create the login, organization, and
-membership atomically in one transaction. The alternative (create only a
-login at signup, prompt for a company name later on first dashboard visit)
-was built, then reversed, because a company email realistically belongs to
-exactly one employer, so the extra step buys nothing for the common case.
-The one-org-per-login assumption is a deliberate simplification. A
-freelancer or consultant managing several clients' organizations from one
-personal email is a real, known future case, and the schema already
-supports it (`OrganizationMember` is genuinely many-to-many), it's just not
-exposed as a signup-time flow yet.
+How the product got here, including reversals, for anyone asking "why is it built this way".
 
-**Phase 4, product UX.** Dashboard states for "no S3 configured yet" and
-"configured but no data yet," a scanning-in-progress banner, IP
-intelligence enriched with geography and ASN ownership, a full verdict
-detail page (per-agent score breakdown, a raw log sample, an AI-analysis
-section gated by tier). The "raw log sample" is worth understanding as a
-known approximation: the detection engine scores a whole batch of records
-together, there is no true per-line suspicion score to sort by, so the
-sample is a best-effort selection of lines matching the verdict's IP and
-endpoint, padded out with the batch's first lines if there aren't enough.
-
-**Phase 5, email deliverability.** Dedicated from-addresses and reply-to
-targets per email category (alerts, billing, team) on a `email.` subdomain,
-separate from the root domain, so a bounce or spam complaint on
-transactional mail never touches the root domain's own sending reputation.
-
-**Phase 6, billing.** Stripe was already fully built before this phase; this
-phase added Razorpay alongside it (not instead of it), plus real promo code
-redemption, a trial-expiry job that reverts an unpaid trial to the free
-tier, and the blocking Terms of Service acceptance gate. (Historical: this
-phase built Razorpay as subscriptions with immediate upgrades, deferred
-downgrades and a calendar-anchor first payment. Phase 4 of the billing rework
-replaced that with one-time Orders, monthly bills and the rules in
-`api/billing_rules.py`, so none of the subscription behaviour below exists any
-more.) A genuinely
-interesting implementation detail: Razorpay upgrades take effect
-immediately (cancel the old subscription, start the new one now), but
-downgrades are deferred to the end of the current billing cycle so a
-customer doesn't lose access to something they already paid for this month.
-A customer's very first payment method uses a different rule again, a
-calendar-anchor (start on the 1st of the next month if signing up after the
-15th, otherwise start immediately), since there's no existing cycle to
-respect yet.
-
-**Phase 7, security and account lifecycle.** Content-Security-Policy
-headers, Turnstile CAPTCHA extended to forgot-password (it already existed
-on registration), and DPDP-compliant account deletion. The account deletion
-design resolved a real open question: when an organization's *owner*
-deletes their own account, does the whole organization disappear with them,
-even if other admins or viewers are still active members? The answer landed
-on yes, unconditionally, the confirm dialog just warns the owner about it,
-because building a forced ownership-transfer-or-block flow was judged not
-worth the complexity for an MVP. A follow-up request the same day did add a
-voluntary "make this admin the new owner" action, so an owner who wants to
-hand off the organization before leaving can do so; nothing forces them to.
-
-**Phase 8, operations and repo hygiene.** Originally scoped as nightly
-database backups plus three layers of uptime/health monitoring
-(UptimeRobot, a Cronitor heartbeat, and Sentry; Phase 11 later replaced these
-with Better Stack and PostHog error tracking). Sentry was cut to post-MVP
-from the start. Partway through, the backup and monitoring work was itself
-reconsidered and pushed to post-MVP too: there's no real customer data yet
-that a backup would be protecting, and a monitoring setup done "properly"
-(a real customer-facing status page, not just a free-tier stopgap) needs an
-actual audience to justify it, which doesn't exist before a first real
-client. What did ship this phase: pinning two previously-transitive
-dependencies (`pydantic`, `cryptography`) that the product's own code
-imports directly, fixing a handful of stale doc references (a renamed
-`middleware.ts` to `proxy.ts`, a PM2 config file that already existed
-instead of the docs telling you to hand-write a second copy), and, in a
-same-day follow-up, discovering and fixing a real local-development bug: the
-API's entry point loaded its `.env.local` developer overrides *after*
-importing modules that had already read the un-overridden production values
-into fixed constants, which silently broke local testing (wrong database
-password, CAPTCHA permanently failing) for anyone using the override file as
-intended.
-
-**The 2026-09-20 audit rollout.** A full pass over every claim the marketing
-and legal pages made, checked against the code, which found that copy had
-outrun implementation in several places. The worst was the Privacy Policy
-naming Groq as an active subprocessor doing LLM analysis when Groq was not
-wired into production at all, a legal document describing a data-sharing
-relationship that did not exist. Also found and fixed: a payment-verification
-handler that trusted a client-supplied tier (so a paid Starter payload could
-be replayed as Pro), the backend having no concept of the Enterprise tier it
-was selling, plaintext Cloudflare API tokens contradicting an "encrypted at
-rest" claim, and a rate limiter whose counters lived per-process and reset on
-every deploy. The same rollout built real usage metering and tiered retention,
-and restructured the tiers so Starter became permanently free.
-
-**The 2026-09-30 and 2026-10-01 completion phases.** Cross-account IAM roles
-replacing the shared credential (see Key Design Decisions below), verified
-against real AWS including a deliberate negative test confirming the External
-ID condition is actually enforced rather than decorative. Groq wired into the
-production pipeline with a fail-soft fallback. Guided onboarding and plan
-selection carried from the landing page into checkout. A public docs page.
-Legal pages filled in with the real registered entity. A newsletter on a
-separate sending subdomain so marketing complaints cannot damage the
-reputation of the domain that delivers security alerts.
-
-Two bugs from these phases are worth remembering because they are the same
-class. First, the KnowledgeAgent was learning per-customer IP reputation and
-then silently discarding all of it, because two fields were missing from the
-Redis serialization dictionary, the exact same failure that had already
-happened once before with two different fields. The offline eval harness
-cannot catch this class of bug at all, because it reuses one in-process
-memory object and never round-trips through Redis. Second, blocking was
-code-complete and architecturally correct but had never once run against a
-real WAF IP set, only against mocked boto3 clients, which is why a dedicated
-verification phase was added rather than trusting the unit tests.
+- **Foundation.** Distributed locking so Beat firing during a long run cannot double-process; source-key based verdict
+  deduplication; a 7 day window on first connection; log format auto-detection; a `scan_runs` table so a clean batch
+  has evidence it was scanned. A review found that two memory fields were never persisted to Redis, which silently
+  disabled an adaptive-threshold feature while the offline harness masked it.
+- **Multi-tenancy.** The original schema put login and tenant config on one `Client` row. It was split into `Client`
+  and `Organization` and every foreign key was rekeyed from `client_id` to `org_id`. OAuth sign-in, which predated this
+  work, was removed.
+- **Onboarding.** Registration collects the company name and creates login, org and membership atomically. The
+  "create the org later" variant was built and reversed.
+- **Billing.** Stripe came first and Razorpay (India first) was added, first as subscriptions with immediate upgrades,
+  deferred downgrades and calendar anchors. That design was replaced in late 2026 by Orders, monthly bills and the
+  rules above, because subscriptions cannot carry the annual prices on UPI or cards in India.
+- **The 2026-09-20 audit.** Marketing and legal copy was checked against the code. Found and fixed: the Privacy Policy
+  named an LLM subprocessor that was not wired in, a payment verification handler that trusted a client-supplied tier,
+  no Enterprise tier in the backend, plaintext Cloudflare tokens contradicting "encrypted at rest", and a rate limiter
+  whose counters reset on every deploy.
+- **Cross-account IAM roles** replaced one shared IAM user with a long-lived key, verified against real AWS including a
+  negative test that the External ID condition is enforced.
+- **Host split and the ops panel (2026-11).** Marketing, app, API and ops panel got separate hosts; billing was rebuilt
+  on Orders; the staff panel, combined metrics, backup scripts, detection tuning, analytics, referral credits, a
+  scanning pause and a full QA pass followed; the fixes from that pass shipped with the go-live.
+- **Go-live (2026-11-11).** Phases 2 to 14 were deployed together in one commit with one database migration run, no
+  staging, and no pre-deploy database backup (a deliberate choice, so the only rollback is the previous commit).
+- **Two bug classes worth remembering.** Memory fields dropped from Redis serialization (twice), and blocking code that
+  was architecturally correct but had never run against a real WAF IP set, only mocked clients.
 
 ---
 
 ## Known Limitations and Documented Gaps
 
-- **Automatic blocking can run without the Blocking Subscription Agreement
-  being accepted.** The acceptance gate is checked on both manual-block
-  routes and at Razorpay checkout, but not in the automatic trigger path
-  (`process_logs.py`/`push_blocks.py`). A Growth or Pro org that configures a
-  WAF IP set or Cloudflare zone but never explicitly accepts the agreement
-  still gets unattended blocking. Real legal exposure, not just a code gap,
-  tracked as `[MVP]` in `TODO.md` under "Blocking."
-- **No on/off switch for automatic blocking, despite marketing implying one
-  exists.** The landing page's "How It Works" copy says Growth/Pro customers
-  "can enable automatic WAF blocking with one setting." No such setting
-  exists: the moment a WAF IP set or Cloudflare zone is configured, unattended
-  blocking is live with no explicit opt-in, and one false positive (shared NAT
-  gateway, corporate proxy, mobile carrier) can block real users nobody chose
-  to block. Tracked as `[MVP]` in `TODO.md` under "Blocking."
-- **`GeoIPAgent` has never been exercised at scale.** The archived CICIDS
-  evaluation F1 numbers are a 5-agent result; `home_country` only became
-  settable in the 2026-09-20 rollout, making the off-country detection branch
-  reachable but still unvalidated against real multi-country traffic. Treat
-  geography-driven verdicts as directionally useful, not independently proven.
-- **Distributed low-and-slow attacks.** The engine's per-IP focus pass needs
-  20 or more requests from a single IP within one 15-minute poll to catch
-  attacks that a wide detection w(Pass C, Pro and Enterprise only) now exists
-  for this case, but it is alert only and has not been validated on real
-  distributed trafficvolume IPs (for example, a large botnet doing credential
-  stuffing at one attempt per IP) can currently evade both detection passes.
-  Cross-IP behavioral clustering to catch this is a Pro-tier roadmap item,
-  not built yet.
-- **No cross-email account switcher.** The one-org-per-login registration
-  flow is a deliberate simplification, not a technical ceiling, the schema
-  already supports one login belonging to multiple organizations.
-- **Usage metering and tiered retention are live.** Call volume is counted
-  per org per month against `CALL_VOLUME_CAPS`, with 80% and 100% soft-limit
-  emails and a dashboard banner. Scanning is never cut off at the cap, it is
-  a soft limit by design. A daily task hard-deletes data past each tier's
-  retention window (7 days free, 30 Basic, 3 months Growth, 1 year Pro,
-  unlimited Enterprise).
-- **The verdict "raw log sample" is an approximation**, not a real per-line
-  suspicion score, see Phase 4 above.
-- **`detection/scripts/ablation_study.py`** is 300+ lines of research
-  tooling (per-agent contribution measurement across four academic
-  datasets) that predates this product's commercial build. It's
-  intentionally kept in the repo as a labeled research artifact, not
-  something anyone is expected to run as part of the product, and three of
-  its four reference datasets aren't even present in this repo.
-- **CONTEXT.md and README.md are both living documents**, not frozen specs.
-  `TODO.md` is fully gitignored and never appears in `git status`, it's a
-  private planning document, not part of the shipped product.
+- **AWS ambient-credential fallback is a confused deputy risk.** An org that has an S3 bucket but no role ARN is read
+  with Clew's own AWS key (`aws_session_for_org()` in `api/aws.py`). The bucket name is only format-checked, so a tenant
+  could name another customer's bucket if that customer used the legacy bucket policy. The fix is to remove the
+  fallback; it needs a decision and a check that no live org depends on it.
+- **No live payments yet.** See "Current state". No real charge, refund or webhook has been seen.
+- **No database backups on the server yet.** The scripts exist (`scripts/backup_postgres.sh`, `restore_postgres.sh`);
+  installing them and a restore drill are open.
+- **`GeoIPAgent` has never been exercised at scale** on real multi-country traffic. The archived CICIDS F1 numbers are
+  a 5 agent result. Treat geography-driven verdicts as directionally useful.
+- **Distributed low-and-slow attacks.** Pass B needs 20 or more requests from one IP in a poll. Pass C (Pro and
+  Enterprise) groups low-volume IPs but is alert only and not validated on real distributed traffic. A botnet at one
+  request per IP per poll can evade the other passes.
+- **The verdict "raw log sample" is an approximation:** the engine scores a batch, not individual lines, so the sample
+  is a best-effort selection of lines matching the verdict's IP and endpoint.
+- **GeoIP files are refreshed by hand** each month (no cron) and the worker must be restarted afterwards.
+- **`METRICS_INR_PER_USD`** is read by the code (`api/metrics.py`, `workers/tasks/metrics_snapshot.py`) but is no
+  longer documented in `.env.example`; if it is missing, the combined INR figures in the ops panel are unavailable.
+- **`detection/scripts/ablation_study.py`** is research tooling that predates the product, kept as a labeled artifact;
+  three of its four reference datasets are not in the repo.
+- **Unverified:** Groq pricing for `openai/gpt-oss-20b`, live AbuseIPDB lookups, and detection quality on real traffic
+  (offline tests use stubs and the CICIDS data).
 
 ---
 
-## Key Design Decisions
+## Key Design Decisions and Gotchas
 
-- **Zero integration, always.** No inline proxy, no SDK, no client code
-  changes, ever, for the core product. This is the whole positioning; an
-  inline proxy is listed as a possible Enterprise-tier future option
-  precisely because it's a different, heavier product decision, not a
-  natural evolution of the core one.
-- **Organization-centric multi-tenancy over per-login config.** A `Client`
-  is just a person who can log in; an `Organization` owns everything else.
-  This makes team access, billing, and role-based permissions coherent
-  without a second parallel identity system.
-- **One EC2 instance, no Kubernetes, no managed database yet.** Sufficient
-  for the first several dozen customers at the traffic volumes this product
-  actually sees. RDS with automated snapshots is the explicitly-planned next
-  step once monthly recurring revenue justifies the cost, not before.
-- **LTM (the detection engine's long-term memory) lives in Redis, not
-  Postgres.** It's high-write, engine-internal state (baseline rates,
-  timing history, per-agent history), not relational data anyone queries
-  directly, so a simple Redis key per organization is a better fit than a
-  relational table.
-- **httpOnly cookies, not localStorage, for auth tokens.** This closes off
-  an entire class of XSS-based token theft; the tradeoff is the frontend
-  needs an Edge-middleware refresh dance instead of just reading a token
-  out of JS-visible storage.
-- **Currency from browser timezone, not IP geolocation.** India gets INR,
-  everywhere else gets USD, with a manual override always available. Simple,
-  no third-party geolocation dependency, good enough for a pricing-page
-  default.
-- **Razorpay first, Stripe second, not Stripe first with Razorpay as an
-  afterthought.** The product is India-first by market strategy, and
-  Stripe was already fully built from before this project's work began;
-  Razorpay was the piece that needed building to serve the actual first
-  target market.
-- **Cross-account IAM roles, not a shared Clew-owned key pair.** Each
-  customer creates an IAM role in their own AWS account trusting Clew's
-  account, conditioned on a per-org, server-generated External ID. Clew calls
-  `sts:AssumeRole` and works with one-hour temporary credentials. The same
-  role carries both S3 read and WAF blocking permissions, so there is one
-  trust relationship, not two. This replaced the original design (one shared
-  IAM user with a long-lived key pair accessing every customer's bucket),
-  which was rebuilt in 2026-09-30's phase 2 because the blast radius of a
-  single leaked key was every customer at once, with no expiry, no rotation
-  path, no customer-side revocation, and no protection against the confused-
-  deputy attack that the External ID specifically closes. The ambient-
-  credential path still exists as a fallback for any org without a role ARN,
-  and gets removed once every org has migrated.
-- **Separate hosts for marketing, app and API (2026-11-05).** The app lives
-  on its own host so the marketing site (indexed, public, canonical) and the
-  authenticated app (noindex, cookies) never share an origin.
-
-  | Host | Serves |
-  |---|---|
-  | `www.clewsec.com` | Marketing site, canonical. `/api/` proxied by nginx |
-  | `clewsec.com` | 301 to `www` |
-  | `dashboard.clewsec.com` | The app at the root path (no `/dashboard` prefix), `/api/` proxied by nginx |
-  | `api.clewsec.com` | FastAPI directly, for webhooks and the external API only |
-
-  It is one Next.js process. `frontend/src/proxy.ts` checks the Host header
-  and rewrites dashboard-host paths to the existing `app/dashboard/*` folder,
-  so the folder name never appears in a URL (old `/dashboard/...` URLs get a
-  308 to the unprefixed path). The browser calls the API same-origin at
-  `/api/*`, which nginx maps to FastAPI. That mapping stays in nginx and is
-  never a Next.js rewrite in production, because a rewrite hides the client IP
-  from the rate limiter. Cookies are host-only (`COOKIE_DOMAIN` blank), since
-  the host that serves the page is the host that sets the cookie.
-  `LEGACY_COOKIE_DOMAIN` exists only to delete the old `.clewsec.com` cookies
-  during the transition. Env vars: `DASHBOARD_URL` (dashboard URL),
-  `HOME_URL` (marketing URL), `DASHBOARD_HOST`, `NEXT_PUBLIC_DASHBOARD_URL`,
-  `NEXT_PUBLIC_SITE_URL`, `NEXT_PUBLIC_API_URL=/api`, `API_INTERNAL_URL`
-  (see README, "Hosts and environment variables"). Dev: marketing at
-  `http://localhost:3000`, app at `http://dashboard.localhost:3000`.
+- **Zero integration, always** for the core product. An inline proxy is only a possible Enterprise option.
+- **Organization-centric multi-tenancy** over per-login config, so team access, billing and roles stay coherent.
+- **Rules decide, the LLM explains.** The verdict never depends on model output.
+- **Long-term memory in Redis, not Postgres**: high-write, engine-internal state nobody queries relationally.
+- **httpOnly cookies, not localStorage**, for tokens; the cost is a refresh step in `proxy.ts` and `apiFetch()`.
+- **Razorpay first, Stripe optional later.** The Stripe routes and columns are kept but unused.
+- **One role, two capability sets** for customer AWS access (S3 read and optional WAF), not two trust relationships.
+- **Same-origin `/api` through nginx**, never a Next.js rewrite (it hides the client IP from the rate limiter).
+- **Gotchas already paid for:**
+  - Every Celery task module must be listed in `include=[...]` in `workers/celery_app.py`; a missing one fails silently.
+    After adding one, read the worker startup `[tasks]` list. Celery task lines go to stderr (`pm2 logs ... --err`).
+  - FastAPI with `from __future__ import annotations` and a slowapi `@limiter.limit` decorator turns body parameters
+    into required query parameters (422 on every request). Do not add that import to a route file that uses the limiter.
+    This is the "FastAPI body parameter note" that `api/routes/internal.py` refers to.
+  - `db/session.py`, `api/main.py` and the Celery app load `.env` then `.env.local` with override, so a local
+    `.env.local` must never be copied to the server. Do not `source .env` in a shell (special characters).
+  - Migrations: run `alembic heads` for the real `down_revision`; there should be exactly one head.
+  - A uvicorn started without `--reload` keeps serving old code after an edit.
+  - `NEXT_PUBLIC_*` variables are baked in at `npm run build`; change them, rebuild.
+  - Do not use an em dash anywhere in the repo (frontend copy, docs, comments, chat replies); see
+    `frontend/DESIGN_SYSTEM.md`.
 
 ---
 
 ## Where to Look for What
 
-- **README.md**: the reference doc. Architecture, exact database schema,
-  every API route, how to run everything locally, how to deploy to
-  production, day-to-day operational commands.
-- **TODO.md** (gitignored): everything still to do, grouped by topic, in no
-  particular order, plus the Razorpay go-live checklist at the top (the one
-  piece of active, non-future work). There is no separate build-history file
-  anymore, the phase-by-phase account above is the durable record of that.
-- **DESIGN_SYSTEM.md** (inside `frontend/`): the frontend's visual rules,
-  read this before touching any CSS or adding new UI.
-- **This file**: why things are built the way they are, the history behind
-  non-obvious decisions, and known gaps worth remembering before assuming
-  something is a bug.
+- **README.md**: reference. Structure, schema, every route, running locally, deploying, backups, the Clew Audit runbook.
+- **TODO.md** (gitignored, private): what is open (Part 1), future work (Part 2), reference and decisions (Part 3) and
+  the archive of finished phases (Part 4). Item and phase numbers are stable.
+- **frontend/DESIGN_SYSTEM.md**: the visual rules (monospace, no gradients, no rounded corners, no emoji, no em dash).
+  Read it before touching CSS or UI copy.
+- **frontend/AGENTS.md** and **frontend/CLAUDE.md**: notes for coding agents working on the frontend (Next.js 16).
+- **.github/copilot-instructions.md**: the working rules for AI agents in this repo (ask before editing code).
+- **This file**: why things are built the way they are and the traps to avoid.
