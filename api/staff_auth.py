@@ -54,8 +54,11 @@ def _fail_closed_on_redis_error(fn):
     return wrapper
 
 
-def _fail_key(email: str) -> str:
-    return f"clew:staff_login_fail:{hashlib.sha256(email.lower().encode()).hexdigest()}"
+def _fail_key(email: str, ip: str) -> str:
+    # Phase 14: keyed on email AND source IP, so someone guessing from another
+    # address cannot lock the real staff user out of their own login.
+    ident = f"{email.lower()}|{ip}"
+    return f"clew:staff_login_fail:{hashlib.sha256(ident.encode()).hexdigest()}"
 
 
 @_fail_closed_on_redis_error
@@ -69,22 +72,22 @@ def ip_within_limit(ip: str) -> bool:
 
 
 @_fail_closed_on_redis_error
-def is_locked_out(email: str) -> bool:
-    count = _redis.get(_fail_key(email))
+def is_locked_out(email: str, ip: str) -> bool:
+    count = _redis.get(_fail_key(email, ip))
     return count is not None and int(count) >= LOGIN_FAIL_LIMIT
 
 
 @_fail_closed_on_redis_error
-def record_failure(email: str) -> None:
-    key = _fail_key(email)
+def record_failure(email: str, ip: str) -> None:
+    key = _fail_key(email, ip)
     count = _redis.incr(key)
     if count == 1:
         _redis.expire(key, LOGIN_FAIL_WINDOW)
 
 
 @_fail_closed_on_redis_error
-def reset_failures(email: str) -> None:
-    _redis.delete(_fail_key(email))
+def reset_failures(email: str, ip: str) -> None:
+    _redis.delete(_fail_key(email, ip))
 
 
 def password_matches(staff: StaffUser | None, password: str) -> bool:

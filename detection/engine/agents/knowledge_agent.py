@@ -167,6 +167,12 @@ class KnowledgeAgent:
         """
         return None
 
+    def live_known_bad(self, ip: str) -> bool:
+        """True only when the live intel source flags `ip`. The static seed is not consulted."""
+        if self._intel is None:
+            return False
+        return self._intel.is_known_bad(ip) is True
+
     # ── has_known_bad_in_batch (for triage step) ──────────────────────────
 
     def has_known_bad_in_batch(self, records) -> bool:

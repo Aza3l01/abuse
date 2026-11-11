@@ -62,11 +62,11 @@ from api.billing_payments import (
     refund_window,
     resolve_currency,
 )
-from api.billing_rules import PERIODS, classify_change, today_ist
+from api.billing_rules import PERIODS, as_utc, classify_change, today_ist
 from api.deps import CurrentOrg, get_current_client, get_current_org, get_db, require_role
 from api.referrals import referral_summary, revoke_for_refunded_referee
 from api.tiers import PURCHASABLE_PLANS, plan_price
-from db.models import Client, Organization, Payment, ProcessedWebhookEvent
+from db.models import BillingEvent, Client, Organization, Payment, ProcessedWebhookEvent
 from db.session import SessionLocal
 from workers.tasks.billing_cycle import downgrade_org
 
@@ -636,11 +636,11 @@ def razorpay_create_order(
         logger.exception("billing: Razorpay order creation failed for org %s", org.id)
         raise HTTPException(502, "Could not start Razorpay checkout. Please try again.")
 
-    # The first checkout fixes the org's billing country and currency for good.
-    if plan.billing_country:
-        lock_billing_currency(org, plan.currency, plan.billing_country)
-
+    # Phase 14 (F-029): opening checkout no longer fixes the billing country. The
+    # choice travels on the payment and is locked when the money is captured.
     line_items = dict(plan.line_items)
+    if plan.billing_country:
+        line_items["billing_country"] = plan.billing_country
     if period == "annual" and purpose != "bill":
         line_items["annual_nonrefundable_accepted"] = True
 
@@ -697,6 +697,40 @@ def _checkout_signature_ok(order_id: str, payment_id: str, signature: str) -> bo
     return hmac.compare_digest(expected, signature)
 
 
+def _unapplied(payment: Payment) -> bool:
+    return bool((payment.line_items or {}).get("unapplied"))
+
+
+def _refund_unapplied(payment: Payment, db: Session) -> bool:
+    """Phase 14 (F-030): a captured payment that bought nothing (a second open
+    order paid after the first, an upgrade after the plan moved, a currency that
+    no longer matches) is refunded in full right away. Runs after the capture
+    is committed. If Razorpay refuses, the payment stays `captured` with the
+    `unapplied` marker and the error is logged for a manual dashboard refund."""
+    if payment.status != "captured" or not payment.razorpay_payment_id:
+        return False
+    now = datetime.now(timezone.utc)
+    try:
+        _init_razorpay().payment.refund(
+            payment.razorpay_payment_id,
+            {"amount": payment.amount_paise, "notes": {"payment_id": payment.id, "reason": "not_applied"}},
+        )
+    except Exception:
+        logger.exception(
+            "billing: automatic refund of unapplied payment %s failed, needs manual dashboard action", payment.id
+        )
+        return False
+    payment.status = "refunded"
+    payment.refunded_at = now
+    db.add(BillingEvent(
+        org_id=payment.org_id, event="payment_auto_refunded", from_tier=None, to_tier=None, period=None,
+        amount_paise=payment.amount_paise, currency=payment.currency, created_at=now,
+    ))
+    db.commit()
+    logger.error("billing: unapplied payment %s refunded automatically", payment.id)
+    return True
+
+
 @router.post("/razorpay/verify-payment", response_model=VerifyPaymentOut)
 def razorpay_verify_payment(
     body: VerifyPaymentBody,
@@ -747,6 +781,9 @@ def razorpay_verify_payment(
         method_display=_payment_method_display(rz_payment),
     )
     db.commit()
+    if applied and _unapplied(payment):
+        _refund_unapplied(payment, db)
+        return VerifyPaymentOut(status="captured", payment_id=payment.id, applied=False)
     if applied:
         notify("payment_received", org, payment=payment)
     return VerifyPaymentOut(status="captured", payment_id=payment.id, applied=applied)
@@ -793,6 +830,9 @@ async def razorpay_webhook(request: Request):
         for payment_id in applied_payment_ids:
             payment = db.get(Payment, payment_id)
             org = db.get(Organization, payment.org_id) if payment and payment.org_id else None
+            if payment is not None and _unapplied(payment):
+                _refund_unapplied(payment, db)
+                continue
             if payment is not None and org is not None:
                 notify("payment_received", org, payment=payment)
     except Exception:
@@ -894,6 +934,11 @@ def _handle_razorpay_event(event: dict, db: Session) -> list[str]:
                 and payment.captured_at <= refunded_org.first_charged_at + REFUND_WINDOW
             ):
                 revoke_for_refunded_referee(db, refunded_org.id, now)
+                # Phase 14 (F-033): the same outcome as POST /billing/refund. A
+                # refund after the 72 hour window leaves the plan alone (a staff
+                # goodwill refund keeps the plan until it is cancelled).
+                if not _unapplied(payment) and now < as_utc(refunded_org.first_charged_at) + REFUND_WINDOW:
+                    downgrade_org(refunded_org, db, "refund", now, amount_paise=payment.amount_paise)
 
     return applied_ids
 
@@ -1182,7 +1227,7 @@ def _receipt_lines(p: Payment) -> list[dict]:
 
 @router.get("/payments/{payment_id}", response_model=ReceiptOut)
 def billing_receipt(
-    payment_id: str,
+    payment_id: uuid.UUID,  # Phase 14 (F-008): a malformed id is a 422, not a database error
     current_org: CurrentOrg = Depends(require_role("owner")),
     db: Session = Depends(get_db),
 ):
@@ -1190,7 +1235,7 @@ def billing_receipt(
     p = (
         db.query(Payment)
         .filter(
-            Payment.id == payment_id,
+            Payment.id == str(payment_id),
             Payment.org_id == org.id,
             Payment.status.in_(("captured", "refunded")),
         )

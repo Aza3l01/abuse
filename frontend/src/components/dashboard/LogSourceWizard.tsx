@@ -281,7 +281,7 @@ export function LogSourceWizard({
             format differently, so this has to match exactly.
           </p>
           <select value={format} onChange={e => setFormat(e.target.value)} style={selectStyle} autoFocus>
-            <option value="">— Select format —</option>
+            <option value="">Select format</option>
             <option value="apigw">API Gateway (apigw)</option>
             <option value="alb">Application Load Balancer (alb)</option>
           </select>

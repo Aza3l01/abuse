@@ -86,6 +86,10 @@ class DashboardSummary(BaseModel):
     # "your administrator is still setting this up" instead of a 403.
     onboarding_completed_at:    Optional[datetime]
     onboarding_dismissed_at:    Optional[datetime]
+    # Phase 12b: set while the team has paused scanning. Exposed here so a
+    # viewer (who cannot reach Settings or /clients/me) still sees why the
+    # dashboard is not updating.
+    scanning_paused_at:         Optional[datetime] = None
 
 
 # ---------------------------------------------------------------------------
@@ -267,4 +271,5 @@ def get_summary(
         monthly_requests_cap=CALL_VOLUME_CAPS.get(org.tier),
         onboarding_completed_at=org.onboarding_completed_at,
         onboarding_dismissed_at=org.onboarding_dismissed_at,
+        scanning_paused_at=org.scanning_paused_at,
     )

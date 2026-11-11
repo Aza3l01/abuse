@@ -48,16 +48,24 @@ def test_an_org_with_no_country_must_send_one(env, db):
     assert env.rp.orders == {}
 
 
-def test_india_is_charged_in_inr_and_locks_the_org(env, db):
+def test_india_is_charged_in_inr_and_locks_the_org_when_the_payment_is_taken(env, db):
     org = env.act_as(_fresh_org(db))
     resp = _order(env, country="in")
     assert resp.status_code == 200
     assert resp.json()["currency"] == "INR"
     assert resp.json()["amount"] == plan_price("INR", "basic", "monthly")
+    # Phase 14 (F-029): opening checkout writes nothing on the org.
+    db.expire_all()
+    org = db.get(Organization, org.id)
+    assert (org.billing_currency, org.billing_country) == ("USD", None)
+    assert db.query(Payment).one().currency == "INR"
+    # The lock happens when the payment is captured.
+    rz_id = env.rp.pay(resp.json()["order_id"])
+    assert env.verify(resp.json()["order_id"], rz_id).status_code == 200
     db.expire_all()
     org = db.get(Organization, org.id)
     assert (org.billing_currency, org.billing_country) == ("INR", "IN")
-    assert db.query(Payment).one().currency == "INR"
+    assert org.tier == "basic"
 
 
 def test_any_other_country_is_charged_in_usd(env, db):
@@ -69,7 +77,7 @@ def test_any_other_country_is_charged_in_usd(env, db):
     assert data["amount"] == 4900
     assert env.rp.orders[data["order_id"]]["currency"] == "USD"
     db.expire_all()
-    assert db.get(Organization, org.id).billing_country == "US"
+    assert db.get(Organization, org.id).billing_country is None
     assert db.query(Payment).one().currency == "USD"
 
 
@@ -581,6 +589,17 @@ def test_voluntary_cancelled_email_needs_no_bill():
     subject, text, _html = render_billing_email("cancelled", org)
     assert "as you asked" in text
     assert EM_DASH not in subject + text
+
+
+def test_pilot_ended_email_needs_no_bill_and_goes_to_the_owners():
+    from api.billing_emails import ALWAYS_OWNER_KINDS
+
+    org = SimpleNamespace(company_name="Acme")
+    subject, text, body_html = render_billing_email("pilot_ended", org)
+    assert subject == "Your Clew pilot has ended"
+    assert "Starter" in text and "30 days" in text
+    assert EM_DASH not in subject + text + body_html
+    assert "pilot_ended" in ALWAYS_OWNER_KINDS
 
 
 def test_company_name_is_escaped_in_the_html_footer():

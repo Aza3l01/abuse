@@ -18,10 +18,10 @@ export function Hero() {
           className="text-lg leading-relaxed mb-10"
           style={{ color: "var(--color-text-muted)" }}
         >
-          Six specialized agents deployed against your AWS API
-          Gateway and ALB logs, each independently trained on a different
-          attack vector and all running in parallel. Bots, credential
-          stuffing, endpoint scanning, data exfiltration. No code changes.
+          Up to six specialized agents deployed against your AWS API
+          Gateway and ALB logs, each tuned to a different attack
+          pattern and running in parallel. Bots, credential
+          stuffing, endpoint scanning, DoS floods. No code changes.
           No proxy. Just connect your S3 logs.
         </p>
 

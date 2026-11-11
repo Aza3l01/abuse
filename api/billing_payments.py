@@ -321,14 +321,21 @@ def _mark_bills_paid(db, org: Organization, bill_ids: list[str], payment: Paymen
             )
 
 
-def _apply_plan_purchase(db, org, payment, items: dict, now: datetime, restore: bool) -> None:
+def _mark_unapplied(payment: Payment, reason: str) -> None:
+    """Phase 14 (F-030): money was taken but nothing was bought. The reason is
+    kept on the payment (no migration) and the route that took the capture
+    refunds it automatically once the capture is committed."""
+    payment.line_items = {**(payment.line_items or {}), "unapplied": reason}
+    logger.error(
+        "billing: payment %s (%s) captured but not applied (%s), org left unchanged, refund queued",
+        payment.id, payment.purpose, reason,
+    )
+
+
+def _apply_plan_purchase(db, org, payment, items: dict, now: datetime, restore: bool) -> str | None:
+    """Returns None when applied, or the reason the payment buys nothing."""
     if on_paid_plan(org):
-        logger.error(
-            "billing: payment %s (%s) captured for org %s that already has a paid plan, "
-            "org left unchanged, needs a manual refund",
-            payment.id, payment.purpose, org.id,
-        )
-        return
+        return "org_already_on_a_paid_plan"
     tier, period = items["tier"], items["period"]
     first = org.first_charged_at is None
     old_tier = org.tier
@@ -364,17 +371,13 @@ def _apply_plan_purchase(db, org, payment, items: dict, now: datetime, restore: 
             "restore": restore,
         },
     )
+    return None
 
 
-def _apply_upgrade(db, org, payment, items: dict, now: datetime) -> None:
+def _apply_upgrade(db, org, payment, items: dict, now: datetime) -> str | None:
     old = (items["from_tier"], items["from_period"])
     if (org.tier, org.billing_period) != old:
-        logger.error(
-            "billing: upgrade payment %s captured but org %s is no longer on %s/%s, "
-            "org left unchanged, needs a manual refund",
-            payment.id, org.id, *old,
-        )
-        return
+        return "plan_changed_since_the_order"
     tier, period = items["tier"], items["period"]
     old_tier = org.tier
     if period == "annual":
@@ -390,6 +393,7 @@ def _apply_upgrade(db, org, payment, items: dict, now: datetime) -> None:
     org.pending_tier = None
     org.pending_period = None
     _event(db, org, "upgraded", old_tier, tier, period, payment.amount_paise, now)
+    return None
 
 
 def apply_captured_payment(
@@ -445,21 +449,26 @@ def apply_captured_payment(
             "currency": locked.currency,
         },
     )
+    # Phase 14 (F-029): the billing country and currency are fixed by the first
+    # payment that is actually taken, not by opening checkout.
+    country = items.get("billing_country")
+    if country and not org.billing_country:
+        lock_billing_currency(org, locked.currency, country)
     if locked.currency != org.billing_currency:
-        logger.error(
-            "billing: payment %s is in %s but org %s bills in %s, org left unchanged, "
-            "needs a manual refund",
-            locked.id, locked.currency, org.id, org.billing_currency,
-        )
+        _mark_unapplied(locked, "currency_differs_from_the_org")
         return True
+    reason: str | None = None
     if locked.purpose in ("initial", "restore"):
-        _apply_plan_purchase(db, org, locked, items, moment, restore=locked.purpose == "restore")
+        reason = _apply_plan_purchase(db, org, locked, items, moment, restore=locked.purpose == "restore")
     elif locked.purpose == "upgrade":
-        _apply_upgrade(db, org, locked, items, moment)
+        reason = _apply_upgrade(db, org, locked, items, moment)
     elif locked.purpose == "bill":
         _mark_bills_paid(db, org, items.get("bill_ids", []), locked, moment)
     else:
         logger.error("billing: payment %s has unknown purpose %r", locked.id, locked.purpose)
+        return True
+    if reason:
+        _mark_unapplied(locked, reason)
         return True
 
     _stamp(org, locked, method_display, moment)

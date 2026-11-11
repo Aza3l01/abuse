@@ -132,8 +132,10 @@ run automatic blocking in dry run mode (`auto_block_dry_run`), which records
 `would_have_blocked_at` on verdicts without touching the WAF or Cloudflare.
 Pro and Enterprise also get cross-IP clustering (Pass C), which is alert
 only and uses the template explanation. Unverified: Groq pricing for
-`openai/gpt-oss-20b` (the pricing page was blocked), and AbuseIPDB lookups
-stay off until the founder sets `ABUSEIPDB_API_KEY`.
+`openai/gpt-oss-20b` (the pricing page was blocked), and live AbuseIPDB
+lookups (wired 2026-11-11, off while `ABUSEIPDB_API_KEY` is blank). A hit adds
+0.08 confidence to an already flagged batch and never creates a detection.
+Offline tests could only use stubs, so the real benefit is unmeasured.
 
 ---
 

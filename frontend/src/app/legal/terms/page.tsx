@@ -37,6 +37,14 @@ export default function TermsPage() {
         volume. Dashboard access, existing data and IP addresses already
         blocked are not affected by a pause.
       </p>
+      <p style={legalPStyle}>
+        You can also pause scanning yourself. An owner or admin can pause and
+        resume scanning from Settings. While scanning is paused by you, log
+        files that arrive are not analysed, and when you resume, the logs
+        written during the pause are skipped, now and later. Saved verdicts,
+        blocking rules, alerts for earlier findings, your account and billing
+        are not affected by a pause.
+      </p>
 
       <h2 style={legalH2Style}>2. Accounts</h2>
       <p style={legalPStyle}>

@@ -26,6 +26,7 @@ from api.referrals import approve_credit, revoke_credit
 from db.models import Bill, Credit, Organization, Payment, PromoCode
 
 MIN_REASON_LENGTH = 10
+PILOT_CODE_LIFETIME_CAP = 500
 _CODE_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"  # no 0/O/1/I
 
 
@@ -198,6 +199,12 @@ def generate_pilot_codes(db, count: int) -> list[str]:
     """Single-use pilot codes (kind 'admin', 30 days of Growth at registration)."""
     if not 1 <= count <= 50:
         raise HTTPException(400, "Count must be between 1 and 50.")
+    # Phase 14: the documented lifetime cap of 500 pilot codes.
+    issued = db.query(PromoCode.id).filter(PromoCode.kind == "admin").count()
+    if issued + count > PILOT_CODE_LIFETIME_CAP:
+        raise HTTPException(
+            400, f"Pilot code limit reached: {issued} of {PILOT_CODE_LIFETIME_CAP} codes already issued."
+        )
     codes: list[str] = []
     while len(codes) < count:
         code = "CLEW-" + "".join(secrets.choice(_CODE_ALPHABET) for _ in range(5))

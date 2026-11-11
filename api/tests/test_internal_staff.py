@@ -211,6 +211,19 @@ def test_five_failures_lock_the_email_even_for_the_right_code(env, fake_redis, d
     assert login(env.client).status_code == 429
 
 
+def test_failures_from_another_address_do_not_lock_the_real_staff_user_out(env, fake_redis, db, monkeypatch):
+    import api.routes.internal as internal_routes
+
+    make_staff(db)
+    source = {"ip": "203.0.113.50"}
+    monkeypatch.setattr(internal_routes, "client_ip", lambda request: source["ip"])
+    for _ in range(5):
+        assert login(env.client, code="000000").status_code == 401
+    assert login(env.client).status_code == 429
+    source["ip"] = "198.51.100.7"
+    assert login(env.client).status_code == 200
+
+
 def test_ip_rate_limit(env, fake_redis, db):
     for i in range(10):
         assert login(env.client, email=f"nobody{i}@clew.test").status_code == 401
@@ -378,7 +391,10 @@ def test_mark_paid_refusals_change_nothing(panel, db):
     url = f"/internal/orgs/{org.id}/bills/mark-paid"
     assert panel.post(url, {"bill_id": bill.id, "reference": "R", "reason": "short"}).status_code == 400
     assert panel.post(url, {"bill_id": bill.id, "reference": "", "reason": LONG_REASON}).status_code == 422
-    assert panel.post(url, {"bill_id": "nope", "reference": "R", "reason": LONG_REASON}).status_code == 404
+    # Phase 14 (F-008): a malformed bill id is a 422, an unknown well-formed one a 404.
+    assert panel.post(url, {"bill_id": "nope", "reference": "R", "reason": LONG_REASON}).status_code == 422
+    unknown = "6f0c9d2e-1111-4222-8333-444455556666"
+    assert panel.post(url, {"bill_id": unknown, "reference": "R", "reason": LONG_REASON}).status_code == 404
     other = seed_other_org(db)
     foreign = make_bill(db, other)
     assert panel.post(url, {"bill_id": foreign.id, "reference": "R", "reason": LONG_REASON}).status_code == 404
@@ -545,6 +561,17 @@ def test_pilot_codes(panel, db):
     assert row.details["count"] == 3 and row.org_id is None
 
 
+def test_pilot_codes_stop_at_the_lifetime_cap(panel, db):
+    from api.staff_ops import PILOT_CODE_LIFETIME_CAP
+
+    for i in range(PILOT_CODE_LIFETIME_CAP - 5):
+        db.add(PromoCode(code=f"CLEW-OLD{i:05d}", kind="admin", max_redemptions=1))
+    db.commit()
+    assert panel.post("/internal/pilot-codes", {"count": 6, "reason": LONG_REASON}).status_code == 400
+    assert panel.post("/internal/pilot-codes", {"count": 5, "reason": LONG_REASON}).status_code == 200
+    assert panel.post("/internal/pilot-codes", {"count": 1, "reason": LONG_REASON}).status_code == 400
+
+
 # --- referrals (Phase 12) -------------------------------------------------------
 
 def _referral_credit(db, org, status="available", amount=199_900, source=None):
@@ -617,6 +644,13 @@ def test_referral_overview_lists_referrers_edges_and_held_credits(panel, db):
     assert [c["status"] for c in body["held"]] == ["held"]
     assert body["held"][0]["source_org_name"] == "Referee Co"
 
+
+def test_referral_overview_is_empty_without_signups_or_credits(panel):
+    # Phase 14 (F-031): launch-day state. Postgres rejected '' as a UUID here (500).
+    body = panel.get("/internal/referrals")
+    assert body.status_code == 200
+    data = body.json()
+    assert data["referrers"] == [] and data["held"] == [] and data["recent"] == [] and data["edges"] == []
 
 def test_account_view_carries_credits_and_the_credit_applied_on_bills(panel, db):
     org = seed_account(db)
@@ -776,3 +810,31 @@ def test_entered_rate_must_be_a_positive_number(panel):
     for bad in ("abc", "0", "-5", "nan"):
         assert panel.get("/internal/metrics", params={"rate": bad}).status_code == 422
         assert panel.get("/internal/metrics/export.csv", params={"rate": bad}).status_code == 422
+
+
+def test_metrics_json_has_the_signup_source_table(panel, db):
+    now = datetime.now(timezone.utc)
+    make_org(db, tier="basic", name="Payer", signup_source="llm", first_charged_at=now, created_at=now)
+    make_org(db, tier="starter", name="Other", signup_source="other", signup_source_detail="a talk", created_at=now)
+    table = panel.get("/internal/metrics").json()["signup_sources"]
+    rows = {r["source"]: r for r in table["rows"]}
+    assert table["window_days"] == 30
+    assert rows["llm"] == {"source": "llm", "signups": 1, "paid": 1}
+    assert rows["other"]["signups"] == 1
+    assert [a["detail"] for a in table["other_answers"]] == ["a talk"]
+    # Phase 14 (F-032): the answers table shows the company name, not only the UUID.
+    assert table["other_answers"][0]["org_name"] == "Other"
+
+def test_lookup_shows_the_signup_answer_and_the_customer_pause(panel, db):
+    org = seed_account(db)
+    owner = db.query(Client).first()
+    org.signup_source = "other"
+    org.signup_source_detail = "a conference talk"
+    org.scanning_paused_at = datetime.now(timezone.utc)
+    org.scanning_paused_by = owner.id
+    db.commit()
+    body = panel.get(f"/internal/orgs/{org.id}").json()
+    assert body["org"]["signup_source"] == "other"
+    assert body["org"]["signup_source_detail"] == "a conference talk"
+    assert body["scan"]["scanning_paused_at"] is not None
+    assert body["scan"]["scanning_paused_by_email"] == owner.email

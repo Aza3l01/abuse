@@ -167,6 +167,10 @@ class MetaAgentOrchestrator:
     _SINGLE_AGENT_THRESHOLD    = 0.80   # when only 1/3 agents fires
     _MIN_CONTRIBUTING_AGENTS   = 1      # at least 1 agent with conf >= 0.55
 
+    # Confidence added when the live intel source flags the IP under investigation.
+    # Smaller than any compound boost, and only applied once an agent has already fired.
+    _REPUTATION_BOOST          = 0.08
+
     def __init__(
         self,
         memory: SharedMemory,
@@ -258,12 +262,25 @@ class MetaAgentOrchestrator:
         # does not depend on one customer's tuning.
         tuned_findings = self._apply_agent_minimums(findings)
 
+        # Live reputation of the IP under investigation, looked up only once an
+        # agent has fired so clean traffic never leaves the engine.
+        reputation_ip = self._known_bad_ip(records, tuned_findings)
+        if reputation_ip:
+            self.tools.call(
+                "post_to_evidence_board",
+                posted_by="KnowledgeAgent",
+                key=f"knowledge:known_bad:{reputation_ip}",
+                value={"ip": reputation_ip, "source": "abuseipdb"},
+                confidence=0.85,
+                tags=["knowledge", "threat_intel"],
+            )
+
         # ── Step 3: Read consolidated evidence board ─────────────────────
         all_evidence = self.tools.call("read_evidence_board")
         logger.info("[MetaAgent] Evidence board has %d entries", len(all_evidence))
 
         # ── Step 4: Conflict resolution & compound detection ─────────────
-        verdict = self._fuse(tuned_findings, all_evidence, plan)
+        verdict = self._fuse(tuned_findings, all_evidence, plan, reputation_ip=reputation_ip)
 
         # ── Step 4: Optional LLM explanation ─────────────────────────────
         # Phase 2 guardrail: the LLM only writes the explanation text, and
@@ -533,6 +550,17 @@ class MetaAgentOrchestrator:
             tuned.append(f)
         return tuned
 
+    # ── Live reputation (Phase 8) ──────────────────────────────────────────
+
+    def _known_bad_ip(self, records: List[LogRecord], findings: List[AgentFinding]) -> Optional[str]:
+        """The batch's primary IP when the live intel source flags it and an agent has fired."""
+        if not records or not any(f.threat_detected for f in findings):
+            return None
+        # Same primary IP the pipeline attributes the verdict to.
+        from collections import Counter
+        primary_ip = Counter(r.ip for r in records).most_common(1)[0][0]
+        return primary_ip if self._knowledge.live_known_bad(primary_ip) else None
+
     # ── Fusion logic ────────────────────────────────────────────────────────
 
     def _fuse(
@@ -540,6 +568,7 @@ class MetaAgentOrchestrator:
         findings: List[AgentFinding],
         evidence: List[Dict],
         plan: Optional[DispatchPlan] = None,
+        reputation_ip: Optional[str] = None,
     ) -> FusionVerdict:
 
         active = [f for f in findings if f.threat_detected]
@@ -601,6 +630,7 @@ class MetaAgentOrchestrator:
             ]
 
         # ── Weighted confidence fusion ────────────────────────────────────
+        reputation_boost = self._REPUTATION_BOOST if reputation_ip else 0.0
         total_weight = 0.0
         weighted_conf = 0.0
         contributing = []
@@ -616,7 +646,7 @@ class MetaAgentOrchestrator:
                 contributing.append(f.agent_name)
 
         if total_weight > 0:
-            fused_conf = min(1.0, weighted_conf / total_weight + compound_boost)
+            fused_conf = min(1.0, weighted_conf / total_weight + compound_boost + reputation_boost)
         else:
             fused_conf = 0.0
 
@@ -639,7 +669,7 @@ class MetaAgentOrchestrator:
             single_conf = max(
                 (f.confidence_score for f in resolved_findings if f.threat_detected),
                 default=0.0,
-            )
+            ) + reputation_boost
             is_attack = single_conf >= self._SINGLE_AGENT_THRESHOLD and final_threat != ThreatType.NONE
             if is_attack:
                 logger.debug(
@@ -681,7 +711,8 @@ class MetaAgentOrchestrator:
 
         # ── Build explanation ─────────────────────────────────────────────
         explanation = self._build_explanation(
-            resolved_findings, compound_signals, fused_conf, is_attack, plan
+            resolved_findings, compound_signals, fused_conf, is_attack, plan,
+            reputation_ip=reputation_ip,
         )
 
         return FusionVerdict(
@@ -775,12 +806,19 @@ class MetaAgentOrchestrator:
         fused_conf: float,
         is_attack: bool,
         plan: Optional[DispatchPlan] = None,
+        reputation_ip: Optional[str] = None,
     ) -> str:
         lines = []
         if is_attack:
             lines.append(f"⚠️  ATTACK DETECTED (fused confidence={fused_conf:.0%})")
         else:
             lines.append(f"✅  No attack detected (fused confidence={fused_conf:.0%})")
+
+        if reputation_ip:
+            lines.append(
+                f"Reputation: {reputation_ip} is flagged by AbuseIPDB "
+                f"(+{self._REPUTATION_BOOST:.2f} confidence)"
+            )
 
         if plan and plan.reasoning:
             lines.append("Triage:")

@@ -19,6 +19,9 @@ interface OrgRow {
 interface SummaryOnboarding {
   onboarding_completed_at: string | null;
   onboarding_dismissed_at: string | null;
+  // Phase 14 (F-025): setup is clearly finished once logs are connected or a scan has run.
+  s3_configured?: boolean;
+  last_scan_completed_at?: string | null;
 }
 
 export interface OrgConfigForOnboarding {
@@ -149,6 +152,8 @@ export function OnboardingModal() {
         setOnboarding({
           onboarding_completed_at: summary.onboarding_completed_at,
           onboarding_dismissed_at: summary.onboarding_dismissed_at,
+          s3_configured: summary.s3_configured,
+          last_scan_completed_at: summary.last_scan_completed_at,
         });
         const isOwnerOrAdmin = active?.role === "owner" || active?.role === "admin";
         if (isOwnerOrAdmin && !summary.onboarding_completed_at && !summary.onboarding_dismissed_at) {
@@ -236,7 +241,10 @@ export function OnboardingModal() {
   }
 
   // Viewer, org not yet onboarded: a plain note, never a wizard it can't act on.
-  if (role === "viewer" && onboarding && !onboarding.onboarding_completed_at) {
+  if (
+    role === "viewer" && onboarding && !onboarding.onboarding_completed_at
+    && !onboarding.s3_configured && !onboarding.last_scan_completed_at
+  ) {
     return (
       <div style={{ padding: "8px 32px", fontSize: "12px", color: "var(--color-text-muted)" }}>
         Your administrator is still setting this workspace up.

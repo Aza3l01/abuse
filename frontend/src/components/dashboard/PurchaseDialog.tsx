@@ -216,7 +216,7 @@ export function PurchaseDialog({
                 </select>
                 <p style={{ ...noteStyle, marginTop: "6px" }}>
                   {currency ? `Billed in ${currency}. ` : "Your billing country sets your currency. "}
-                  Contact{" "}
+                  It is fixed once your first payment goes through. After that, contact{" "}
                   <a href="mailto:support@clewsec.com" style={{ color: "var(--color-text)" }}>support@clewsec.com</a>{" "}
                   to change it.
                 </p>

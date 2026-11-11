@@ -103,6 +103,13 @@ export interface MetricsView {
   /** Combined INR row, or a row with only a null inr_per_usd when the rate is not set. */
   combined_current: Row | null;
   combined_history: Row[];
+  /** Phase 12b: signups by "how did you hear about us" over the last window_days days. */
+  signup_sources: {
+    window_days: number;
+    rows: Row[];
+    /** Latest free-text answers for "other". A lookup list, not a metric. */
+    other_answers: Row[];
+  };
 }
 
 /** Minor units as a decimal in major units with the currency code, per row (the per-currency rows are never altered). */

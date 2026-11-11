@@ -42,8 +42,12 @@ export function DashboardSidebar({ company }: { company?: string }) {
   }, []);
 
   const activeOrg = orgs.find(o => o.active) ?? orgs[0];
-  // Settings and team management are hidden from viewers (item 8's RBAC).
-  const nav = activeOrg?.role === "viewer" ? NAV.filter(n => n.href !== "/settings") : NAV;
+  // Org settings are owner/admin only (item 8's RBAC). Phase 14 (F-024): a
+  // viewer keeps the same link, relabelled, because /settings shows them an
+  // account-security view (MFA, password, sessions) that the MFA nudge points to.
+  const nav = activeOrg?.role === "viewer"
+    ? NAV.map(n => n.href === "/settings" ? { ...n, label: "Account security" } : n)
+    : NAV;
 
   async function handleSwitchOrg(orgId: string) {
     if (orgId === activeOrg?.id) { setSwitcherOpen(false); return; }

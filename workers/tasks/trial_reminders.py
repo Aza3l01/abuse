@@ -23,6 +23,7 @@ if str(_REPO_ROOT) not in sys.path:
 from sqlalchemy import or_
 
 from api.auth_utils import send_trial_reminder_email
+from api.billing_notify import notify
 from api.tiers import CURRENCIES
 from db.models import Client, Organization, OrganizationMember
 from db.session import SessionLocal
@@ -82,6 +83,8 @@ def send_trial_reminders() -> dict:
                 downgrade_org(org, db, "trial_end", now)
                 db.commit()
                 expired += 1
+                # Phase 14 (F-034): tell the owners. Queued after the commit.
+                notify("pilot_ended", org, None)
                 continue
 
             if (

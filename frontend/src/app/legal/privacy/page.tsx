@@ -29,7 +29,10 @@ export default function PrivacyPage() {
         connect for analysis, which may include IP addresses, request
         methods, endpoints, and user-agents originating from your own
         traffic. Analytics data: how our website and dashboard are used and
-        errors they hit, described in section 10.
+        errors they hit, described in section 10. At sign-up you may also tell
+        us how you heard about Clew, and if you choose &quot;Other&quot; you
+        may type a short free-text answer. This answer is optional and is kept
+        with your organisation.
       </p>
 
       <h2 style={legalH2Style}>2. How we use it</h2>
@@ -46,7 +49,8 @@ export default function PrivacyPage() {
         Razorpay Checkout, and Clew sends Razorpay only the amount and an
         internal order reference), Resend (transactional email), MaxMind
         (IP geolocation lookups for GeoIP-based detection), Cloudflare (a bot
-        check on sign-up and password reset, which sees your IP address and
+        check on sign-up, sign-in, password reset, resending a verification
+        code and the newsletter form, which sees your IP address and
         browser signals), Better Stack (uptime monitoring and our status page,
         which receive no customer or log data) and PostHog (product
         analytics and error tracking, EU region; see section 10). For Growth-tier
@@ -57,7 +61,11 @@ export default function PrivacyPage() {
         and endpoint paths involved), in order to generate the plain-language
         threat explanation shown on a verdict&apos;s detail page. Raw request
         bodies and
-        other customer log content are not sent to Groq. Our Data Processing
+        other customer log content are not sent to Groq. On all plans, when
+        a batch of traffic is flagged by an agent, AbuseIPDB (IP reputation lookups)
+        receives the single public IP address under investigation, whether or
+        not the batch ends as a verdict, and
+        nothing else. Our Data Processing
         Agreement describing these in detail is on{" "}
         <Link href="/legal/dpa" style={{ color: "var(--color-text)" }}>our DPA page</Link>.
       </p>

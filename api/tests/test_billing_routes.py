@@ -434,7 +434,7 @@ def test_upgrade_rejects_downgrades_and_double_changes(env, db):
                             accept_blocking_tos=True, accept_annual_nonrefundable=True).status_code == 400
 
 
-def test_an_upgrade_payment_for_a_stale_plan_leaves_the_org_alone(env, db):
+def test_an_upgrade_payment_for_a_stale_plan_leaves_the_org_alone_and_is_refunded(env, db):
     org = env.act_as(make_org(db, tier="basic", period="monthly"))
     order = env.create_order(purpose="upgrade", tier="growth", period="monthly", accept_blocking_tos=True).json()
     org.tier = "pro"  # changed between order and capture
@@ -443,7 +443,12 @@ def test_an_upgrade_payment_for_a_stale_plan_leaves_the_org_alone(env, db):
     assert env.verify(order["order_id"], rz_id).status_code == 200
     db.expire_all()
     assert db.get(Organization, org.id).tier == "pro"
-    assert db.get(Payment, order["payment_id"]).status == "captured"
+    # Phase 14 (F-030): the unapplied charge is refunded automatically.
+    payment = db.get(Payment, order["payment_id"])
+    assert payment.status == "refunded"
+    assert len(env.rp.refund_calls) == 1
+    assert not _events(db, org, "upgraded")
+    assert len(_events(db, org, "payment_auto_refunded")) == 1
 
 
 def test_pay_a_bill_marks_it_paid(env, db):

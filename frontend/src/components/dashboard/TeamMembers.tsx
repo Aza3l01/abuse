@@ -214,6 +214,7 @@ export function TeamMembersSection({ myRole, onOwnershipTransferred }: { myRole:
 
   return (
     <div style={{ border: "1px solid var(--color-border)", background: "var(--color-bg)" }}>
+      <div style={{ overflowX: "auto" }}>
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
         <thead>
           <tr style={{ borderBottom: "1px solid var(--color-border)" }}>
@@ -289,6 +290,7 @@ export function TeamMembersSection({ myRole, onOwnershipTransferred }: { myRole:
           ))}
         </tbody>
       </table>
+      </div>
 
       {isOwner && notif && (
         <div style={{ borderTop: "1px solid var(--color-border)", padding: "18px 20px" }}>

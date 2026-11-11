@@ -45,7 +45,7 @@ def block_ip(ip: str, zone_id: str, token: str) -> tuple[bool, str | None]:
             logger.debug("cloudflare: %s already blocked on zone %s", ip, zone_id)
             return True, None
         if not data.get("success"):
-            error = str(data.get("errors"))
+            error = _readable_errors(data.get("errors"))
             logger.error("cloudflare: block %s failed: %s", ip, error)
             return False, error
         logger.info("cloudflare: blocked %s on zone %s", ip, zone_id)
@@ -71,7 +71,7 @@ def unblock_ip(ip: str, zone_id: str, token: str) -> tuple[bool, str | None]:
         r = httpx.delete(url, headers=_headers(token), timeout=_TIMEOUT)
         data = r.json()
         if not data.get("success"):
-            error = str(data.get("errors"))
+            error = _readable_errors(data.get("errors"))
             logger.error("cloudflare: unblock %s failed: %s", ip, error)
             return False, error
         logger.info("cloudflare: unblocked %s on zone %s", ip, zone_id)
@@ -84,6 +84,16 @@ def unblock_ip(ip: str, zone_id: str, token: str) -> tuple[bool, str | None]:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+def _readable_errors(errors) -> str:
+    """Phase 14 (F-026): the stored/shown error was the raw Python repr of
+    Cloudflare's error list. Join just the messages instead."""
+    messages = []
+    if isinstance(errors, list):
+        for item in errors:
+            if isinstance(item, dict) and item.get("message"):
+                messages.append(str(item["message"]))
+    return "; ".join(messages) if messages else "Cloudflare rejected the request."
 
 def _headers(token: str) -> dict:
     return {

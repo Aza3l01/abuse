@@ -108,6 +108,15 @@ class Organization(Base):
     # (OOM, PM2 restart, deploy) without ever reaching the except/finally block.
     last_scan_started_at       = Column(DateTime(timezone=True), nullable=True)
 
+    # Phase 12b: customer pause. NULL scanning_paused_at means scanning runs.
+    # scanning_paused_by is the owner or admin who paused (SET NULL if that
+    # login is ever purged). scanning_resumed_at is set on resume and read by
+    # the next scan, which then only reads objects modified at or after it
+    # (the pause backlog is skipped), and is cleared once the cursor moves on.
+    scanning_paused_at         = Column(DateTime(timezone=True), nullable=True)
+    scanning_paused_by         = Column(UUID(as_uuid=False), ForeignKey("clients.id", ondelete="SET NULL"), nullable=True)
+    scanning_resumed_at        = Column(DateTime(timezone=True), nullable=True)
+
     # Tenant's expected home country (ISO 3166-1 alpha-2), used by GeoIPAgent
     # to tell foreign concentration apart from normal home-country traffic.
     home_country               = Column(String(2), nullable=True)
@@ -164,6 +173,13 @@ class Organization(Base):
     # else's referral code (never an admin pilot code). Phase 12: the org's
     # first generated bill is free and the referrer earns a credit (Credit).
     referred_by_promo_code_id     = Column(UUID(as_uuid=False), ForeignKey("promo_codes.id", ondelete="SET NULL"), nullable=True)
+
+    # Phase 12b: the optional "how did you hear about us" answer, set once at
+    # creation. signup_source is one of api/routes/org.py's SIGNUP_SOURCES
+    # (NULL = not asked or skipped); signup_source_detail is the free text,
+    # stored only for "other". Never affects pricing or access.
+    signup_source                 = Column(String(30), nullable=True)
+    signup_source_detail          = Column(String(200), nullable=True)
 
     # Billing
     billing_provider            = Column(String(20), nullable=True)   # stripe | razorpay | pilot
@@ -660,7 +676,7 @@ class BillingEvent(Base):
     id          = Column(UUID(as_uuid=False), primary_key=True, default=_uuid)
     org_id      = Column(UUID(as_uuid=False), ForeignKey("organizations.id", ondelete="SET NULL"), nullable=True, index=True)
     # first_paid | upgraded | downgraded | cancelled | nonpayment_downgrade |
-    # trial_end | restored | refunded
+    # trial_end | restored | refunded | account_deleted | payment_auto_refunded
     event       = Column(String(30), nullable=False)
     from_tier   = Column(String(20), nullable=True)
     to_tier     = Column(String(20), nullable=True)

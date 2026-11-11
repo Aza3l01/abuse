@@ -15,13 +15,27 @@ interface StatusSummary {
   s3_status: string | null;
   last_scan_completed_at: string | null;
   last_scan_status: string | null;
+  scanning_paused_at: string | null;
 }
+
+// Dispatched by the Settings scanning card after a pause or resume so this
+// header refetches without a page reload.
+export const SCANNING_CHANGED_EVENT = "clew:scanning-changed";
 
 function minutesAgo(iso: string): number {
   return Math.floor((Date.now() - new Date(iso).getTime()) / 60000);
 }
 
 function ScanStatus({ s }: { s: StatusSummary }) {
+  // A pause by the team wins over the cap message: it is the more deliberate state.
+  if (s.scanning_paused_at) {
+    const since = new Date(s.scanning_paused_at).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+    return (
+      <Link href="/settings#scanning" style={{ color: "var(--color-medium)", textDecoration: "none", fontSize: "12px" }}>
+        Scanning paused by your team since {since}
+      </Link>
+    );
+  }
   if (s.last_scan_status === "paused") {
     return (
       <Link href="/settings#billing" style={{ color: "var(--color-critical)", textDecoration: "none", fontSize: "12px" }}>
@@ -52,17 +66,28 @@ export function StatusHeader() {
 
   useEffect(() => {
     let cancelled = false;
-    apiFetch(`/dashboard/summary?days=7`)
-      .then(r => r.ok ? r.json() : null)
-      .then(d => { if (!cancelled && d) setSummary(d); })
-      .catch(() => {/* header is non-critical */});
-    return () => { cancelled = true; };
+    function load() {
+      apiFetch(`/dashboard/summary?days=7`)
+        .then(r => r.ok ? r.json() : null)
+        .then(d => { if (!cancelled && d) setSummary(d); })
+        .catch(() => {/* header is non-critical */});
+    }
+    load();
+    window.addEventListener(SCANNING_CHANGED_EVENT, load);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(SCANNING_CHANGED_EVENT, load);
+    };
   }, []);
 
   if (!summary || !summary.s3_configured) return null;
 
-  const dotColor = summary.s3_status === "error" ? "var(--color-critical)" : "var(--color-low)";
-  const dotLabel = summary.s3_status === "error" ? "S3 error" : "S3 active";
+  // Phase 14 (F-023): a green "S3 active" next to "Scanning paused" read as a contradiction.
+  const paused = !!summary.scanning_paused_at;
+  const dotColor = summary.s3_status === "error"
+    ? "var(--color-critical)"
+    : paused ? "var(--color-medium)" : "var(--color-low)";
+  const dotLabel = summary.s3_status === "error" ? "S3 error" : paused ? "S3 connected" : "S3 active";
 
   return (
     <div style={{

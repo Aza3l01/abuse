@@ -9,10 +9,11 @@ parameter note in CONTEXT.md (it breaks body detection behind decorators).
 """
 import csv
 import io
+import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from api import staff_ops, staff_views
@@ -61,15 +62,27 @@ class RawBody(BaseModel):
     limit: int = Field(default=50, ge=1, le=100)
 
 
+def _as_uuid_text(value: str) -> str:
+    """Phase 14 (F-008): a bill id is a UUID. Anything else is a 422, not a database error."""
+    try:
+        return str(uuid.UUID(value))
+    except ValueError:
+        raise ValueError("bill_id must be a valid id")
+
+
 class MarkPaidBody(BaseModel):
     bill_id: str = Field(max_length=64)
     reference: str = Field(min_length=1, max_length=200)
     reason: str = Field(max_length=500)
 
+    _check_bill_id = field_validator("bill_id")(_as_uuid_text)
+
 
 class VoidBody(BaseModel):
     bill_id: str = Field(max_length=64)
     reason: str = Field(max_length=500)
+
+    _check_bill_id = field_validator("bill_id")(_as_uuid_text)
 
 
 class ExtendPeriodBody(BaseModel):
@@ -137,7 +150,7 @@ def login(request: Request, response: Response, body: LoginBody, db: Session = D
     if not ip_within_limit(ip):
         raise HTTPException(429, "Too many attempts. Try again later.")
     email = body.email.strip().lower()
-    if is_locked_out(email):
+    if is_locked_out(email, ip):
         raise HTTPException(429, "Too many attempts. Try again later.")
 
     staff = db.query(StaffUser).filter(StaffUser.email == email).first()
@@ -147,13 +160,13 @@ def login(request: Request, response: Response, body: LoginBody, db: Session = D
         step = verify_totp(decrypt_secret(staff.totp_secret), body.code, staff.last_totp_step)
 
     if step is None:
-        record_failure(email)
+        record_failure(email, ip)
         if staff is not None:
             audit(db, staff, "staff_login_failed", request=request)
             db.commit()
         raise HTTPException(401, "Invalid credentials.")
 
-    reset_failures(email)
+    reset_failures(email, ip)
     staff.last_totp_step = step
     staff.last_login_at = datetime.now(timezone.utc)
     audit(db, staff, "staff_login", request=request)
@@ -500,6 +513,8 @@ def metrics(
         "history": [_metrics_out(row) for row in history],
         "combined_current": _combined_out(live[0]["snapshot_date"], combine(live)) if live else None,
         "combined_history": [_combined_out(day, c) for day, c in combine_by_date(history).items()],
+        # Phase 12b: signups and first payers by "how did you hear about us".
+        "signup_sources": staff_views.signup_sources_view(db),
     }
 
 

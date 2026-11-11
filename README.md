@@ -73,7 +73,7 @@ abuse/                         <- project root (repo: "abuse", product: Clew)
 │
 ├── workers/
 │   ├── celery_app.py          <- Celery app instance + config
-│   ├── beat.py                <- 5-entry schedule, see the Celery Pipeline section
+│   ├── beat.py                <- 8-entry schedule, see the Celery Pipeline section
 │   ├── tests/                 <- test_process_logs.py (custom runner, not pytest)
 │   └── tasks/
 │       ├── process_logs.py            <- S3 -> detect -> verdicts + ip_memory (the main task)
@@ -694,6 +694,9 @@ of Celery's working directory.
 | `purge_deleted_accounts` | daily 03:00 UTC | Hard-deletes orgs/clients soft-deleted 30+ days ago, plus `processed_webhook_events` rows older than 30 days |
 | `purge_expired_data` | daily 04:00 UTC | Tiered retention purge across `alerts_sent`, `verdicts`, `scan_runs`, `ip_memory`, per `RETENTION_DAYS`. Enterprise is skipped entirely |
 | `reset_monthly_counters` | 1st of month 00:00 UTC | Zeroes `monthly_requests_processed` and clears both quota-email flags |
+| `billing_cycle` | daily 19:00 UTC | Bill engine. 19:00 UTC is 00:30 IST, just after the IST midnight the billing dates (the 1st, 17th, 20th) are evaluated at |
+| `metrics_snapshot` | daily 19:30 UTC | Business metrics snapshot for the ops panel, 30 minutes after `billing_cycle` |
+| `reconcile_payments` | daily 19:45 UTC | Compares Razorpay payments with local rows and reports differences to the ops panel. Applies nothing |
 
 ### `process_logs`: the main task, one per org per poll
 
@@ -1036,7 +1039,13 @@ For Razorpay billing, `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET` /
   (`GET /verdicts/would-have-blocked`). The LLM only writes the explanation
   after the rules decide (`LLM_ENABLED` is the kill switch, `LLM_MODEL`
   defaults to `openai/gpt-oss-20b`). `ABUSEIPDB_API_KEY` is optional; the code
-  caps lookups at 900 a day against the free plan's 1000.
+  caps lookups at 900 a day against the free plan's 1000. When set, the
+  orchestrator looks up the busiest IP of a batch that an agent already
+  flagged, and a hit adds 0.08 to the fused confidence (`_REPUTATION_BOOST` in
+  `meta_agent.py`). It never creates a detection alone. A circuit breaker stops
+  calls after 3 consecutive failures. Offline CICIDS runs with stubbed
+  reputation showed no regression (F1 0.8500 with none, 0.8502 with attackers
+  flagged), so the gain is unproven until real traffic.
 - **Sentry / exception tracking, a public status page, an internal ops panel,
   and a staging environment**: all post-MVP. None block onboarding a first real
   client; revisit when there is an actual client or audience to justify them.
@@ -1518,7 +1527,7 @@ redis-cli ping
 
 # Migrations current
 cd /home/ubuntu/abuse && source .venv/bin/activate && alembic current
-# Expected: e3c1a7f920d4 (head)
+# Expected: the same revision as `alembic heads` in the checked-out code, marked (head)
 
 # All processes running
 pm2 status
@@ -1626,7 +1635,7 @@ python -c "from workers.tasks.purge_deleted_accounts import purge_deleted_accoun
 
 **Redis is not backed up.** Accepted: the agents re-learn each customer in about 15 batches.
 
-**Status:** the scripts are built and tested locally. Installing the cron line on the server, taking the first real backup and running the restore drill there are done at go-live (TODO.md Phase 16 B).
+**Status:** the scripts are built and tested locally. Installing the cron line on the server, taking the first real backup and running the restore drill there are done at go-live (TODO.md Phase 15).
 
 **When to upgrade:** once monthly recurring revenue justifies it, migrate Postgres to RDS with automated daily snapshots and point-in-time recovery. On a t3.small with fewer than 10 customers, pg_dump to S3 is sufficient and costs nothing.
 

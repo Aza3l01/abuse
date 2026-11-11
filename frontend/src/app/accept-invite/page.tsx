@@ -164,6 +164,7 @@ function AcceptInviteInner() {
             <label htmlFor="password" style={labelStyle}>Password</label>
             <input
               id="password" type="password" autoComplete="new-password" required
+              minLength={8} maxLength={128}
               value={password} onChange={(e) => setPassword(e.target.value)}
               style={inputStyle}
             />

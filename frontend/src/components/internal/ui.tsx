@@ -53,6 +53,7 @@ const tdStyle: CSSProperties = {
   borderBottom: "1px solid var(--color-border)",
   verticalAlign: "top",
   wordBreak: "break-word",
+  overflowWrap: "anywhere",
 };
 
 export function Section({ title, children }: { title: string; children: ReactNode }) {

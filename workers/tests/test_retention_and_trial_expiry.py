@@ -11,10 +11,18 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from db.models import BillingEvent, Organization, Verdict
-from api.tests.billing_testkit import make_org
+from api.tests.billing_testkit import capture_notifications, make_org
 from workers.tasks import purge_expired_data as purge_module
 from workers.tasks import trial_reminders as trial_module
+
+
+@pytest.fixture(autouse=True)
+def notifications(monkeypatch):
+    """No broker in tests: the pilot-ended notice is recorded instead."""
+    return capture_notifications(monkeypatch)
 
 
 def _now() -> datetime:
@@ -105,7 +113,7 @@ def test_purge_fails_closed_for_an_unrecognised_tier(db, session_factory, monkey
 
 # --- pilot trial expiry ----------------------------------------------------
 
-def test_expired_pilot_trial_goes_through_downgrade_org(db, session_factory, monkeypatch):
+def test_expired_pilot_trial_goes_through_downgrade_org(db, session_factory, monkeypatch, notifications):
     monkeypatch.setattr(trial_module, "SessionLocal", session_factory)
     pilot = make_org(
         db, tier="growth", period=None, name="Pilot",
@@ -127,6 +135,11 @@ def test_expired_pilot_trial_goes_through_downgrade_org(db, session_factory, mon
     assert org.nonpayment_downgraded_at is None
     event = db.query(BillingEvent).filter(BillingEvent.org_id == pid).one()
     assert (event.event, event.from_tier, event.to_tier) == ("trial_end", "growth", "starter")
+    assert notifications == [("pilot_ended", pid, None, None)]
+
+    # A second run changes nothing and sends nothing more.
+    trial_module.send_trial_reminders()
+    assert len(notifications) == 1
 
 
 def test_pilot_keeps_growth_retention_after_the_trial(db, session_factory, monkeypatch):

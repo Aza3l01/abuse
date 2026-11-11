@@ -16,6 +16,7 @@ Kinds:
   cancel_in_3       the plan cancels in 3 days for an unpaid bill
   cancelled         the org was downgraded (non-payment or voluntary cancel)
   payment_received  a payment was captured
+  pilot_ended       an unpaid pilot ended and the org moved to Starter
 """
 from __future__ import annotations
 
@@ -25,7 +26,7 @@ from workers.tasks.billing_emails import send_billing_email
 
 logger = logging.getLogger(__name__)
 
-NOTIFY_KINDS = frozenset({"ready", "due_in_3", "cancel_in_3", "cancelled", "payment_received"})
+NOTIFY_KINDS = frozenset({"ready", "due_in_3", "cancel_in_3", "cancelled", "payment_received", "pilot_ended"})
 
 
 def _enqueue(kind: str, org_id: str, bill_id: str | None, payment_id: str | None) -> None:

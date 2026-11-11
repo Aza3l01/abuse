@@ -34,6 +34,7 @@ from api.auth_utils import (
     create_newsletter_confirm_token,
     decode_newsletter_confirm_token,
     send_email,
+    verify_turnstile_token,
 )
 from api.limiter import limiter
 
@@ -54,6 +55,10 @@ class SubscribeBody(BaseModel):
     # Hidden form field real users never see or fill; a non-empty value
     # means a bot filled every input on the form.
     website: str = ""
+    # Phase 12b: Cloudflare Turnstile token. The form only renders the widget
+    # once the email box is focused, so a missing token is a bot or a user
+    # whose script blocker stopped the widget.
+    captcha_token: str = ""
 
     @field_validator("email")
     @classmethod
@@ -77,6 +82,18 @@ def subscribe(request: Request, body: SubscribeBody):
     if body.website:
         # Honeypot tripped: pretend success, don't tip the bot off.
         return _GENERIC_RESPONSE
+
+    remote_ip = request.client.host if request.client else None
+    if not verify_turnstile_token(body.captcha_token, remote_ip):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "CAPTCHA verification failed. Please try again. If the check "
+                "does not appear, a script blocker or privacy extension may be "
+                "stopping it: allow challenges.cloudflare.com for this site and "
+                "reload the page."
+            ),
+        )
 
     segment_id = _segment_id()
     if not segment_id:

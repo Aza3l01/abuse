@@ -17,6 +17,7 @@ from sqlalchemy.orm import aliased
 
 from api.billing_payments import open_bills
 from api.referrals import FREE_BILL_KIND, REWARD_KIND, VELOCITY_WINDOW, staff_referral_summary
+from api.routes.org import SIGNUP_SOURCES
 from api.tiers import CALL_VOLUME_CAPS, LLM_CALL_CAPS
 from db.models import (
     Bill,
@@ -139,6 +140,10 @@ def account_view(db, org: Organization, now: datetime | None = None) -> dict:
     credits = (
         db.query(Credit).filter(Credit.org_id == org.id).order_by(Credit.created_at.desc()).limit(50).all()
     )
+    paused_by_email = (
+        db.query(Client.email).filter(Client.id == org.scanning_paused_by).scalar()
+        if org.scanning_paused_by else None
+    )
 
     return {
         "org": {
@@ -154,6 +159,8 @@ def account_view(db, org: Organization, now: datetime | None = None) -> dict:
             "blocking_tos_accepted_at": _iso(org.blocking_tos_accepted_at),
             "has_aws_role": bool(org.aws_role_arn),
             "has_cloudflare_token": bool(org.cloudflare_token),
+            "signup_source": org.signup_source,
+            "signup_source_detail": org.signup_source_detail,
         },
         "onboarding": {
             "s3_bucket": org.s3_bucket,
@@ -179,6 +186,10 @@ def account_view(db, org: Organization, now: datetime | None = None) -> dict:
             "last_scan_error": org.last_scan_error,
             "s3_status": org.s3_status,
             "s3_status_message": org.s3_status_message,
+            # Phase 12b: the customer's own pause, read-only for staff.
+            "scanning_paused_at": _iso(org.scanning_paused_at),
+            "scanning_paused_by_email": paused_by_email,
+            "scanning_resumed_at": _iso(org.scanning_resumed_at),
         },
         "billing": {
             "billing_provider": org.billing_provider,
@@ -269,6 +280,66 @@ def account_view(db, org: Organization, now: datetime | None = None) -> dict:
     }
 
 
+SIGNUP_SOURCE_WINDOW_DAYS = 30
+SIGNUP_OTHER_ANSWERS_LIMIT = 20
+
+
+def signup_sources_view(db, now: datetime | None = None) -> dict:
+    """Phase 12b: signups and first-time payers by "how did you hear about us",
+    for orgs created in the last SIGNUP_SOURCE_WINDOW_DAYS days.
+
+    Counts are by the fixed list only (plus "none" for orgs that skipped the
+    question or signed up before it existed). The free text of an "other"
+    answer is never a dimension here: the latest ones are returned as a flat
+    list for quick lookup. "paid" is an org with first_charged_at set.
+    """
+    moment = now or datetime.now(timezone.utc)
+    since = moment - timedelta(days=SIGNUP_SOURCE_WINDOW_DAYS)
+    rows = (
+        db.query(
+            Organization.signup_source,
+            func.count(Organization.id),
+            func.count(Organization.first_charged_at),
+        )
+        .filter(Organization.created_at >= since)
+        .group_by(Organization.signup_source)
+        .all()
+    )
+    by_source = {source: (signups, paid) for source, signups, paid in rows}
+    out_rows = []
+    for source in (*SIGNUP_SOURCES, None):
+        signups, paid = by_source.pop(source, (0, 0))
+        out_rows.append({"source": source or "none", "signups": signups, "paid": paid})
+    # A stored value no longer in the fixed list (the list was edited later)
+    # still counts, under its own key, instead of silently vanishing.
+    for source, (signups, paid) in sorted(by_source.items()):
+        out_rows.append({"source": source, "signups": signups, "paid": paid})
+    others = (
+        db.query(
+            Organization.id,
+            Organization.signup_source_detail,
+            Organization.created_at,
+            Organization.company_name,
+        )
+        .filter(
+            Organization.created_at >= since,
+            Organization.signup_source == "other",
+            Organization.signup_source_detail.isnot(None),
+        )
+        .order_by(Organization.created_at.desc())
+        .limit(SIGNUP_OTHER_ANSWERS_LIMIT)
+        .all()
+    )
+    return {
+        "window_days": SIGNUP_SOURCE_WINDOW_DAYS,
+        "rows": out_rows,
+        "other_answers": [
+            {"org_id": oid, "org_name": name, "detail": detail, "created_at": _iso(created)}
+            for oid, detail, created, name in others
+        ],
+    }
+
+
 def credit_row(c: Credit, names: dict[str, str] | None = None) -> dict:
     names = names or {}
     return {
@@ -355,18 +426,20 @@ def referral_overview(db, limit: int = 100, now: datetime | None = None) -> dict
 
     wanted = set(signups) | set(by_status) | {c.org_id for c in held} | {c.org_id for c in recent}
     wanted |= {c.source_org_id for c in held + recent if c.source_org_id}
+    # Phase 14 (F-031): an empty set is not queried at all. The old `wanted or {""}`
+    # sent '' to a UUID column, which Postgres rejects (500 on launch day).
     names = {
         org_id: name
         for org_id, name in db.query(Organization.id, Organization.company_name)
-        .filter(Organization.id.in_(wanted or {""}))
+        .filter(Organization.id.in_(wanted))
         .all()
-    }
+    } if wanted else {}
     codes = {
         owner: code
         for owner, code in db.query(PromoCode.owner_org_id, PromoCode.code)
-        .filter(PromoCode.kind == "referral", PromoCode.owner_org_id.in_(wanted or {""}))
+        .filter(PromoCode.kind == "referral", PromoCode.owner_org_id.in_(wanted))
         .all()
-    }
+    } if wanted else {}
 
     referrers = []
     for org_id in sorted(set(signups) | set(by_status), key=lambda o: (-signups.get(o, 0), names.get(o) or "")):

@@ -219,6 +219,10 @@ def poll_all_clients() -> dict:
 
     Item 40: an org whose owner has deleted their account (deleted_at set)
     is skipped too, for the whole 30-day grace window before hard delete.
+
+    Phase 12b: an org whose team has paused scanning (scanning_paused_at set)
+    is skipped as well. process_logs re-checks the flag itself, so a pause
+    that lands after this query still takes effect before the next scan.
     """
     db = SessionLocal()
     try:
@@ -228,6 +232,7 @@ def poll_all_clients() -> dict:
                 Organization.s3_bucket.isnot(None),
                 Organization.log_format.isnot(None),
                 Organization.deleted_at.is_(None),
+                Organization.scanning_paused_at.is_(None),
             )
             .all()
         )
@@ -293,6 +298,13 @@ def process_logs(self, org_id: str) -> dict:
             logger.warning("process_logs: org %s not found — skipping", org_id)
             return {"status": "skipped", "reason": "org_not_found"}
 
+        # Phase 12b: the team paused scanning. Return before anything below
+        # touches the org, so a paused org keeps its last_scan_status,
+        # cursor, monthly counters and quota state exactly as they were.
+        if org.scanning_paused_at is not None:
+            logger.info("process_logs: org %s scanning is paused, skipping", org_id)
+            return {"status": "skipped", "reason": "paused"}
+
         if not org.s3_bucket or not org.log_format:
             logger.debug("process_logs: org %s has no S3 config — skipping", org_id)
             return {"status": "skipped", "reason": "no_s3_config"}
@@ -317,9 +329,17 @@ def process_logs(self, org_id: str) -> dict:
             session=aws_session_for_org(org),
         )
         is_first_connection = org.last_processed_key is None
+        # Phase 12b: after a resume, read only what arrived since the resume
+        # (the pause backlog is skipped by design). scanning_resumed_at is
+        # cleared by _update_last_key once the cursor has moved past it.
+        resumed_at = org.scanning_resumed_at
         if is_first_connection:
             cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+            if resumed_at is not None and resumed_at > cutoff:
+                cutoff = resumed_at
             objects = reader.list_objects_since(cutoff)
+        elif resumed_at is not None:
+            objects = reader.list_objects_since(resumed_at)
         else:
             objects = reader.list_new_objects()
 
@@ -528,12 +548,16 @@ def process_logs(self, org_id: str) -> dict:
             # unattended blocking never fires with no agreement accepted and
             # never fires at all unless explicitly turned on, even on an
             # eligible tier with an integration configured. Pass C cluster
-            # verdicts are alert-only. Phase 8 dry-run: when auto_block_dry_run
+            # verdicts are alert-only. Phase 14 (F-014): so is a verdict whose
+            # only evidence is GeoIPAgent (a geography signal alone, on a small
+            # batch, can single out one harmless IP); the customer still sees
+            # and alerts on it and can block it by hand. Phase 8 dry-run: when auto_block_dry_run
             # is on, a verdict that passes every gate is stamped
             # would_have_blocked_at and nothing is pushed to the edge.
             if (
                 v
                 and verdict_id not in cluster_verdict_ids
+                and list(v.agents_triggered or []) != ["GeoIPAgent"]
                 and v.confidence >= block_threshold
                 and org.tier in AUTO_BLOCK_TIERS
                 and org.auto_block_enabled
@@ -905,9 +929,14 @@ def _upsert_ip_memory(
 
 
 def _update_last_key(db, org: Organization, new_last_key: str | None) -> None:
-    """Persist the new S3 cursor. Called only after verdicts are committed."""
+    """Persist the new S3 cursor. Called only after verdicts are committed.
+
+    Phase 12b: also clears scanning_resumed_at. Once the cursor has moved
+    past the objects read since a resume, the normal cursor takes over again.
+    """
     if new_last_key:
         org.last_processed_key = new_last_key
+        org.scanning_resumed_at = None
         db.commit()
 
 

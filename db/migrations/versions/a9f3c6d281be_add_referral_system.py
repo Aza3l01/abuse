@@ -29,7 +29,7 @@ down_revision: Union[str, None] = 'd2f6a9c13e85'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
-_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"  # no 0/O/1/I, matches generate_promo_codes.py
+_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"  # no 0/O/1/I, same alphabet as the ops panel pilot codes (api/staff_ops.py)
 
 
 def upgrade() -> None:

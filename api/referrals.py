@@ -38,7 +38,7 @@ from db.models import Bill, Credit, Organization, Payment, PromoCode, PromoCodeR
 
 logger = logging.getLogger(__name__)
 
-_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"  # no 0/O/1/I, matches generate_promo_codes.py
+_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"  # no 0/O/1/I, same alphabet as the ops panel pilot codes (api/staff_ops.py)
 
 REWARD_KIND = "referrer_reward"
 FREE_BILL_KIND = "referee_free_bill"

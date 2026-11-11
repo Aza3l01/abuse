@@ -46,6 +46,14 @@ body {
   transition: background 0.1s, color 0.1s;
 }
 
+/* Phase 14 (F-037): a visible keyboard focus ring on every text control.
+   Square, 2px, theme text color, no glow (DESIGN_SYSTEM.md). */
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--color-text);
+  outline-offset: 1px;
+}
 /* ── Dashboard-only micro-animations ────────────────────────── */
 
 /* Blinking terminal-style loading cursor. Opacity only, no color change. */

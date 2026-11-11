@@ -81,7 +81,6 @@ const inputStyle: React.CSSProperties = {
   background: "var(--color-bg)",
   color: "var(--color-text)",
   fontSize: "14px",
-  outline: "none",
   boxSizing: "border-box",
 };
 

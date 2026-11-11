@@ -8,6 +8,7 @@ Responsibilities:
   - OTP generation
   - SES email dispatch
 """
+import asyncio
 import hashlib
 import os
 import random
@@ -102,6 +103,18 @@ def hash_password(plain: str) -> str:
 
 def verify_password(plain: str, hashed: str) -> bool:
     return _bcrypt.checkpw(_prepare(plain), hashed.encode())
+
+
+# Phase 14 (F-006): a bcrypt check takes about 250 ms of CPU and the auth
+# routes are `async def`, so calling it inline froze the whole event loop
+# (every other request, /health included) for that long. These run it in a
+# worker thread; bcrypt releases the GIL while it hashes.
+async def ahash_password(plain: str) -> str:
+    return await asyncio.to_thread(hash_password, plain)
+
+
+async def averify_password(plain: str, hashed: str) -> bool:
+    return await asyncio.to_thread(verify_password, plain, hashed)
 
 
 # ------------------------------------------------------------------

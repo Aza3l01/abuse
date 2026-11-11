@@ -33,7 +33,7 @@ const AGENTS = [
     label: "geoip",
     name: "GeoIPAgent",
     description:
-      "Graph-based origin clustering. Flags anomalous source geographies and coordinated distributed attack infrastructure.",
+      "Flags anomalous source geographies, impossible travel and traffic spread across many countries.",
   },
   {
     label: "knowledge",
@@ -77,7 +77,7 @@ export function AgentsSection() {
           className="text-sm leading-relaxed mb-12"
           style={{ color: "var(--color-text-muted)" }}
         >
-          Six of these agents run in parallel against every log batch, each independently optimised for a different attack class, and the meta-agent orchestrator fuses their signals into a single confidence-scored verdict. A seventh, passive layer builds cross-session pattern memory over time.
+          Up to six of these agents run in parallel on each log batch, depending on what the batch looks like, each tuned to a different attack class, and the meta-agent orchestrator fuses their signals into a single confidence-scored verdict. A seventh, passive layer builds cross-session pattern memory over time.
         </p>
 
         {/* Tight grid: 1px dividers via container background trick */}

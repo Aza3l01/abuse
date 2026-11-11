@@ -47,7 +47,10 @@ export default function DpaPage() {
         email, no log data), MaxMind (IP geolocation lookups), PostHog
         (product analytics and error tracking, EU region, no log data),
         Cloudflare (bot check at sign-up, no log data), Better Stack (uptime
-        monitoring, no log data) and, for
+        monitoring, no log data), AbuseIPDB (IP reputation lookups, which
+        receive only the public IP address under investigation, once an
+        agent has flagged something in a batch, whether or not it ends as a
+        verdict) and, for
         Growth plans and above, Groq (plain-language threat explanations,
         which receive the IP address under investigation, aggregated traffic
         metrics and short indicator strings, not raw request bodies). Clew

@@ -1,9 +1,10 @@
 "use client";
 
-import { useState, Suspense } from "react";
+import { useRef, useState, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { AuthLayout, inputStyle, labelStyle, primaryBtnStyle } from "@/components/auth/AuthLayout";
+import { Turnstile, type TurnstileHandle } from "@/components/auth/Turnstile";
 import { API_URL } from "@/lib/api";
 
 function VerifyEmailForm() {
@@ -18,6 +19,8 @@ function VerifyEmailForm() {
   const [loading,  setLoading]  = useState(false);
   const [resending, setResending] = useState(false);
   const [resendMsg, setResendMsg] = useState("");
+  const [captchaToken, setCaptchaToken] = useState("");
+  const captchaRef = useRef<TurnstileHandle>(null);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -45,18 +48,31 @@ function VerifyEmailForm() {
 
   async function handleResend() {
     setResendMsg("");
+    if (!captchaToken) {
+      setResendMsg(
+        "Complete the CAPTCHA above first. If the check does not appear, a script blocker or privacy extension may be stopping it: allow challenges.cloudflare.com for this site and reload the page."
+      );
+      return;
+    }
     setResending(true);
     try {
-      await fetch(`${API_URL}/auth/resend-verification`, {
+      const res = await fetch(`${API_URL}/auth/resend-verification`, {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email }),
+        body: JSON.stringify({ email, captcha_token: captchaToken }),
       });
-      setResendMsg("A new code was sent if your email is registered.");
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        setResendMsg(d?.detail ?? "Could not send. Try again later.");
+      } else {
+        setResendMsg("A new code was sent if your email is registered.");
+      }
     } catch {
       setResendMsg("Could not send. Check your connection.");
     } finally {
+      // A token is single use: ask for a fresh challenge after every attempt.
+      captchaRef.current?.reset();
       setResending(false);
     }
   }
@@ -101,7 +117,11 @@ function VerifyEmailForm() {
         </button>
       </form>
 
-      <div style={{ marginTop: "20px", display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+      <div style={{ marginTop: "20px" }}>
+        <Turnstile ref={captchaRef} onToken={setCaptchaToken} />
+      </div>
+
+      <div style={{ marginTop: "12px", display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
         <button
           onClick={handleResend}
           disabled={resending || !email}

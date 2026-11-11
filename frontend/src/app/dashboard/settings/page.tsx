@@ -14,6 +14,7 @@ import { AWS_REGIONS } from "@/lib/awsRegions";
 import { LoadingCursor } from "@/components/dashboard/LoadingCursor";
 import { WouldHaveBlockedTable } from "@/components/dashboard/WouldHaveBlockedTable";
 import { DetectionTuningSection, type DetectionConfig } from "@/components/dashboard/DetectionTuningSection";
+import { ScanningSection } from "@/components/dashboard/ScanningSection";
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -35,6 +36,7 @@ interface ClientConfig {
   last_scan_completed_at: string | null;
   last_scan_status: string | null;
   last_scan_error: string | null;
+  scanning_paused_at: string | null;
   alert_email: string | null;
   alert_severity_threshold: string;
   waf_ip_set_id: string | null;
@@ -319,11 +321,10 @@ export default function SettingsPage() {
   const [saving,   setSaving]   = useState(false);
   const [saved,    setSaved]    = useState(false);
   const [error,    setError]    = useState<string | null>(null);
-  // Item 8's RBAC: Settings is owner/admin only, hidden from the sidebar for
-  // viewers, but the route itself has no guard, so a viewer who types the
-  // URL directly previously got the full (entirely non-functional, every
-  // write 403s) form instead of being told they don't have access.
-  const [accessDenied, setAccessDenied] = useState(false);
+  // Item 8's RBAC: org Settings is owner/admin only. Phase 14 (F-024): a viewer
+  // gets an "Account security" view instead (MFA, password, sessions, delete
+  // account), which never calls the owner/admin-only /clients/me.
+  const [viewerView, setViewerView] = useState(false);
 
   // Form fields
   const [s3Bucket,     setS3Bucket]     = useState("");
@@ -399,7 +400,7 @@ export default function SettingsPage() {
     return apiFetch(`/clients/me`)
       .then(r => {
         if (r.status === 403) {
-          setAccessDenied(true);
+          setViewerView(true);
           throw new Error("forbidden");
         }
         if (!r.ok) throw new Error("API error");
@@ -429,7 +430,7 @@ export default function SettingsPage() {
       .then((rows: { role: string; active: boolean }[]) => {
         const active = rows.find(o => o.active) ?? rows[0];
         if (active?.role === "viewer") {
-          setAccessDenied(true);
+          setViewerView(true);
           setLoading(false);
           return;
         }
@@ -831,31 +832,30 @@ export default function SettingsPage() {
     );
   }
 
-  if (accessDenied) {
-    return (
-      <main style={{ padding: "32px" }}>
-        <h1 style={{ fontFamily: "var(--font-brand)", fontSize: "22px", fontWeight: 700, marginBottom: "12px" }}>
-          Settings
-        </h1>
-        <p style={{ fontSize: "13px", color: "var(--color-text-muted)", maxWidth: "480px", lineHeight: 1.6 }}>
-          You don&apos;t have access to this page. Settings is only available to
-          organisation owners and admins. Ask an owner or admin on your team if
-          you need something changed here.
-        </p>
-      </main>
-    );
-  }
-
   return (
     <main style={{ padding: "32px", width: "100%" }}>
 
+      {viewerView ? (
+        <>
+          <h1 style={{ fontFamily: "var(--font-brand)", fontSize: "22px", fontWeight: 700, marginBottom: "12px" }}>
+            Account security
+          </h1>
+          <p style={{ fontSize: "13px", color: "var(--color-text-muted)", maxWidth: "480px", lineHeight: 1.6, marginBottom: "32px" }}>
+            Organisation settings are only available to owners and admins. You can
+            manage your own sign-in security here.
+          </p>
+        </>
+      ) : (
       <h1 style={{ fontFamily: "var(--font-brand)", fontSize: "22px", fontWeight: 700, marginBottom: "32px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "16px" }}>
         Settings
         <span style={{ fontSize: "13px", fontWeight: 400 }}>
           <GuidedOnboardingButton label="Reopen guided onboarding" />
         </span>
       </h1>
+      )}
 
+      {!viewerView && (
+      <>
       {/* ------------------------------------------------------------------ */}
       {/* Plan & Billing                                                      */}
       {/* ------------------------------------------------------------------ */}
@@ -934,6 +934,23 @@ export default function SettingsPage() {
       )}
 
       {/* ------------------------------------------------------------------ */}
+      {/* Scanning pause (Phase 12b), owner and admin only                    */}
+      {/* ------------------------------------------------------------------ */}
+      {config && (config.role === "owner" || config.role === "admin") && (
+        <section id="scanning" style={{ marginBottom: "40px" }}>
+          <SectionTitle
+            title="Scanning"
+            sub="Pause or resume log scanning for your whole organisation."
+          />
+          <ScanningSection
+            role={config.role}
+            pausedAt={config.scanning_paused_at}
+            onChanged={pausedAt => setConfig({ ...config, scanning_paused_at: pausedAt })}
+          />
+        </section>
+      )}
+
+      {/* ------------------------------------------------------------------ */}
       {/* S3 Ingestion                                                        */}
       {/* ------------------------------------------------------------------ */}
       <section id="s3" style={{ marginBottom: "40px" }}>
@@ -975,7 +992,7 @@ export default function SettingsPage() {
               onChange={e => setLogFormat(e.target.value)}
               style={selectStyle}
             >
-              <option value="">— Select format —</option>
+              <option value="">Select format</option>
               <option value="apigw">API Gateway (apigw)</option>
               <option value="alb">Application Load Balancer (alb)</option>
             </select>
@@ -1427,6 +1444,8 @@ export default function SettingsPage() {
           </p>
         </div>
       </section>
+      </>
+      )}
 
       {/* ------------------------------------------------------------------ */}
       {/* Two-Factor Authentication                                           */}
@@ -1662,7 +1681,7 @@ export default function SettingsPage() {
       <section id="security" style={{ marginBottom: "40px" }}>
         <SectionTitle
           title="Change Password"
-          sub="Requires your current password. Other active sessions will be signed out."
+          sub="Requires your current password. Other signed-in devices lose access within 15 minutes."
         />
         <form onSubmit={handleChangePassword} style={{ border: "1px solid var(--color-border)", padding: "20px", background: "var(--color-bg)" }}>
           <FieldRow label="Current password">
@@ -1681,6 +1700,7 @@ export default function SettingsPage() {
               autoComplete="new-password"
               required
               minLength={8}
+              maxLength={128}
               value={newPassword}
               onChange={e => setNewPassword(e.target.value)}
               style={inputStyle}
@@ -1720,6 +1740,7 @@ export default function SettingsPage() {
           )}
           {!sessionsLoading && sessions.length > 0 && (
             <>
+              <div style={{ overflowX: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "12px" }}>
                 <thead>
                   <tr style={{ borderBottom: "1px solid var(--color-border)" }}>
@@ -1760,6 +1781,7 @@ export default function SettingsPage() {
                   ))}
                 </tbody>
               </table>
+              </div>
               <div style={{ padding: "12px 16px", borderTop: "1px solid var(--color-border)" }}>
                 <button
                   onClick={handleRevokeAll}
@@ -1783,6 +1805,7 @@ export default function SettingsPage() {
       {/* ------------------------------------------------------------------ */}
       {/* Team Members (item 9)                                              */}
       {/* ------------------------------------------------------------------ */}
+      {!viewerView && (
       <section id="team" style={{ marginBottom: "40px" }}>
         <SectionTitle
           title="Team Members"
@@ -1795,6 +1818,7 @@ export default function SettingsPage() {
         </p>
         <TeamMembersSection myRole={config?.role ?? null} onOwnershipTransferred={loadConfig} />
       </section>
+      )}
 
       {/* ------------------------------------------------------------------ */}
       {/* Account deletion (item 40)                                          */}

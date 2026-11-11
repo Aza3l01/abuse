@@ -96,7 +96,14 @@ def list_ips(
     if country:
         q = q.filter(IpMemory.geo_country == country.upper()[:2])
     if blocked_only:
-        q = q.filter(or_(IpMemory.waf_blocked.is_(True), IpMemory.cloudflare_blocked.is_(True)))
+        # Phase 14 (F-026): an IP whose block failed stays on the tab so its
+        # error badge shows, instead of vanishing.
+        q = q.filter(or_(
+            IpMemory.waf_blocked.is_(True),
+            IpMemory.cloudflare_blocked.is_(True),
+            IpMemory.waf_block_error.isnot(None),
+            IpMemory.cloudflare_block_error.isnot(None),
+        ))
 
     col = _SORT_COLS.get(sort, IpMemory.risk_score)
     q = q.order_by(col.asc() if order == "asc" else col.desc())

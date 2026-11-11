@@ -34,8 +34,9 @@ export function InternalShell({ children }: { children: ReactNode }) {
       <header
         style={{
           display: "flex",
+          flexWrap: "wrap",
           alignItems: "center",
-          gap: "16px",
+          gap: "8px 16px",
           padding: "12px 24px",
           borderBottom: "1px solid var(--color-border)",
           fontSize: "13px",
@@ -45,7 +46,7 @@ export function InternalShell({ children }: { children: ReactNode }) {
         <span style={{ color: "var(--color-text-muted)", textTransform: "uppercase", letterSpacing: "0.06em" }}>
           internal
         </span>
-        <nav style={{ display: "flex", gap: "16px", flex: 1 }}>
+        <nav style={{ display: "flex", flexWrap: "wrap", gap: "8px 16px", flex: 1 }}>
           {LINKS.map((link) => (
             <Link
               key={link.href}

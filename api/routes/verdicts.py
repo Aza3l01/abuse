@@ -138,9 +138,12 @@ class ManualBlockBody(BaseModel):
         0.0.0.0 or 127.0.0.1, so a mistyped entry can't take the customer's
         own API offline via a bogus WAF/Cloudflare block.
         """
-        if v.is_loopback or v.is_link_local or v.is_private or v.is_reserved:
+        if (
+            v.is_loopback or v.is_link_local or v.is_private or v.is_reserved
+            or v.is_multicast or v.is_unspecified or not v.is_global
+        ):
             raise ValueError(
-                "IP must be a public address, not loopback, link-local, private, or reserved."
+                "IP must be a public address, not loopback, link-local, private, multicast, or reserved."
             )
         return v
 
@@ -293,6 +296,24 @@ def manual_block_ip(
         raise HTTPException(status_code=400, detail=_NO_INTEGRATION_DETAIL)
 
     ip_str = str(body.ip)
+
+    # Phase 14 (F-026): blocking the same IP again reuses its manual verdict
+    # (a retry after a failed push) instead of adding an identical one each time.
+    existing = (
+        db.query(Verdict)
+        .filter(
+            Verdict.org_id == current_org.id,
+            Verdict.ip == ip_str,
+            Verdict.threat_type == "manual",
+        )
+        .order_by(Verdict.timestamp.desc())
+        .first()
+    )
+    if existing is not None:
+        if not existing.blocked:
+            from workers.tasks.push_blocks import push_block
+            push_block.delay(existing.id, current_org.id)
+        return existing
 
     v = Verdict(
         id=str(uuid.uuid4()),

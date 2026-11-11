@@ -15,6 +15,18 @@ import { passwordStrength, passwordStrengthLabel } from "@/lib/passwordStrength"
 // (contact-only, no self-serve checkout exists for it).
 const PURCHASABLE_PLANS = ["basic", "growth", "pro"];
 
+// Phase 12b: "How did you hear about us". Values match SIGNUP_SOURCES in
+// api/routes/org.py. Optional, and free text is only ever collected for "other".
+const SIGNUP_SOURCE_OPTIONS: { value: string; label: string }[] = [
+  { value: "search_engine",   label: "Search engine" },
+  { value: "llm",             label: "LLM" },
+  { value: "social_forums",   label: "Social media & forums" },
+  { value: "product_listings", label: "Product listings" },
+  { value: "word_of_mouth",   label: "Word of mouth" },
+  { value: "direct_outreach", label: "Direct outreach" },
+  { value: "other",           label: "Other" },
+];
+
 function RegisterForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -28,6 +40,8 @@ function RegisterForm() {
   // TODO.md priority item 5: a referral invite link carries ?ref=<code>,
   // prefilling the same dual-purpose code field pilot codes already use.
   const [pilotCode,   setPilotCode]   = useState(searchParams.get("ref") ?? "");
+  const [signupSource, setSignupSource] = useState("");
+  const [signupSourceDetail, setSignupSourceDetail] = useState("");
   const [tosAccepted, setTosAccepted] = useState(false);
   const [captchaToken, setCaptchaToken] = useState("");
   const [error,       setError]       = useState("");
@@ -97,6 +111,8 @@ function RegisterForm() {
           pilot_code: pilotCode || null,
           captcha_token: captchaToken,
           tos_accepted: tosAccepted,
+          signup_source: signupSource || null,
+          signup_source_detail: signupSource === "other" && signupSourceDetail.trim() ? signupSourceDetail.trim() : null,
         }),
       });
       const data = await res.json();
@@ -109,7 +125,7 @@ function RegisterForm() {
       if (validPlan) {
         try { sessionStorage.setItem("clew_plan", validPlan); } catch { /* storage unavailable, plan is skipped */ }
       }
-      track("registration_completed", { plan: validPlan, has_referral: pilotCode !== "" });
+      track("registration_completed", { plan: validPlan, has_referral: pilotCode !== "", signup_source: signupSource || null });
       setRegistered(true);
     } catch {
       setError("Could not connect to the server. Try again.");
@@ -167,6 +183,7 @@ function RegisterForm() {
           <input
             id="password" type="password" autoComplete="new-password" required
             minLength={8}
+            maxLength={128}
             value={password} onChange={(e) => setPassword(e.target.value)}
             style={inputStyle}
           />
@@ -207,6 +224,29 @@ function RegisterForm() {
                   ? "Code accepted. You get one month free on your second bill."
                   : "Code accepted."}
             </p>
+          )}
+        </div>
+
+        <div>
+          <label htmlFor="signupSource" style={labelStyle}>How did you hear about us? (Optional)</label>
+          <select
+            id="signupSource"
+            value={signupSource}
+            onChange={(e) => setSignupSource(e.target.value)}
+            style={inputStyle}
+          >
+            <option value="">Select one</option>
+            {SIGNUP_SOURCE_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>{o.label}</option>
+            ))}
+          </select>
+          {signupSource === "other" && (
+            <input
+              id="signupSourceDetail" type="text" autoComplete="off" maxLength={200}
+              placeholder="Tell us more (optional)"
+              value={signupSourceDetail} onChange={(e) => setSignupSourceDetail(e.target.value)}
+              style={{ ...inputStyle, marginTop: "8px" }}
+            />
           )}
         </div>
 

@@ -6,6 +6,8 @@ Routes
 POST   /org                          — create an organisation for the current
                                         client (dashboard first-run step;
                                         also usable to create an additional org)
+POST   /org/scanning/pause           : pause log scanning for the org (owner/admin)
+POST   /org/scanning/resume          : resume log scanning (owner/admin)
 POST   /org/invite                   — send a directed, tokenized invite
 GET    /org/invites                  — list pending invites (owner/admin)
 POST   /org/invites/{invite_id}/resend — invalidate + resend (owner/admin)
@@ -30,11 +32,12 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from api.auth_utils import hash_password, hash_token, send_org_invite_email
+from api.auth_utils import ahash_password, hash_token, send_org_invite_email
 from api.deps import CurrentOrg, get_current_client, get_current_org, get_db, get_optional_client, require_role
 from api.limiter import limiter
 from api.referrals import REFERRAL_CODE_MAX_REDEMPTIONS, code_unavailable_reason, generate_referral_code
 from api.routes.auth import _issue_tokens
+from api.validation import check_password, clean_email, clean_text
 from db.models import Client, Organization, OrganizationMember, OrgInvite, PromoCode, PromoCodeRedemption
 
 router = APIRouter(tags=["org"])
@@ -42,6 +45,20 @@ router = APIRouter(tags=["org"])
 DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "http://localhost:3000")
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 _redis = redis_lib.from_url(REDIS_URL, decode_responses=True)
+
+# Phase 12b: the fixed answers to the optional signup question "how did you
+# hear about us". Order here is the order the Metrics table and the register
+# select use. "other" is the only one that keeps free text.
+SIGNUP_SOURCES = (
+    "search_engine",
+    "llm",
+    "social_forums",
+    "product_listings",
+    "word_of_mouth",
+    "direct_outreach",
+    "other",
+)
+SIGNUP_SOURCE_DETAIL_MAX = 200
 
 _INVITE_EXPIRE_DAYS = 7
 _ROLES = {"owner", "admin", "viewer"}
@@ -103,6 +120,8 @@ def create_organization(
     owner_client: Client,
     promo_code: Optional[str] = None,
     remote_ip: Optional[str] = None,
+    signup_source: Optional[str] = None,
+    signup_source_detail: Optional[str] = None,
 ) -> Organization:
     """Create an Organization + owner OrganizationMember row. Caller commits.
 
@@ -128,10 +147,22 @@ def create_organization(
     remote_ip: currently unused (home_country is left None at creation and
     filled in by the client in Settings), kept as a parameter in case a
     future default is reintroduced.
+
+    signup_source / signup_source_detail (Phase 12b): the optional "how did
+    you hear about us" answer. An unknown signup_source is a 422. The
+    detail is trimmed, capped at SIGNUP_SOURCE_DETAIL_MAX characters, and
+    stored only when the source is "other". Neither affects pricing or access.
     """
-    company_name = company_name.strip()
-    if not company_name:
-        raise HTTPException(status_code=422, detail="Company name is required.")
+    company_name = clean_text(company_name, "Company name")  # Phase 14 (F-004): trimmed, 1 to 255
+
+    source: Optional[str] = None
+    source_detail: Optional[str] = None
+    if signup_source:
+        if signup_source not in SIGNUP_SOURCES:
+            raise HTTPException(status_code=422, detail="Unknown signup source.")
+        source = signup_source
+        if source == "other" and signup_source_detail:
+            source_detail = signup_source_detail.strip()[:SIGNUP_SOURCE_DETAIL_MAX] or None
 
     now = datetime.now(timezone.utc)
     pilot_code = promo_code.strip().upper() if promo_code else None
@@ -171,6 +202,8 @@ def create_organization(
         trial_ends_at=trial_ends_at,
         pilot_code_used=pilot_code,
         referred_by_promo_code_id=referred_by_promo_code_id,
+        signup_source=source,
+        signup_source_detail=source_detail,
         billing_provider=billing_provider,
         # No default: left None until the client sets it in Settings
         # (a geolocation-based guess previously pre-filled this, which
@@ -242,6 +275,65 @@ async def create_org(
     return {"id": org.id, "company_name": org.company_name, "role": "owner"}
 
 
+# ---------------------------------------------------------------------------
+# POST /org/scanning/pause and /org/scanning/resume (Phase 12b)
+#
+# A customer-controlled pause of log scanning. Owner or admin only. Both are
+# idempotent: pausing a paused org or resuming a running one changes nothing
+# and returns the current state, so a double click never rewrites who paused
+# or when. The scan path (workers/tasks/process_logs.py) skips a paused org
+# before touching any scan state, so the pause does not move the cursor, the
+# monthly counters, or the plan-limit logic. Resume records scanning_resumed_at
+# so the next scan skips what arrived during the pause.
+# ---------------------------------------------------------------------------
+
+def _scanning_state(org: Organization) -> dict:
+    paused_at = org.scanning_paused_at
+    return {"scanning_paused_at": paused_at.isoformat() if paused_at else None}
+
+
+@router.post("/org/scanning/pause")
+async def pause_scanning(
+    current_org: CurrentOrg = Depends(require_role("owner", "admin")),
+    client: Client = Depends(get_current_client),
+    db: Session = Depends(get_db),
+):
+    org = current_org.organization
+    # Phase 14 (F-013): one UPDATE that only matches while the org is running,
+    # so of several simultaneous calls exactly one writes and the rest read its
+    # timestamp back. A read-then-write let each caller write its own.
+    db.query(Organization).filter(
+        Organization.id == org.id, Organization.scanning_paused_at.is_(None)
+    ).update(
+        {"scanning_paused_at": datetime.now(timezone.utc), "scanning_paused_by": client.id},
+        synchronize_session=False,
+    )
+    db.commit()
+    db.refresh(org)
+    return _scanning_state(org)
+
+
+@router.post("/org/scanning/resume")
+async def resume_scanning(
+    current_org: CurrentOrg = Depends(require_role("owner", "admin")),
+    db: Session = Depends(get_db),
+):
+    org = current_org.organization
+    db.query(Organization).filter(
+        Organization.id == org.id, Organization.scanning_paused_at.isnot(None)
+    ).update(
+        {
+            "scanning_paused_at": None,
+            "scanning_paused_by": None,
+            "scanning_resumed_at": datetime.now(timezone.utc),
+        },
+        synchronize_session=False,
+    )
+    db.commit()
+    db.refresh(org)
+    return _scanning_state(org)
+
+
 def _check_resend_rate(email: str) -> bool:
     """Item 9: resend is rate-limited to once per hour per invited email."""
     key = f"clew:invite_resend:{email.lower()}"
@@ -269,7 +361,7 @@ async def invite_member(
     client: Client = Depends(get_current_client),
     db: Session = Depends(get_db),
 ):
-    invited_email = body.email.lower()
+    invited_email = clean_email(body.email)  # Phase 14 (F-012): trimmed, lower-cased, validated, at most 254
     role = body.role
     org = current_org.organization
 
@@ -301,6 +393,23 @@ async def invite_member(
                 status_code=400, detail="This person is already a member of your organisation."
             )
 
+    # Phase 14 (F-012): one open invite per address. A second one would send a
+    # second email and sidestep the once-per-hour resend limit. Resend revives
+    # an expired one.
+    already_invited = (
+        db.query(OrgInvite)
+        .filter(
+            OrgInvite.org_id == org.id,
+            OrgInvite.invited_email == invited_email,
+            OrgInvite.accepted_at.is_(None),
+        )
+        .first()
+    )
+    if already_invited:
+        raise HTTPException(
+            status_code=400,
+            detail="This address already has an open invite. Use Resend on the Team page, or cancel it first.",
+        )
     raw_token = secrets.token_urlsafe(32)
     now = datetime.now(timezone.utc)
     invite = OrgInvite(
@@ -667,12 +776,13 @@ async def accept_invite(
     if client is None:
         if not body.password:
             raise HTTPException(status_code=400, detail="Password is required to set up your account.")
+        check_password(body.password)  # Phase 14 (F-002)
         if not body.full_name or not body.full_name.strip():
             raise HTTPException(status_code=400, detail="Full name is required to set up your account.")
         client = Client(
             email=invite.invited_email,
-            password_hash=hash_password(body.password),
-            full_name=body.full_name.strip(),
+            password_hash=await ahash_password(body.password),
+            full_name=clean_text(body.full_name, "Full name"),  # Phase 14 (F-004): at most 255
             email_verified=True,  # the invite link itself is proof of ownership
         )
         db.add(client)

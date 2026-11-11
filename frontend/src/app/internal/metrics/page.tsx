@@ -10,6 +10,17 @@ function pct(value: Row[string]): string {
 
 const COMBINED_LABEL = "Combined";
 
+const SOURCE_LABELS: Record<string, string> = {
+  search_engine: "Search engine",
+  llm: "LLM",
+  social_forums: "Social media & forums",
+  product_listings: "Product listings",
+  word_of_mouth: "Word of mouth",
+  direct_outreach: "Direct outreach",
+  other: "Other",
+  none: "No answer",
+};
+
 function amount(r: Row, key: string) {
   return <span style={{ whiteSpace: "nowrap" }}>{formatMinor(r[key], r.unit ?? r.currency)}</span>;
 }
@@ -168,6 +179,29 @@ export default function MetricsPage() {
             { key: "trial_to_paid_pct", label: "Trial to paid", render: (r) => pct(r.trial_to_paid_pct) },
           ]}
           rows={view.current.slice(0, 1)}
+        />
+      </Section>
+
+      <Section title={`Signup sources, last ${view.signup_sources.window_days} days`}>
+        <DataTable
+          columns={[
+            { key: "source", label: "Source", render: (r) => SOURCE_LABELS[String(r.source)] ?? String(r.source) },
+            { key: "signups", label: "Signups" },
+            { key: "paid", label: "Now paying" },
+          ]}
+          rows={view.signup_sources.rows}
+        />
+      </Section>
+
+      <Section title="Recent answers for Other">
+        <DataTable
+          columns={[
+            { key: "detail", label: "Answer" },
+            { key: "created_at", label: "Signed up" },
+            { key: "org_name", label: "Org", render: (r) => String(r.org_name ?? r.org_id ?? "-") },
+          ]}
+          rows={view.signup_sources.other_answers}
+          empty="No answers yet."
         />
       </Section>
 

@@ -5,7 +5,7 @@ tested without Celery or Resend. The Celery task in
 workers/tasks/billing_emails.py is a thin wrapper around send_billing_emails.
 
 Kinds (see api/billing_notify.py):
-  ready, due_in_3, cancel_in_3, cancelled, payment_received
+  ready, due_in_3, cancel_in_3, cancelled, payment_received, pilot_ended
 
 Every email comes from FROM_BILLING, replies go to REPLY_TO_BILLING, and
 carries one link: "View billing" to the dashboard billing section. No invoice
@@ -31,7 +31,7 @@ from db.models import Client, Organization, OrganizationMember
 logger = logging.getLogger(__name__)
 
 # These two always reach the owners, whatever the org's recipient setting.
-ALWAYS_OWNER_KINDS = frozenset({"cancel_in_3", "cancelled"})
+ALWAYS_OWNER_KINDS = frozenset({"cancel_in_3", "cancelled", "pilot_ended"})
 
 BILLING_URL = f"{DASHBOARD_URL}/settings#billing"
 
@@ -152,6 +152,15 @@ def render_billing_email(kind: str, org: Organization, bill=None, payment=None) 
                 "Your organisation is now on the Starter plan. Your data keeps the retention of your "
                 "previous plan for 30 days.",
             ]
+    elif kind == "pilot_ended":
+        subject = "Your Clew pilot has ended"
+        heading = "Your Clew pilot has ended"
+        lines = [
+            "Your Clew pilot has ended and your organisation is now on the Starter plan.",
+            "Automatic blocking is switched off. IPs that are already blocked stay blocked, and you can "
+            "still unblock them. Your data keeps the retention of your pilot plan for 30 days.",
+            "To keep the Growth features, choose a plan from the billing page.",
+        ]
     elif kind == "payment_received":
         if payment is None:
             raise ValueError("payment_received needs a payment")

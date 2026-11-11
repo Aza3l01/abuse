@@ -215,8 +215,10 @@ export default function DocsPage() {
         concentrated attacker needs a meaningful number of requests from
         that IP within one 15-minute window. A large number of distinct,
         low-volume IPs, for example a botnet making one attempt each, can
-        currently evade detection. Recognising that kind of spread-out
-        pattern across many IPs is on the roadmap, not built yet.
+        evade detection on Starter, Basic and Growth. Pro and Enterprise add
+        distributed attack clustering, which looks across IPs for that kind
+        of spread-out pattern and raises an alert. Clustering is alert only:
+        Clew does not block IPs automatically from a clustering alert.
       </p>
 
       <h2 style={legalH2Style} id="understanding-verdicts">
@@ -261,10 +263,11 @@ export default function DocsPage() {
         7. The detection agents
       </h2>
       <p style={legalPStyle}>
-        Six agents each look for a different kind of abuse on every batch of
-        traffic, plus one passive agent that recognises known bad IPs
-        across your history but does not vote on its own. Clew combines all
-        six scores into one verdict. Some older material rounds this up to
+        Up to six agents look for a different kind of abuse in each batch of
+        traffic, depending on what the batch looks like, plus one passive
+        agent that recognises known bad IPs across your history but does not
+        vote on its own. Clew combines the scores of the agents that ran into
+        one verdict. Some older material rounds this up to
         &quot;seven agents&quot;, that is imprecise: six are active.
       </p>
       <div style={tableWrapStyle}>
@@ -286,6 +289,18 @@ export default function DocsPage() {
           </tbody>
         </table>
       </div>
+      <p style={legalPStyle}>
+        <strong>IP reputation.</strong> When at least one agent finds
+        something in a batch of traffic, Clew checks the main IP in that
+        batch against AbuseIPDB, a public reputation service, even if the
+        batch ends with no verdict. If the IP is listed with a high abuse
+        score, the confidence of the finding rises by 0.08 and the
+        explanation says so, which can lift a borderline finding over the
+        detection line. Reputation never creates a detection on its own,
+        because an agent must have found something first. Only the IP
+        address is sent, private addresses are never looked up, and if the
+        service is unavailable Clew carries on without it.
+      </p>
 
       <h2 style={legalH2Style} id="threat-explanations">
         8. Threat explanations
@@ -320,8 +335,11 @@ export default function DocsPage() {
       <p style={legalPStyle}>
         Manual blocking, a button on a verdict or a form to block an IP
         directly, is available from the Basic plan up. Automatic blocking,
-        where Clew blocks the moment a high or critical threat is detected
-        with no click required, is available from Growth up. Both push to
+        where Clew blocks without a click, is available from Growth up. It
+        is off until you turn it on in Settings (after accepting the
+        Blocking Agreement), and it only blocks verdicts at or above your
+        block confidence, 0.75 by default, so some high verdicts are shown
+        but not blocked. Both push to
         AWS WAF and Cloudflare, whichever you configure in{" "}
         <Link href={`${DASHBOARD_URL}/settings#waf`} style={linkStyle}>
           Settings → WAF Configuration
@@ -403,6 +421,14 @@ export default function DocsPage() {
         scanned. Scanning resumes on live traffic when your monthly counter
         resets or you upgrade to a plan with more volume. There is no overage
         charge, and a volume top-up for the same plan is not offered.
+      </p>
+      <p style={legalPStyle}>
+        <strong>Pausing scanning yourself.</strong> An owner or admin can pause
+        scanning from Settings, under Scanning. While paused, Clew reads no new
+        logs, and the dashboard header shows when the pause started. When you
+        resume, logs written during the pause are skipped and scanning
+        continues from new logs. Saved verdicts, blocking rules, alerts for
+        earlier findings, your account and billing are not affected.
       </p>
       <p style={legalPStyle}>
         <strong>How billing works.</strong> Clew bills first and you pay

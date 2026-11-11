@@ -52,11 +52,17 @@ celery_app.conf.update(
     # Result TTL — keep results for 24 h for debugging, then evict
     result_expires=86_400,
 
-    # Beat schedule — polled from beat.py via beat_schedule attr
+    # Beat schedule: set by workers/beat.py, imported below.
 )
 
 # Registers the task_postrun handler behind the ops panel's last-run times.
 import workers.task_runs  # noqa: E402,F401
+
+# Phase 14 (F-001): load the beat schedule with the app. Every beat command
+# in the repo is `celery -A workers.celery_app beat`, and nothing else imports
+# workers/beat.py, so without this line beat started with an empty schedule
+# and no periodic task ever ran.
+import workers.beat  # noqa: E402,F401
 
 
 # Phase 11 error tracking. Both handlers are best effort (api.analytics never

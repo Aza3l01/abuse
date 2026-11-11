@@ -22,18 +22,8 @@ export default function sitemap(): MetadataRoute.Sitemap {
       changeFrequency: "monthly",
       priority: 0.8,
     },
-    {
-      url: `${base}/register`,
-      lastModified: new Date(),
-      changeFrequency: "yearly",
-      priority: 0.7,
-    },
-    {
-      url: `${base}/login`,
-      lastModified: new Date(),
-      changeFrequency: "yearly",
-      priority: 0.5,
-    },
+    // /register and /login answer 307 to the dashboard host, so they are not
+    // listed here (Phase 14, F-035). A sitemap lists final URLs only.
     // Item 12c, /legal/* routes. /demo is in the footer's planned link
     // list too but has no page in this codebase yet, left out of the
     // sitemap until it exists. /docs (above) now has a real page.

@@ -24,6 +24,7 @@ from api.auth_utils import encrypt_secret
 from api.aws import CLEW_AWS_ACCOUNT_ID, AWSAccessError, aws_session_for_org
 from api.detection_config import validate_detection_config
 from api.tiers import AUTO_BLOCK_TIERS, CUSTOM_THRESHOLD_TIERS, MANUAL_BLOCK_TIERS
+from api.validation import clean_email, clean_text
 from db.models import Organization
 
 router = APIRouter()
@@ -89,6 +90,8 @@ class OrgConfig(BaseModel):
     last_scan_completed_at: Optional[datetime]
     last_scan_status:       Optional[str]
     last_scan_error:        Optional[str]
+    # Phase 12b: customer pause of scanning (None = running)
+    scanning_paused_at:     Optional[datetime] = None
     # Alerts
     alert_email:              Optional[str]
     alert_severity_threshold: str
@@ -269,6 +272,7 @@ def _to_org_config(org: Organization, role: str) -> OrgConfig:
         last_scan_completed_at=org.last_scan_completed_at,
         last_scan_status=org.last_scan_status,
         last_scan_error=org.last_scan_error,
+        scanning_paused_at=org.scanning_paused_at,
         alert_email=org.alert_email,
         alert_severity_threshold=org.alert_severity_threshold,
         waf_ip_set_id=org.waf_ip_set_id,
@@ -317,6 +321,19 @@ async def update_me(
     if not update_data:
         raise HTTPException(status_code=422, detail="No fields to update.")
 
+    # Phase 14 (F-028): text fields are checked here, as a 422 with a plain
+    # message, instead of crashing on the column length (a 500). An empty alert
+    # email stays allowed: it clears the address.
+    if "alert_email" in update_data:
+        raw_email = update_data["alert_email"].strip()
+        update_data["alert_email"] = clean_email(raw_email, "Alert email") if raw_email else ""
+    for field, label in (
+        ("s3_prefix", "S3 prefix"),
+        ("waf_ip_set_id", "WAF IP set ID"),
+        ("cloudflare_zone_id", "Cloudflare zone ID"),
+    ):
+        if field in update_data:
+            update_data[field] = clean_text(update_data[field], label, 255, required=False)
     _ALLOWED_FIELDS = {
         "s3_bucket", "s3_prefix", "log_format", "aws_region",
         "alert_email", "alert_severity_threshold",
@@ -397,7 +414,11 @@ async def update_me(
     # Item 22: a successful S3 save immediately queues the first real scan,
     # separate from the silent calibration pass above (that only warms LTM
     # thresholds, it never writes verdicts).
-    if s3_fields_touched and org.s3_status == "connected" and org.log_format:
+    # Phase 14 (F-019): the documented order is bucket first, role ARN last, and
+    # the ARN save is the one that finally connects. So an ARN save also queues
+    # the first scan while no scan has ever completed.
+    first_scan_pending = "aws_role_arn" in update_data and org.last_scan_completed_at is None
+    if (s3_fields_touched or first_scan_pending) and org.s3_status == "connected" and org.log_format:
         from workers.tasks.process_logs import process_logs
         process_logs.delay(org.id)
 

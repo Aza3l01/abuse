@@ -48,6 +48,22 @@ def _rate_limit_handler(request: Request, exc: RateLimitExceeded) -> JSONRespons
 
 app.add_exception_handler(RateLimitExceeded, _rate_limit_handler)
 
+
+@app.exception_handler(ValueError)
+def _nul_character_handler(request: Request, exc: ValueError) -> JSONResponse:
+    """Phase 14 (F-027): Postgres cannot store a NUL (0x00) character in text,
+    and psycopg2 raises ValueError("A string literal cannot contain NUL ...")
+    the moment a query carries one. Any string input (a login email, a search
+    box, a query parameter) could trigger it, so anonymous callers could make
+    500s at will. Answer 422 like any other bad input. Every other
+    ValueError is a real bug and keeps its 500 and correlation id."""
+    if "NUL" in str(exc) and "0x00" in str(exc):
+        return JSONResponse(
+            status_code=422,
+            content={"detail": "Input contains a character that is not allowed."},
+        )
+    raise exc
+
 # ------------------------------------------------------------------
 # CORS — allow the frontend origin (and its www variant)
 # ------------------------------------------------------------------

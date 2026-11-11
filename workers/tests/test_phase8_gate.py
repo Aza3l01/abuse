@@ -46,7 +46,7 @@ class FakeReader:
             yield "logs/a", f"line{i}"
 
 
-def _runner_class(confidence: float, endpoint: str = "/api/login"):
+def _runner_class(confidence: float, endpoint: str = "/api/login", agents: tuple = ("AuthAgent",)):
     class FakeRunner:
         def __init__(self, *args, **kwargs):
             self.kwargs = kwargs
@@ -56,7 +56,7 @@ def _runner_class(confidence: float, endpoint: str = "/api/login"):
             return {
                 "is_attack": True, "ip": "198.51.100.7", "method": "POST", "endpoint": endpoint,
                 "threat_type": "BRUTE_FORCE", "severity": "high", "confidence": confidence,
-                "agents_triggered": ["AuthAgent"], "explanation": "x", "cost_prevented": 0.0,
+                "agents_triggered": list(agents), "explanation": "x", "cost_prevented": 0.0,
             }
 
         def flush(self):
@@ -77,8 +77,8 @@ def run_task(db, session_factory, monkeypatch):
     monkeypatch.setattr(pl, "_build_intel_client", lambda redis_conn: None)
     monkeypatch.setattr(push_blocks.push_block, "delay", lambda *args: pushed.append(args))
 
-    def go(org, confidence=0.9, endpoint="/api/login"):
-        monkeypatch.setattr(pl, "PipelineRunner", _runner_class(confidence, endpoint))
+    def go(org, confidence=0.9, endpoint="/api/login", agents=("AuthAgent",)):
+        monkeypatch.setattr(pl, "PipelineRunner", _runner_class(confidence, endpoint, agents))
         result = pl.process_logs(org.id)
         assert result["status"] == "ok", result
         db.expire_all()
@@ -172,4 +172,24 @@ def test_endpoint_minimum_keeps_a_stronger_detection(db, run_task):
     org = _org(db, tier="pro", detection_config={"endpoint_thresholds": [{"pattern": "/api/login", "min_confidence": 0.85}]})
     pushed, verdicts = run_task(org, confidence=0.90)
     assert len(verdicts) == 1
+    assert len(pushed) == 1
+
+
+# Phase 14 (F-014): a verdict whose only evidence is GeoIPAgent is alert-only.
+
+def test_a_geoip_only_verdict_is_never_auto_blocked_but_is_still_recorded(db, run_task):
+    pushed, verdicts = run_task(_org(db), confidence=0.80, agents=("GeoIPAgent",))
+    assert len(verdicts) == 1
+    assert pushed == []
+    assert verdicts[0].would_have_blocked_at is None
+
+
+def test_a_geoip_only_verdict_is_not_stamped_by_dry_run(db, run_task):
+    pushed, verdicts = run_task(_org(db, auto_block_dry_run=True), confidence=0.80, agents=("GeoIPAgent",))
+    assert pushed == []
+    assert verdicts[0].would_have_blocked_at is None
+
+
+def test_a_verdict_with_geoip_plus_another_agent_still_auto_blocks(db, run_task):
+    pushed, verdicts = run_task(_org(db), confidence=0.80, agents=("GeoIPAgent", "AuthAgent"))
     assert len(pushed) == 1

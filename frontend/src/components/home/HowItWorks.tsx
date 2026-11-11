@@ -7,7 +7,7 @@ const STEPS = [
   {
     number: "02",
     heading: "Agents detect. Orchestrator decides.",
-    body: "Six specialised AI agents run in parallel against every log batch, each trained on a different threat class. A meta-agent orchestrator fuses their confidence signals into a single verdict, independently validated on real-world attack datasets.",
+    body: "Up to six specialised AI agents run in parallel on each log batch, depending on what the batch looks like, each tuned to a different threat class. A meta-agent orchestrator fuses their confidence signals into a single verdict, independently validated on real-world attack datasets.",
   },
   {
     number: "03",

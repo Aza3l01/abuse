@@ -1,10 +1,15 @@
 "use client";
 
-import { useState, Suspense } from "react";
+import { useRef, useState, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { AuthLayout, inputStyle, labelStyle, primaryBtnStyle } from "@/components/auth/AuthLayout";
+import { Turnstile, type TurnstileHandle } from "@/components/auth/Turnstile";
 import { API_URL } from "@/lib/api";
+
+// Shown when the widget never produced a token (usually a script blocker).
+const CAPTCHA_MISSING =
+  "Complete the CAPTCHA before signing in. If the check does not appear, a script blocker or privacy extension may be stopping it: allow challenges.cloudflare.com for this site and reload the page.";
 
 // ── Component ──────────────────────────────────────────────────────────────
 
@@ -21,6 +26,8 @@ function LoginForm() {
   const [password, setPassword] = useState("");
   const [error,    setError]    = useState("");
   const [loading,  setLoading]  = useState(false);
+  const [captchaToken, setCaptchaToken] = useState("");
+  const captchaRef = useRef<TurnstileHandle>(null);
 
   // MFA second-factor state
   const [mfaStep,       setMfaStep]       = useState(false);
@@ -31,13 +38,17 @@ function LoginForm() {
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError("");
+    if (!captchaToken) {
+      setError(CAPTCHA_MISSING);
+      return;
+    }
     setLoading(true);
     try {
       const res = await fetch(`${API_URL}/auth/login`, {
         method: "POST",
         credentials: "include",  // send + receive cookies cross-origin
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ email, password, captcha_token: captchaToken }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -45,16 +56,20 @@ function LoginForm() {
           router.push(`/verify-email?email=${encodeURIComponent(email)}`);
           return;
         }
+        // A token is single use: every failed attempt needs a fresh challenge.
+        captchaRef.current?.reset();
         setError(data.detail ?? "Sign in failed.");
         return;
       }
       if (data.code === "MFA_REQUIRED") {
+        setCaptchaToken("");
         setMfaToken(data.mfa_token);
         setMfaStep(true);
         return;
       }
       router.push(next);
     } catch {
+      captchaRef.current?.reset();
       setError("Could not connect to the server. Try again.");
     } finally {
       setLoading(false);
@@ -186,6 +201,8 @@ function LoginForm() {
             style={inputStyle}
           />
         </div>
+
+        <Turnstile ref={captchaRef} onToken={setCaptchaToken} />
 
         {error && (
           <p style={{ fontSize: "13px", color: "#E53E3E", margin: 0 }}>{error}</p>

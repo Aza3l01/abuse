@@ -23,6 +23,9 @@ _COUNTER_PREFIX = "clew:abuseipdb:count:"
 DEFAULT_DAILY_CAP = 900
 DEFAULT_CACHE_TTL_SECONDS = 24 * 3600
 _FAILURE_CACHE_TTL_SECONDS = 300
+# After this many network failures in a row the client stops calling out, so an
+# AbuseIPDB outage cannot add a timeout to every batch.
+_MAX_CONSECUTIVE_FAILURES = 3
 KNOWN_BAD_MIN_SCORE = 75
 
 
@@ -45,6 +48,7 @@ class AbuseIpdbClient:
         self._local_cache: dict[str, Optional[int]] = {}
         self._local_counts: dict[str, int] = {}
         self.network_calls = 0
+        self._consecutive_failures = 0
 
     @staticmethod
     def _is_public(ip: str) -> bool:
@@ -99,6 +103,8 @@ class AbuseIpdbClient:
         cached, score = self._cache_get(ip)
         if cached:
             return score
+        if self._consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
+            return None
         if not self._under_cap():
             return None
         getter = self._http_get
@@ -117,8 +123,10 @@ class AbuseIpdbClient:
             score = int(resp.json()["data"]["abuseConfidenceScore"])
         except Exception as exc:
             logger.warning("AbuseIPDB: lookup failed for %s: %s", ip, type(exc).__name__)
+            self._consecutive_failures += 1
             self._cache_set(ip, None, _FAILURE_CACHE_TTL_SECONDS)
             return None
+        self._consecutive_failures = 0
         self._cache_set(ip, score, self._ttl)
         return score
 

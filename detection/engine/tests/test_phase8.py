@@ -245,6 +245,72 @@ def test_abuseipdb_known_bad_threshold():
     assert AbuseIpdbClient("k", http_get=_Http(fail=True)).is_known_bad("8.8.4.4") is None
 
 
+def test_abuseipdb_stops_calling_out_after_repeated_failures():
+    http = _Http(fail=True)
+    c = AbuseIpdbClient("key", http_get=http)
+    for ip in ("8.8.4.4", "8.8.8.8", "1.1.1.1", "9.9.9.9", "4.4.4.4"):
+        assert c.lookup(ip) is None
+    assert len(http.calls) == 3
+
+
+def test_abuseipdb_failure_streak_resets_after_a_success():
+    class _Flaky(_Http):
+        def __call__(self, url, params=None, headers=None, timeout=None):
+            self.fail = len(self.calls) % 3 != 2
+            return super().__call__(url, params=params, headers=headers, timeout=timeout)
+
+    http = _Flaky()
+    c = AbuseIpdbClient("key", http_get=http)
+    ips = ("8.8.4.4", "8.8.8.8", "1.1.1.1", "9.9.9.9", "4.4.4.4", "208.67.222.222")
+    for ip in ips:
+        c.lookup(ip)
+    assert len(http.calls) == len(ips)
+
+
+# ---------------------------------------------------------------------------
+# Live reputation in fusion
+# ---------------------------------------------------------------------------
+
+class _Intel:
+    def __init__(self, bad=True):
+        self.bad, self.asked = bad, []
+
+    def is_known_bad(self, ip):
+        self.asked.append(ip)
+        return self.bad
+
+
+def test_reputation_boosts_a_detected_attack_and_says_so():
+    base = PipelineRunner(ORG).run(_brute_force())
+    intel = _Intel(bad=True)
+    flagged = PipelineRunner(ORG, intel_client=intel).run(_brute_force())
+    assert base["is_attack"] and flagged["is_attack"]
+    assert intel.asked == ["198.51.100.1"]
+    assert flagged["confidence"] >= base["confidence"]
+    assert flagged["confidence"] <= min(1.0, base["confidence"] + 0.08) + 1e-6
+    assert "flagged by AbuseIPDB" in flagged["explanation"]
+    assert "flagged by AbuseIPDB" not in base["explanation"]
+
+
+def test_reputation_not_flagged_changes_nothing():
+    base = PipelineRunner(ORG).run(_brute_force())
+    clean = PipelineRunner(ORG, intel_client=_Intel(bad=False)).run(_brute_force())
+    assert {k: base[k] for k in _COMPARE} == {k: clean[k] for k in _COMPARE}
+
+
+def test_reputation_unknown_answer_changes_nothing():
+    base = PipelineRunner(ORG).run(_brute_force())
+    unknown = PipelineRunner(ORG, intel_client=_Intel(bad=None)).run(_brute_force())
+    assert {k: base[k] for k in _COMPARE} == {k: unknown[k] for k in _COMPARE}
+
+
+def test_reputation_is_never_looked_up_for_clean_traffic():
+    intel = _Intel(bad=True)
+    verdict = PipelineRunner(ORG, intel_client=intel).run(_clean())
+    assert verdict["is_attack"] is False
+    assert intel.asked == []
+
+
 # ---------------------------------------------------------------------------
 # PipelineRunner and customer tuning
 # ---------------------------------------------------------------------------
